@@ -2,41 +2,89 @@
   "schemaVersion": 1,
   "note": "합성 사용 예제. 일괄 실행 스크립트가 아니다. 실제 사용 시 각 calls 항목의 arguments만 사용하고 ID·프로젝트·검증 기록을 실제 값으로 바꾼다. complete와 fail은 대안이며 모두 호출하지 않는다.",
   "calls": {
-    "registerCodex": {"name":"register_agent","arguments":{"name":"MVP Codex","toolType":"codex","role":"발신 프로젝트 담당"}},
-    "registerClaude": {"name":"register_agent","arguments":{"name":"MVP Claude","toolType":"claude_code","role":"수신 프로젝트 담당"}},
-    "listAgents": {"name":"list_agents","arguments":{}},
+    "registerCodex": {
+      "name": "register_agent",
+      "arguments": {
+        "name": "MVP Codex",
+        "toolType": "codex"
+      }
+    },
+    "registerClaude": {
+      "name": "register_agent",
+      "arguments": {
+        "name": "MVP Claude",
+        "toolType": "claude_code"
+      }
+    },
+    "listAgents": {
+      "name": "list_agents",
+      "arguments": {}
+    },
     "create": {
-      "name":"create_task",
-      "arguments":{
-        "recipientAgentId":"agent-claude-example",
-        "title":"로그인 이메일 형식 검사 추가",
-        "description":"목적: 잘못된 이메일 제출을 막는다. 변경 요구: 공백을 제거한 이메일에 @가 없으면 안내 문구를 표시하고 제출하지 않는다. 완료 기준: 정상 이메일 제출 동작은 유지한다.",
-        "taskContext":"수신 프로젝트: 사용자가 연 client 저장소. 관련 파일: src/utils/validate.ts, src/components/LoginForm.tsx. API: POST /auth/login, 형식 오류이면 호출하지 않는다. 근거: 합의한 로그인 입력 명세. 검증: 프로젝트의 기존 로그인 테스트를 확인해 실행하고 결과를 기록한다. 범위: 기존 사용자 변경 보존, 인증 API·의존성·배포 설정 변경 제외."
+      "name": "create_task",
+      "arguments": {
+        "recipientAgentId": "202",
+        "title": "로그인 이메일 형식 검사 추가",
+        "description": "목적: 잘못된 이메일 제출을 막는다. 변경 요구: 공백을 제거한 이메일에 @가 없으면 안내 문구를 표시하고 제출하지 않는다. 완료 기준: 정상 이메일 제출 동작은 유지한다.",
+        "taskContext": "수신 프로젝트: 사용자가 연 client 저장소. 관련 파일: src/utils/validate.ts, src/components/LoginForm.tsx. API: POST /auth/login, 형식 오류이면 호출하지 않는다. 근거: 합의한 로그인 입력 명세. 검증: 프로젝트의 기존 로그인 테스트를 확인해 실행하고 결과를 기록한다. 범위: 기존 사용자 변경 보존, 인증 API·의존성·배포 설정 변경 제외."
       }
     },
-    "received":{"name":"get_tasks","arguments":{"direction":"received","status":"PENDING","limit":20}},
-    "accept":{"name":"update_task_status","arguments":{"taskId":"task-example-65","status":"IN_PROGRESS"}},
-    "complete":{
-      "name":"complete_task",
-      "arguments":{
-        "taskId":"task-example-65",
-        "result":{
-          "summary":"이메일 공백 제거와 @ 누락 안내를 추가하고 정상 제출 동작을 유지했습니다.",
-          "changedFiles":["src/utils/validate.ts","src/components/LoginForm.tsx"],
-          "verification":"예제 기록: 프로젝트의 로그인 테스트 3개 통과. 실제 등록 시 실행한 명령·결과와 미실행 항목으로 교체합니다."
-        }
+    "received": {
+      "name": "get_tasks",
+      "arguments": {
+        "direction": "received",
+        "status": "PENDING",
+        "limit": 20
       }
     },
-    "fail":{
-      "name":"update_task_status",
-      "arguments":{
-        "taskId":"task-example-65",
-        "status":"FAILED",
-        "reason":"예제: 이메일 검사 일부를 수정했지만 로그인 테스트에서 정상 제출 회귀가 확인되어 완료하지 못했습니다. src/utils/validate.ts에 부분 변경이 남아 있으며 기존 사용자 변경은 되돌리지 않았습니다.",
-        "partiallyModified":true
+    "accept": {
+      "name": "update_task_status",
+      "arguments": {
+        "taskId": "101",
+        "status": "IN_PROGRESS",
+        "version": "0"
       }
     },
-    "sent":{"name":"get_tasks","arguments":{"direction":"sent","limit":20}},
-    "detail":{"name":"get_task_result","arguments":{"taskId":"task-example-65"}}
+    "complete": {
+      "name": "complete_task",
+      "arguments": {
+        "taskId": "101",
+        "version": "1",
+        "resultText": "이메일 공백 제거와 @ 누락 안내를 추가하고 정상 제출 동작을 유지했습니다.\n검증: 예제 기록: 프로젝트의 로그인 테스트 3개 통과. 실제 등록 시 실행한 명령·결과와 미실행 항목으로 교체합니다.",
+        "taskFiles": [
+          {
+            "relativePath": "src/utils/validate.ts",
+            "changeType": "MODIFIED"
+          },
+          {
+            "relativePath": "src/components/LoginForm.tsx",
+            "changeType": "MODIFIED"
+          }
+        ]
+      }
+    },
+    "fail": {
+      "name": "update_task_status",
+      "arguments": {
+        "taskId": "101",
+        "status": "FAILED",
+        "partiallyModified": true,
+        "version": "1",
+        "failureReason": "예제: 이메일 검사 일부를 수정했지만 로그인 테스트에서 정상 제출 회귀가 확인되어 완료하지 못했습니다. src/utils/validate.ts에 부분 변경이 남아 있으며 기존 사용자 변경은 되돌리지 않았습니다."
+      }
+    },
+    "sent": {
+      "name": "get_tasks",
+      "arguments": {
+        "direction": "sent",
+        "limit": 20
+      }
+    },
+    "detail": {
+      "name": "get_task_result",
+      "arguments": {
+        "taskId": "101"
+      }
+    }
   }
 }

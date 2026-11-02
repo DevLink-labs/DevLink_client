@@ -365,6 +365,8 @@ impl Fixture {
         let path = dir.path().join(name);
         config::init(&path).unwrap();
         let mut config = Config::load(&path).unwrap();
+        // Local lifecycle fixtures must never inherit the production default URL.
+        config.server_url = "ws://127.0.0.1:9".into();
         config.local_port = 0;
         config.reconnect_initial_ms = 50;
         config.reconnect_max_ms = 100;

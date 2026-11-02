@@ -1,15 +1,22 @@
 import { z } from 'zod';
 import type { BrokerClient } from '../broker/client.js';
 import type { BrokerOperation } from '../broker/contracts.js';
+import { identifierSchema } from '../broker/schemas.js';
 import { defineTool, type RegisteredDefinition } from './registry.js';
 
 const id = z.string().trim().min(1).max(128);
-const text = z.string().trim().min(1).max(16_000);
-const taskStatus = z.enum(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED']);
+// Keep provider text verbatim; use trimming only to reject whitespace-only input.
+const providerText = z.string().min(1).refine((value) => value.trim().length > 0, 'Text must not be blank.');
+const version = z.union([
+  z.string().regex(/^(0|[1-9][0-9]*)$/).max(19).refine((value) => value.length <= 19 && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 9_223_372_036_854_775_807n, 'Version must fit Java Long.'),
+  z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+]);
+const requestKey = identifierSchema.refine((value) => value.length <= 64, 'Request key exceeds 64 UTF-16 units.').meta({ maxLength: 64 }).optional();
+const taskStatus = z.enum(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'REJECTED']);
 const brokerOutput = z.strictObject({ requestId: z.string(), mcpRequestId: z.union([z.string(), z.number()]).optional(),
   requestKey: z.string().optional(), data: z.record(z.string(), z.unknown()) });
 
-/** Draft DTOs until the currently empty Notion API templates are agreed with tool owners. */
+/** S15P31D108-97: consume the central contract exposed by the Rust adapters. */
 export function businessTools(broker: Pick<BrokerClient, 'execute'>): RegisteredDefinition[] {
   function tool<S extends z.ZodObject>(name: BrokerOperation, description: string, inputSchema: S, readOnly = false) {
     return defineTool({ name, description, inputSchema, outputSchema: brokerOutput,
@@ -18,26 +25,34 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
     });
   }
   return [
-    tool('register_agent', 'Register this agent for the authenticated user/team, then bind its local session. Call before business tools on a new installation.', z.strictObject({
-      name: z.string().trim().min(1).max(100), toolType: z.enum(['codex', 'claude_code']), role: z.string().trim().min(1).max(500).optional(),
+    tool('register_agent', 'Confirm the existing CLI-created agent and bind its local MCP session. name and toolType must exactly match the CLI agent; omit role unless it exactly matches its roleDescription. This does not create or update a central agent.', z.strictObject({
+      name: providerText.max(100), toolType: z.enum(['codex', 'claude_code']), role: providerText.max(500).optional(),
     })),
     tool('list_agents', 'List agents visible to the authenticated team. Does not accept or complete tasks.', z.strictObject({}), true),
     tool('create_task', 'Request work from a recipient agent. A delivery failure is separate from the central task status. Timeout does not cancel the task; do not blindly resend.', z.strictObject({
-      recipientAgentId: id, title: z.string().trim().min(1).max(200), description: text, taskContext: text.optional(),
+      recipientAgentId: id, title: providerText.max(200), description: providerText.max(16_000), taskContext: providerText.max(16_000).optional(),
     })),
-    tool('update_task_status', 'Request a central task transition to IN_PROGRESS or FAILED. Use complete_task for completion. A failure reason is required for FAILED.', z.strictObject({
-      taskId: id, status: z.enum(['IN_PROGRESS', 'FAILED']), reason: text.optional(), partiallyModified: z.boolean().optional(),
+    tool('update_task_status', 'Request IN_PROGRESS or FAILED using the version returned by get_task_result. FAILED requires failureReason and partiallyModified. Never guess a version or automatically retry a conflict.', z.strictObject({
+      taskId: id, version, status: z.enum(['IN_PROGRESS', 'FAILED']), failureReason: providerText.optional(), partiallyModified: z.boolean().optional(), requestKey,
     }).superRefine((args, ctx) => {
-      if (args.status === 'FAILED' && !args.reason) ctx.addIssue({ code: 'custom', path: ['reason'], message: 'A failure reason is required.' });
+      if (args.status === 'FAILED') {
+        if (!args.failureReason) ctx.addIssue({ code: 'custom', path: ['failureReason'], message: 'A failure reason is required.' });
+        if (args.partiallyModified === undefined) ctx.addIssue({ code: 'custom', path: ['partiallyModified'], message: 'Explicit partial modification status is required.' });
+      } else if (args.failureReason !== undefined || args.partiallyModified !== undefined) {
+        ctx.addIssue({ code: 'custom', message: 'IN_PROGRESS does not accept failure fields.' });
+      }
     })),
-    tool('complete_task', 'Submit a task result to the central server. The server checks ownership and allowed state transitions.', z.strictObject({
-      taskId: id,
-      result: z.strictObject({ summary: text, changedFiles: z.array(z.string().min(1).max(1024)).max(500).optional(), verification: text.optional() }),
+    tool('complete_task', 'Complete an accepted task using its current version and resultText. taskFiles is optional; omitted or null is stored as an empty file list by the server. Include the summary and actual verification commands/results in resultText; the server has no separate verification field. Do not invent file changes or retry a conflict.', z.strictObject({
+      taskId: id, version, resultText: providerText,
+      taskFiles: z.array(z.strictObject({
+        relativePath: providerText.max(500), changeType: z.enum(['ADDED', 'MODIFIED', 'DELETED', 'RENAMED']),
+        diffText: z.string().nullable().optional(),
+      })).nullable().optional(), requestKey,
     })),
     tool('get_tasks', 'Read sent or received tasks without accepting or changing them.', z.strictObject({
       direction: z.enum(['sent', 'received']).default('received'), status: taskStatus.optional(),
       limit: z.number().int().min(1).max(100).default(20), cursor: z.string().min(1).max(512).optional(),
     }), true),
-    tool('get_task_result', 'Read a task result without changing its state.', z.strictObject({ taskId: id }), true),
+    tool('get_task_result', 'Read task context, current version, resultText, taskFiles and events without changing its state.', z.strictObject({ taskId: id, requestKey }), true),
   ];
 }

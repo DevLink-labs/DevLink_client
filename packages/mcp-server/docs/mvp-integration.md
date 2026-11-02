@@ -69,7 +69,7 @@ node packages/mcp-server/scripts/verify-rust-readiness.mjs --cli $integrationCli
 3. 각 사용자 환경에서 준비 상태 JSON을 수집한다. 건강한 중앙 연결과 실제 세션/업무 API의 통합 확인이 선행되어야 한다. 준비 상태 검사 자체로 수용 기준을 통과시키지 않는다.
 4. 각 Host에 [수락·결과 등록 지침](agent-workflow.md)과 실제 개인 프로필을 적용한다. 사용자가 선택한 수신자를 `list_agents`로 확인하고, 업무 요청에 실제 프로젝트의 작은 변경(예: 함수 추가와 해당 테스트)을 명시한다. MCP는 직접 파일을 고치지 않으며 수신 Host가 명시적 사용자 수락 후 수행한다.
 5. A→B에서 `create_task` 응답의 requestId/requestKey/taskId와 저장·전달 결과를 기록한다. B의 수신 목록/detail에 PENDING이 보이며 수락 전 파일 diff가 없는지 확인한다. B 사용자가 수락한 뒤 `update_task_status(IN_PROGRESS)`를 호출하고 실제 프로젝트에서 편집·테스트한 후 `complete_task`에 실제 변경 파일·요약·검증 결과를 등록한다. A에서 `get_tasks`, `get_task_result`로 동일 taskId의 COMPLETED와 실제 diff/테스트 결과가 일치하는지 확인한다.
-6. B→A도 별도 taskId로 수행한다. 각 프로젝트의 변경 전후 커밋 또는 diff, 실행 명령·종료 코드·관측값을 보존한다. 미실행 테스트를 통과로 기록하지 않는다. 실패·부분 수정 시 FAILED 전이에 reason/partiallyModified를 기록하고 발신자 조회까지 확인한다.
+6. B→A도 별도 taskId로 수행한다. 각 프로젝트의 변경 전후 커밋 또는 diff, 실행 명령·종료 코드·관측값을 보존한다. 미실행 테스트를 통과로 기록하지 않는다. 실패·부분 수정 시 FAILED 전이에 failureReason/partiallyModified를 기록하고 발신자 조회까지 확인한다.
 7. 아래 부정 시나리오는 전용 테스트 데이터·제어 가능한 지연/전달 장애로 실행한다. MCP `create_task`는 caller 지정 requestKey를 노출하지 않고 `get_tasks`도 requestId/requestKey 검색을 지원하지 않는다. 중복 재현은 중앙/브로커 담당자가 같은 키를 재사용할 수 있는 통합 시험 계층과 DB 확인 수단을 제공해야 한다. 재시도에 새 키가 생성되는 Host 호출을 중복 검증으로 세지 않는다.
 
 ## 수용 기준과 증거 양식
@@ -78,8 +78,8 @@ node packages/mcp-server/scripts/verify-rust-readiness.mjs --cli $integrationCli
 
 | ID | 재현·예상 결과 | 필수 증거 |
 | --- | --- | --- |
-| AC1-A / AC1-B | A→B / B→A 요청→명시적 수락→실제 편집·테스트→완료→발신자 조회 | 각 방향 requestId/requestKey/taskId, 실제 diff, changedFiles·summary·verification과 조회 일치 |
-| AC2 | 부분 파일 수정 후 테스트 실패→FAILED 등록→발신자 조회 | reason, partiallyModified, 실제 남은 diff와 실패 명령/종료 코드 |
+| AC1-A / AC1-B | A→B / B→A 요청→명시적 수락→실제 편집·테스트→완료→발신자 조회 | 각 방향 requestId/requestKey/taskId, 실제 diff, resultText(요약·검증)·taskFiles(유형·diff)과 조회 일치 |
+| AC2 | 부분 파일 수정 후 테스트 실패→FAILED 등록→발신자 조회 | failureReason, partiallyModified, 실제 남은 diff와 실패 명령/종료 코드 |
 | AC3 | 수락 전 PENDING, 수락 후 IN_PROGRESS, 종료 후 COMPLETED 또는 FAILED | 각 시점 조회·파일 diff, 수락 시각. 미수락 동안 로컬 변경 없음 |
 | AC4 | 교차 팀·존재하지 않는 수신자·offline 수신자에 각각 요청 | 정책 오류, 신규 task/이벤트/전달 없음(DB·중앙 관측). 동일 팀 정상 기준과 비교 |
 | AC5 | 저장 후 전달만 실패하도록 제어 | saved=true 및 전달 실패, 동일 taskId PENDING 유지, 지정 관찰 구간 동안 자동 재전달 없음 |

@@ -7,8 +7,9 @@ export type FaultCode =
   | 'AGENT_UNREGISTERED' | 'CREDENTIAL_FILE_INVALID' | 'CLIENT_CLOSED'
   | 'REQUEST_ABORTED' | 'BROKER_CONTEXT_INVALID' | 'SESSION_CONTEXT_CHANGED' | 'CALLER_CONTEXT_OVERRIDE'
   | 'CENTRAL_UNAUTHENTICATED' | 'VALIDATION_FAILED' | 'RECEIVER_NOT_FOUND' | 'RECEIVER_OFFLINE'
-  | 'TASK_NOT_FOUND' | 'TASK_STATE_CONFLICT' | 'TASK_SAVE_FAILED'
-  | 'CENTRAL_UNAVAILABLE' | 'CENTRAL_TIMEOUT' | 'TOOL_EXECUTION_FAILED';
+  | 'TASK_NOT_FOUND' | 'TASK_STATE_CONFLICT' | 'TASK_VERSION_CONFLICT' | 'TASK_SAVE_FAILED'
+  | 'RESOURCE_NOT_FOUND' | 'REQUEST_KEY_CONFLICT' | 'BROKER_STORAGE_FAILED'
+  | 'CENTRAL_UNAVAILABLE' | 'CENTRAL_TIMEOUT' | 'CENTRAL_PROTOCOL_ERROR' | 'CENTRAL_RESULT_UNKNOWN' | 'TOOL_EXECUTION_FAILED';
 export type FaultCategory = 'input' | 'authentication' | 'session' | 'transport' | 'protocol' | 'domain' | 'internal';
 export type Outcome = 'unknown' | 'rejected';
 export type Correlation = { requestKey?: string; taskId?: string; mcpRequestId?: string | number };
@@ -39,9 +40,15 @@ const definitions: Record<FaultCode, readonly [FaultCategory, Outcome, string]> 
   RECEIVER_OFFLINE: ['domain', 'rejected', 'The recipient is offline.'],
   TASK_NOT_FOUND: ['domain', 'rejected', 'The requested task does not exist.'],
   TASK_STATE_CONFLICT: ['domain', 'rejected', 'The task does not allow this state transition.'],
+  TASK_VERSION_CONFLICT: ['domain', 'rejected', 'The task version changed. Read its current state before deciding on another update.'],
   TASK_SAVE_FAILED: ['domain', 'rejected', 'The server reported a task storage failure. Check the request outcome.'],
+  RESOURCE_NOT_FOUND: ['domain', 'rejected', 'The requested resource does not exist or is not visible.'],
+  REQUEST_KEY_CONFLICT: ['domain', 'rejected', 'The request key conflicts with another request. Preserve the known key and check the reported outcome.'],
+  BROKER_STORAGE_FAILED: ['domain', 'rejected', 'The broker could not save the request before sending it. Check local storage before deciding on another request.'],
   CENTRAL_UNAVAILABLE: ['transport', 'unknown', 'The central server is unavailable; the business outcome is unknown.'],
   CENTRAL_TIMEOUT: ['transport', 'unknown', 'The central server response timed out; the business outcome is unknown.'],
+  CENTRAL_PROTOCOL_ERROR: ['protocol', 'unknown', 'The central server response does not match the contract; the business outcome is unknown.'],
+  CENTRAL_RESULT_UNKNOWN: ['transport', 'unknown', 'The central server did not confirm the task outcome. Query its known ID before deciding on another request.'],
   TOOL_EXECUTION_FAILED: ['internal', 'unknown', 'The tool could not produce a valid result.'],
 };
 
