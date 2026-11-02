@@ -10,6 +10,7 @@ const sessionCodes = new Set<FaultCode>([
   'SESSION_REPLACED', 'SESSION_CONFLICT', 'SESSION_EXPIRED', 'AGENT_UNREGISTERED',
 ]);
 const domainCodes = new Set<FaultCode>([
+  'BROKER_CONTEXT_UNAVAILABLE',
   'CENTRAL_UNAUTHENTICATED', 'BROKER_FORBIDDEN', 'VALIDATION_FAILED', 'RECEIVER_NOT_FOUND', 'RECEIVER_OFFLINE',
   'TASK_NOT_FOUND', 'TASK_STATE_CONFLICT', 'TASK_VERSION_CONFLICT', 'TASK_SAVE_FAILED',
   'RESOURCE_NOT_FOUND', 'REQUEST_KEY_CONFLICT', 'BROKER_STORAGE_FAILED',
@@ -37,6 +38,7 @@ function remoteFault(status: number, remote: RemoteError | undefined, requestId:
   const taskId = ['RECEIVER_NOT_FOUND', 'RECEIVER_OFFLINE'].includes(code) ? undefined : remote?.taskId;
   return new BrokerFault(code, requestId, taskId, {
     ...(requestKey ? { requestKey } : {}), outcome: uncertain ? 'unknown' : 'rejected',
+    ...(remote?.scope ? { scope: remote.scope } : {}),
   });
 }
 
@@ -56,7 +58,7 @@ export class BrokerHttp {
     options: { method?: 'POST' | 'DELETE' | 'GET'; signal?: AbortSignal; timeoutMs?: number; duringClose?: boolean } = {},
   ): Promise<BrokerResponse> {
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : randomUUID();
-    const control = /^\/v1\/(?:sessions(?:\/|$)|context$)/.test(path);
+    const control = /^\/v1\/(?:sessions(?:\/|$)|context$|connection$)/.test(path);
     if (this.closed && !options.duringClose) throw new BrokerFault('CLIENT_CLOSED', requestId);
     if (!path.startsWith('/v1/') || path.startsWith('//') || path.includes('..')) throw new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
     const controller = new AbortController();
@@ -116,7 +118,7 @@ export class BrokerHttp {
       const creationKey = ['create_task', 'register_agent'].includes(String(payload.operation)) ? safeIdentifier(data?.requestKey) : undefined;
       const requestKey = keys[0] ?? creationKey;
       if (response.status === 401) {
-        throw new BrokerFault('BROKER_UNAUTHORIZED', requestId, remote?.taskId, { ...(requestKey ? { requestKey } : {}) });
+        throw new BrokerFault('BROKER_UNAUTHORIZED', requestId, remote?.taskId, { scope: 'local_auth', ...(requestKey ? { requestKey } : {}) });
       }
       if (response.status < 200 || response.status >= 300 || remote) {
         const fault = remoteFault(response.status, remote, requestId, requestKey, control);

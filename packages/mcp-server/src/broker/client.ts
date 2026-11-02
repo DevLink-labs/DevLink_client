@@ -4,11 +4,11 @@ import { BrokerFault, operationRoutes, terminalSessionFaults,
   type BrokerOperation, type BrokerResult, type FaultCode } from './contracts.js';
 import { identifierSchema, immutableSession, sessionSchema, type BrokerSession } from './schemas.js';
 import { BrokerHttp } from './http.js';
-import { readBrokerSettings, validateSettings, type BrokerSettings } from './settings.js';
+import { readBrokerSettings, validateSettings, SettingsFault, type BrokerSettings } from './settings.js';
 import type { Logger } from '../logger.js';
 import { safeIdentifier, type Correlation } from './faults.js';
 import { CallBudget, DEFAULT_CALL_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, validateTimeout } from './call-budget.js';
-import { contextSchema } from './onboarding.js';
+import { contextSchema, connectionSchema } from './onboarding.js';
 
 export interface BrokerClientOptions {
   settingsPath?: string;
@@ -23,6 +23,11 @@ export interface BrokerClientOptions {
 }
 type CallOptions = { signal?: AbortSignal; mcpRequestId?: string | number };
 const actorFields = ['userId', 'teamId', 'agentId', 'sessionId', 'principal', 'context'];
+function correlatedFault(error: unknown, requestId: string): BrokerFault {
+  return error instanceof BrokerFault ? new BrokerFault(error.code, requestId, error.taskId, {
+    outcome: error.outcome, ...(error.scope ? { scope: error.scope } : {}), ...(error.requestKey ? { requestKey: error.requestKey } : {}),
+  }) : new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
+}
 
 /** One client per MCP process; only authenticated broker responses may change identity. */
 export class BrokerClient {
@@ -58,6 +63,48 @@ export class BrokerClient {
   get pendingCount(): number { return this.http?.pendingCount ?? 0; }
   get state(): string { return this.closed ? 'closed' : this.terminal ?? (this.session?.principal.agentId ? 'bound' : this.session ? 'unbound' : 'inactive'); }
 
+  async getConnectionStatus(options: CallOptions = {}): Promise<BrokerResult> {
+    const requestId = randomUUID();
+    const budget = new CallBudget(requestId, this.options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, options.signal, this.lifetime.signal);
+    let credentialsChecked = false;
+    const result = (data: Record<string, unknown>) => ({ requestId,
+      ...(options.mcpRequestId !== undefined ? { mcpRequestId: options.mcpRequestId } : {}), data });
+    try {
+      budget.check();
+      const http = await budget.wait(this.transport()); credentialsChecked = true;
+      const raw = await http.request('/v1/connection', { requestId, instanceId: this.instanceId }, { method: 'GET', signal: budget.signal });
+      budget.check();
+      const parsed = connectionSchema.safeParse({ ...raw, mcp: 'running' });
+      if (!parsed.success) throw new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
+      return result(parsed.data);
+    } catch (error) {
+      const mapped = budget.map(error);
+      const fault = correlatedFault(mapped, requestId);
+      if (['CLIENT_CLOSED', 'REQUEST_ABORTED'].includes(fault.code)) throw fault;
+      let credentials: 'missing' | 'invalid' | 'unknown' = mapped instanceof SettingsFault ? mapped.credentialState
+        : !credentialsChecked && this.options.settings && fault.code === 'CREDENTIAL_FILE_INVALID' ? 'invalid' : 'unknown';
+      const denied = ['BROKER_UNAUTHORIZED', 'LOCAL_AUTH_FORBIDDEN'].includes(fault.code);
+      if (denied) credentials = 'invalid';
+      const scope = fault.scope ?? (!credentialsChecked ? 'credentials' : denied ? 'local_auth'
+        : fault.category === 'transport' ? 'transport' : fault.category === 'protocol' ? 'protocol' : 'domain');
+      const issue = { code: fault.code, scope, outcome: fault.outcome, requestId: fault.requestId };
+      const sessionConflict = ['SESSION_CONFLICT', 'SESSION_REPLACED'].includes(fault.code);
+      const sessionExpired = fault.code === 'SESSION_EXPIRED';
+      const data = connectionSchema.parse({ mcp: 'running', observedAt: new Date().toISOString(),
+        broker: scope === 'protocol' ? 'unhealthy' : 'unknown', central: 'unknown', identity: 'unknown', credentials,
+        mcpConfig: 'unknown', hostSession: sessionConflict ? 'conflict' : sessionExpired ? 'unbound' : 'not_checked', setupReady: false, collaborationReady: false, issue,
+        nextActions: [!credentialsChecked ? credentials === 'missing' ? 'prepare_cli_profile' : credentials === 'invalid' ? 'repair_private_file' : fault.code === 'BROKER_TIMEOUT' ? 'retry_diagnosis' : 'open_or_restart_host'
+          : denied ? 'repair_private_file' : sessionConflict ? 'inspect_connection_owner' : sessionExpired ? 'register_agent'
+            : fault.code === 'CENTRAL_UNAUTHENTICATED' ? 'stop_then_reauthenticate_agent'
+              : fault.code === 'BROKER_CONTEXT_UNAVAILABLE' ? 'inspect_profile_then_rebind'
+              : fault.code.startsWith('CENTRAL_') ? 'check_network_then_retry'
+                : scope === 'protocol' ? 'check_provider_contract' : 'inspect_local_broker',
+          ...((!credentialsChecked && credentials !== 'unknown') || denied ? ['open_or_restart_host'] : [])] });
+      // Never observe/retry/claim here, including when a previous business session is terminal.
+      return result(data);
+    } finally { budget.dispose(); }
+  }
+
   async getMyContext(options: CallOptions = {}): Promise<BrokerResult> {
     const requestId = randomUUID();
     const budget = new CallBudget(requestId, this.options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, options.signal, this.lifetime.signal);
@@ -86,7 +133,7 @@ export class BrokerClient {
     } catch (error) {
       const mapped = budget.map(error);
       // Diagnostic failures never schedule a heartbeat or recover/claim a session.
-      throw mapped instanceof BrokerFault ? mapped : new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
+      throw correlatedFault(mapped, requestId);
     } finally { budget.dispose(); }
   }
 
@@ -96,7 +143,7 @@ export class BrokerClient {
       try {
         settings = this.options.settings ? validateSettings(this.options.settings)
           : await readBrokerSettings(this.options.settingsPath ?? '');
-      } catch { throw new BrokerFault('CREDENTIAL_FILE_INVALID', 'settings'); }
+      } catch (error) { throw error instanceof BrokerFault ? error : new SettingsFault('unknown'); }
       if (this.closed) throw new BrokerFault('CLIENT_CLOSED', 'settings');
       this.agentId ??= settings.agentId;
       return this.http = new BrokerHttp(settings, this.options.requestTimeoutMs);
@@ -255,6 +302,7 @@ export class BrokerClient {
       const mapped = budget.map(error);
       const fault = new BrokerFault(mapped instanceof BrokerFault ? mapped.code : 'BROKER_PROTOCOL_ERROR', requestId, trace.taskId, {
         ...(trace.requestKey ? { requestKey: trace.requestKey } : {}), outcome: mapped instanceof BrokerFault ? mapped.outcome : 'unknown',
+        ...(mapped instanceof BrokerFault && mapped.scope ? { scope: mapped.scope } : {}),
         ...(callOptions.mcpRequestId !== undefined ? { mcpRequestId: callOptions.mcpRequestId } : {}),
       });
       this.options.logger?.error('broker.call_failed', { requestId, operation, code: fault.code });

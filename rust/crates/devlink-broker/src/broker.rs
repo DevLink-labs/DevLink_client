@@ -143,6 +143,11 @@ pub async fn run(path: &Path) -> Result<()> {
         // 세션 관리 API 라우터 병합 (/v1/sessions/*)
         .merge(crate::context_api::router(
             mcp_token.clone(),
+            context_reader.clone(),
+        ))
+        .merge(crate::connection_api::router(
+            mcp_token.clone(),
+            broker_url.clone(),
             context_reader,
         ))
         .merge(crate::session_api::router(

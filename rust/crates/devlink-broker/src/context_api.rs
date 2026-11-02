@@ -14,6 +14,26 @@ use axum::{
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContextFailure {
+    Identity(IdentityError),
+    LocalUnavailable,
+}
+impl From<IdentityError> for ContextFailure {
+    fn from(error: IdentityError) -> Self {
+        Self::Identity(error)
+    }
+}
+impl ContextFailure {
+    fn local(error: IdentityError) -> Self {
+        if error == IdentityError::Unavailable {
+            Self::LocalUnavailable
+        } else {
+            Self::Identity(error)
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ContextReader {
     pub central: CentralState,
@@ -23,12 +43,16 @@ pub(crate) struct ContextReader {
     origin: String,
 }
 impl ContextReader {
+    pub(crate) fn config_path(&self) -> &std::path::Path {
+        &self.config
+    }
     pub fn new(
         central: CentralState,
         sessions: SessionManager,
         config: PathBuf,
     ) -> anyhow::Result<Self> {
-        let binding = agent_profile::inspection_binding(&config)?;
+        let binding = agent_profile::inspection_binding(&config)
+            .map_err(|_| anyhow::anyhow!("Cannot inspect bound profile"))?;
         let origin = crate::user_auth::origin(&crate::config::Config::load(&config)?)?.to_string();
         Ok(Self {
             central,
@@ -38,14 +62,19 @@ impl ContextReader {
             origin,
         })
     }
-    fn check_binding(&self) -> Result<(), IdentityError> {
-        let current = agent_profile::inspection_binding(&self.config)
-            .map_err(|_| IdentityError::Forbidden)?;
+    async fn check_binding(&self) -> Result<(), IdentityError> {
+        let reader = self.clone();
+        tokio::task::spawn_blocking(move || reader.check_binding_files())
+            .await
+            .unwrap_or(Err(IdentityError::Unavailable))
+    }
+    fn check_binding_files(&self) -> Result<(), IdentityError> {
+        let current = agent_profile::inspection_binding(&self.config)?;
         let config =
-            crate::config::Config::load(&self.config).map_err(|_| IdentityError::Forbidden)?;
+            crate::config::Config::load(&self.config).map_err(|_| IdentityError::Unavailable)?;
         if current != self.binding
             || crate::user_auth::origin(&config)
-                .map_err(|_| IdentityError::Forbidden)?
+                .map_err(|_| IdentityError::Unavailable)?
                 .as_str()
                 != self.origin
         {
@@ -53,11 +82,18 @@ impl ContextReader {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub async fn read(&self, instance: &Identifier) -> Result<Value, IdentityError> {
-        self.check_binding()?;
+        self.diagnose(instance).await.map_err(|e| match e {
+            ContextFailure::Identity(e) => e,
+            ContextFailure::LocalUnavailable => IdentityError::Unavailable,
+        })
+    }
+    pub(crate) async fn diagnose(&self, instance: &Identifier) -> Result<Value, ContextFailure> {
+        self.check_binding().await.map_err(ContextFailure::local)?;
         let (generation, status, identity) = self.central.context_snapshot().await;
         if status == ConnectionStatus::AuthFailed {
-            return Err(IdentityError::Unauthenticated);
+            return Err(IdentityError::Unauthenticated.into());
         }
         if status != ConnectionStatus::Connected {
             return Ok(
@@ -83,10 +119,10 @@ impl ContextReader {
                     || b.agent_id != context.agent_id
             })
         {
-            return Err(IdentityError::Forbidden);
+            return Err(IdentityError::Forbidden.into());
         }
         let session = self.sessions.inspect(instance, &context).await?;
-        self.check_binding()?;
+        self.check_binding().await.map_err(ContextFailure::local)?;
         let (current_generation, current_status, current_identity) =
             self.central.context_snapshot().await;
         if current_generation != generation
@@ -100,7 +136,7 @@ impl ContextReader {
                     || current.team_id.is_some_and(|id| id != context.team_id)
             })
         {
-            return Err(IdentityError::Unavailable);
+            return Err(IdentityError::Unavailable.into());
         }
         let tool = context.tool_type.map(|tool| match tool {
             agent_profile::Tool::Codex => "codex",
@@ -204,28 +240,30 @@ async fn context(State(api): State<Api>, request: Request) -> Response {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    match api.reader.read(&instance).await {
+    match api.reader.diagnose(&instance).await {
         Ok(data) => Json(json!({"requestId":id,"data":data})).into_response(),
         // HTTP 403 on local control reads is reserved for local credential/Origin failures.
-        Err(IdentityError::Forbidden) => failure(
+        Err(ContextFailure::Identity(IdentityError::Forbidden)) => failure(
             id.as_str(),
             StatusCode::UNPROCESSABLE_ENTITY,
             "BROKER_FORBIDDEN",
             "domain",
         ),
-        Err(e) => crate::session_api::session_failure(id.as_str(), SessionError::Identity(e)),
+        Err(ContextFailure::Identity(e)) => crate::session_api::session_failure(id.as_str(), SessionError::Identity(e)),
+        Err(ContextFailure::LocalUnavailable) => (StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"requestId":id,"error":{"code":"BROKER_CONTEXT_UNAVAILABLE","scope":"domain","outcome":"unknown"}}))).into_response(),
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         agent_context::ContextClient, central::CentralIdentity, sessions::ReadyIdentityProvider,
     };
     use tokio::{net::TcpListener, sync::RwLock};
 
-    async fn fixture() -> (
+    pub(crate) async fn fixture() -> (
         tempfile::TempDir,
         ContextReader,
         Arc<RwLock<Value>>,
@@ -283,6 +321,26 @@ mod tests {
     }
     fn host() -> Identifier {
         Identifier::parse("host").unwrap()
+    }
+    #[tokio::test]
+    async fn unreadable_or_unparseable_profile_is_unknown_not_an_identity_mismatch() {
+        let (_dir, reader, _reply, task) = fixture().await;
+        crate::private_file::write(
+            &agent_profile::path(&reader.config),
+            &json!("invalid-profile"),
+            16384,
+        )
+        .unwrap();
+        assert_eq!(
+            reader.read(&host()).await.unwrap_err(),
+            IdentityError::Unavailable
+        );
+        assert_eq!(
+            reader.diagnose(&host()).await.unwrap_err(),
+            ContextFailure::LocalUnavailable
+        );
+        assert_eq!(reader.central.presence().await, None);
+        task.abort();
     }
     #[tokio::test]
     async fn auth_failed_is_not_an_ordinary_disconnect() {

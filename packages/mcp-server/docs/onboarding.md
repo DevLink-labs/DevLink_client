@@ -48,3 +48,68 @@ fence and unbound-owner conflict findings were fixed. Round 2 reported no must-f
 or should-fix defects. Additional focused tests cover bound-context contradiction
 without heartbeat loss and real 503 domain/transport error classification.
 Evidence: `.planning/mvp2-implementation-2026-11-02/` (private, ignored).
+
+## Connection diagnostics (S15P31D108-141)
+
+`get_connection_status({})` consumes authenticated, bodyless `GET /v1/connection`
+with the same Origin/header rules as context. MCP process health is separate from
+credential validity, broker reachability, central WebSocket state, live identity,
+and Host ownership. `nextActions` are fixed advice identifiers; no commands run.
+
+The fields follow `contracts/setup/v1` ConnectionSnapshot. This minimal supplier
+cannot inspect the Host config the caller loaded, so `mcpConfig=unknown` and
+`setupReady=false` even if the Host session is bound. CLI Connection.inspect can
+combine the separate McpConfig.inspect evidence. `collaborationReady` follows the
+contract formula, and does not attest to a completed task roundtrip.
+
+Missing credentials, invalid/private-file or local auth failures, unreachable
+broker, central disconnect/auth denial, conflict and protocol failures remain
+separate. An unreachable HTTP port does not prove that an owned OS broker is
+stopped, so MCP reports `broker=unknown` and `inspect_local_broker`. Rust verifies
+the current private credential snapshot matches its own URL/token before `valid`.
+`unbound` means no current valid lease; it does not infer whether an old lease
+expired or was lost on restart. A confirmed SESSION_EXPIRED/SESSION_CONFLICT
+error keeps that code, scope, outcome and requestId and provides explicit recovery
+advice. Unknown fields never imply readiness.
+
+Provider diagnostics are allowlisted schemas. Raw error messages, token values,
+config contents and caller commands are not copied. `issue` preserves safe
+code/scope/outcome/requestId; top-level requestId/mcpRequestId correlate the MCP
+invocation. Registration/context execution errors also include stage/nextActions,
+while retaining the original safe error envelope. Timeout/partial diagnosis never
+schedules recovery, claims, binds, renews a lease, or changes work/presence.
+
+Before MCP is connected: run CLI init → auth login → team select → agent create/use
+with an explicitly chosen project/tool; run start, then configure the Host using
+only the absolute DEVLINK_BROKER_FILE path and restart the Host. Inspect owned
+Agents/pending state before an explicit recovery; never automatically repeat
+creation or token issuance after an unknown result.
+
+Exported `snapshot.schema.json` describes Rust data and `connection.schema.json`
+adds the proven MCP process state. Readiness formulas also run in Zod at runtime.
+
+A parsed descriptor alone does not establish valid credentials: failed or timed-out
+broker confirmation leaves `credentials=unknown`. Missing files, malformed/private
+snapshots and unobservable I/O are distinct. Advice to repair a cached descriptor
+also requires reopening/restarting MCP; running processes never silently reload
+rotated credentials. A settings deadline/cancellation does not turn an unknown read
+into an invalid file. Every diagnostic/context call, including local file failure,
+has its own requestId rather than a shared settings placeholder.
+
+Local profile/config read failure uses BROKER_CONTEXT_UNAVAILABLE (domain scope,
+unknown outcome, inspect_profile_then_rebind) rather than blaming the central
+network. A settings/credential observation timeout offers retry_diagnosis without
+running it. Missing credentials offer prepare_cli_profile; unknown is kept distinct
+from invalid. Definite cached descriptor repair additionally requires a Host restart.
+
+## -141 verification (2026-11-02, Asia/Seoul)
+
+MCP full regression: 137 passed. Rust broker library: 69 passed (serial).
+The actual SDK/native Rust/isolated Spring+PostgreSQL run verified diagnostic
+credentials/identity/central state, unbound/bound transition and task roundtrip;
+final local-error/advice deltas were then covered by the complete unit regressions.
+Claude Code CLI actual `claude-opus-5-5`, effort `high`, reviewed three rounds.
+Correlation, unknown credential state, cancellation, local-vs-central failure and
+advice findings were fixed. Final focused review reported no actionable defects.
+Remaining optional handler/issue-shape coverage suggestions are not claimed as
+executed real Host evidence; real Codex/Claude acceptance remains -144.

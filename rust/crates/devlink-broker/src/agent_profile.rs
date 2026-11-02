@@ -145,23 +145,36 @@ pub(crate) struct InspectionBinding {
     pub agent_id: u64,
     pub project_root: String,
 }
-pub(crate) fn inspection_binding(config_path: &Path) -> Result<Option<InspectionBinding>> {
-    let Some(profile) = load(config_path)? else {
+pub(crate) fn inspection_binding(
+    config_path: &Path,
+) -> Result<Option<InspectionBinding>, crate::sessions::IdentityError> {
+    use crate::sessions::IdentityError::{Forbidden, Unavailable};
+    let Some(profile) = load(config_path).map_err(|_| Unavailable)? else {
         return Ok(None);
     };
-    let selected = teams::stored_selection(config_path)?.context("Missing selected team")?;
-    ensure!(
-        profile.origin == user_auth::origin(&Config::load(config_path)?)?.as_str()
-            && selected.origin == profile.origin
-            && selected.user_id == profile.user_id
-            && selected.team_id == profile.team_id
-            && project(Path::new(&profile.project_root))? == profile.project_root,
-        "Profile context changed"
-    );
-    let agent_id = profile
-        .agent()
-        .context("Agent profile is not ready")?
-        .agent_id;
+    let selected = teams::stored_selection(config_path)
+        .map_err(|_| Unavailable)?
+        .ok_or(Unavailable)?;
+    let config = Config::load(config_path).map_err(|_| Unavailable)?;
+    let origin = user_auth::origin(&config).map_err(|_| Unavailable)?;
+    let root = std::fs::canonicalize(&profile.project_root).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Forbidden
+        } else {
+            Unavailable
+        }
+    })?;
+    let metadata = std::fs::metadata(&root).map_err(|_| Unavailable)?;
+    if profile.origin != origin.as_str()
+        || selected.origin != profile.origin
+        || selected.user_id != profile.user_id
+        || selected.team_id != profile.team_id
+        || !metadata.is_dir()
+        || root.to_str() != Some(profile.project_root.as_str())
+    {
+        return Err(Forbidden);
+    }
+    let agent_id = profile.agent().ok_or(Unavailable)?.agent_id;
     Ok(Some(InspectionBinding {
         origin: profile.origin,
         user_id: profile.user_id,

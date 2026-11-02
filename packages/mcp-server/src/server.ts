@@ -8,7 +8,7 @@ import { registerTools, type RegisteredDefinition } from './tools/registry.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'devlink-mcp', version: '0.1.0' });
 
-export function createServer(logger: Logger, broker: Pick<BrokerClient, 'execute' | 'getMyContext'>, extensions: readonly RegisteredDefinition[] = []): McpServer {
+export function createServer(logger: Logger, broker: Pick<BrokerClient, 'execute' | 'getMyContext' | 'getConnectionStatus'>, extensions: readonly RegisteredDefinition[] = []): McpServer {
   const server = new McpServer(SERVER_INFO);
   registerTools(server, [pingTool(logger, SERVER_INFO.version), ...businessTools(broker), ...onboardingTools(broker), ...extensions]);
   return server;

@@ -10,6 +10,8 @@ S15P31D108-62의 MCP 측 계약 산출물이다. Rust/중앙 서버가 현재 �
 | `identity-fixtures.json` | 독립적으로 사용할 수 있는 정상·거부 wire 사례 |
 | `envelope.schema.json` | 성공 data 또는 scope/outcome/식별자를 가진 오류 envelope |
 | `context.schema.json` | -140 읽기 전용 현재 문맥. 신원은 live 중앙 검증, 프로젝트는 bound profile 출처 |
+| `snapshot.schema.json` | -141 Rust GET /v1/connection의 ConnectionSnapshot·안내·안전한 issue |
+| `connection.schema.json` | -141 MCP get_connection_status 결과 data. 확인된 MCP 실행 상태 추가 |
 | `error-fixtures.json` | -63 오류 분류·세션 중단·결과 불명 계약 사례 |
 
 JSON Schema draft 2020-12는 `packages/mcp-server/src/broker/schemas.ts`의 Zod 런타임 검증에서 생성한다. `npm --prefix packages/mcp-server run contracts:write`로 갱신하고 `contracts:check` 또는 `test`로 drift를 검사한다. fixture는 MCP 테스트에서 재사용하며 Rust 소비자도 같은 파일을 사용할 수 있다. 예제 토큰과 식별자는 테스트 전용 값이다.

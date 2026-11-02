@@ -6,15 +6,18 @@ export type FaultCode =
   | 'SESSION_REPLACED' | 'SESSION_CONFLICT' | 'SESSION_EXPIRED'
   | 'AGENT_UNREGISTERED' | 'CREDENTIAL_FILE_INVALID' | 'CLIENT_CLOSED'
   | 'REQUEST_ABORTED' | 'BROKER_CONTEXT_INVALID' | 'SESSION_CONTEXT_CHANGED' | 'CALLER_CONTEXT_OVERRIDE'
+  | 'BROKER_CONTEXT_UNAVAILABLE'
   | 'CENTRAL_UNAUTHENTICATED' | 'VALIDATION_FAILED' | 'RECEIVER_NOT_FOUND' | 'RECEIVER_OFFLINE'
   | 'TASK_NOT_FOUND' | 'TASK_STATE_CONFLICT' | 'TASK_VERSION_CONFLICT' | 'TASK_SAVE_FAILED'
   | 'RESOURCE_NOT_FOUND' | 'REQUEST_KEY_CONFLICT' | 'BROKER_STORAGE_FAILED'
   | 'CENTRAL_UNAVAILABLE' | 'CENTRAL_TIMEOUT' | 'CENTRAL_PROTOCOL_ERROR' | 'CENTRAL_RESULT_UNKNOWN' | 'TOOL_EXECUTION_FAILED';
 export type FaultCategory = 'input' | 'authentication' | 'session' | 'transport' | 'protocol' | 'domain' | 'internal';
 export type Outcome = 'unknown' | 'rejected';
+export type FaultScope = 'local_auth' | 'session' | 'domain' | 'transport';
 export type Correlation = { requestKey?: string; taskId?: string; mcpRequestId?: string | number };
 
 const definitions: Record<FaultCode, readonly [FaultCategory, Outcome, string]> = {
+  BROKER_CONTEXT_UNAVAILABLE: ['internal', 'unknown', 'Local profile context could not be verified. Inspect the CLI profile.'],
   BROKER_UNAVAILABLE: ['transport', 'unknown', 'Local broker is unavailable.'],
   BROKER_CONNECTION_CLOSED: ['transport', 'unknown', 'The broker connection closed; the business outcome is unknown.'],
   BROKER_TIMEOUT: ['transport', 'unknown', 'Local broker response timed out; the business outcome is unknown.'],
@@ -52,6 +55,8 @@ const definitions: Record<FaultCode, readonly [FaultCategory, Outcome, string]> 
   TOOL_EXECUTION_FAILED: ['internal', 'unknown', 'The tool could not produce a valid result.'],
 };
 
+export const faultCodes = Object.freeze(Object.keys(definitions) as [FaultCode, ...FaultCode[]]);
+
 export function safeIdentifier(value: unknown): string | undefined {
   const result = identifierSchema.safeParse(value);
   return result.success ? result.data : undefined;
@@ -64,12 +69,14 @@ export class BrokerFault extends Error {
   readonly taskId: string | undefined;
   readonly requestKey: string | undefined;
   readonly mcpRequestId: string | number | undefined;
+  readonly scope: FaultScope | undefined;
   constructor(readonly code: FaultCode, readonly requestId: string, taskId?: string,
-    details: Correlation & { outcome?: Outcome } = {}) {
+    details: Correlation & { outcome?: Outcome; scope?: FaultScope } = {}) {
     super(definitions[code][2]);
     this.name = 'BrokerFault';
     this.category = definitions[code][0];
     this.outcome = details.outcome ?? definitions[code][1];
+    this.scope = details.scope;
     this.taskId = safeIdentifier(taskId ?? details.taskId);
     this.requestKey = safeIdentifier(details.requestKey);
     this.mcpRequestId = details.mcpRequestId;
