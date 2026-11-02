@@ -524,6 +524,69 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// Inspect without expiring entries, claiming, renewing, binding or publishing presence.
+    pub(crate) async fn inspect(
+        &self,
+        instance: &Identifier,
+        context: &crate::agent_context::AgentContext,
+    ) -> Result<&'static str, IdentityError> {
+        let registry = self.registry.lock().await;
+        self.central
+            .with_ready_context(|status, identity, epoch| {
+                let identity = identity.ok_or(IdentityError::Unavailable)?;
+                if status != ConnectionStatus::Connected {
+                    return Err(IdentityError::Unavailable);
+                }
+                if identity.agent_id != context.agent_id
+                    || identity
+                        .user_id
+                        .is_some_and(|id| id != context.owner_user_id)
+                    || identity.team_id.is_some_and(|id| id != context.team_id)
+                {
+                    return Err(IdentityError::Forbidden);
+                }
+                if registry.closed || registry.subject_epoch != epoch {
+                    return Ok("unbound");
+                }
+                let now = Instant::now();
+                let agent = Identifier::parse(context.agent_id.to_string()).unwrap();
+                let owned = registry
+                    .owners
+                    .get(&agent)
+                    .and_then(|id| registry.sessions.get(id))
+                    .is_some_and(|e| e.expires_at > now && !e.replaced);
+                if let Some(entry) = registry
+                    .instances
+                    .get(instance)
+                    .and_then(|id| registry.sessions.get(id))
+                {
+                    if entry.expires_at > now {
+                        if entry.replaced {
+                            return Ok("conflict");
+                        }
+                        let p = &entry.view.principal;
+                        if p.user_id.as_str() != context.owner_user_id.to_string()
+                            || p.team_id.as_str() != context.team_id.to_string()
+                            || p.agent_id
+                                .as_ref()
+                                .is_some_and(|id| id.as_str() != context.agent_id.to_string())
+                        {
+                            return Err(IdentityError::Forbidden);
+                        }
+                        return Ok(if p.agent_id.is_some() {
+                            "bound"
+                        } else if owned {
+                            "conflict"
+                        } else {
+                            "unbound"
+                        });
+                    }
+                }
+                Ok(if owned { "conflict" } else { "unbound" })
+            })
+            .await
+    }
+
     pub fn new(identity: Arc<dyn IdentityProvider>, central: CentralState) -> Self {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
@@ -856,6 +919,47 @@ mod tests {
             provider.resolve(None).await,
             Err(IdentityError::Unavailable)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inspection_never_renews_expires_claims_or_publishes_presence() {
+        let central = central();
+        ready_as(&central, 3, 1, 12).await;
+        let manager = SessionManager::new(
+            Arc::new(ReadyIdentityProvider::new(central.clone())),
+            central.clone(),
+        );
+        let owner = id("owner");
+        let session = manager
+            .claim(owner.clone(), ClaimMode::Recover, Some(id("12")))
+            .await
+            .unwrap();
+        let context =
+            serde_json::from_value(serde_json::json!({"agentId":12,"ownerUserId":3,"teamId":1}))
+                .unwrap();
+        let expiry = manager.registry.lock().await.sessions[&session.session_id].expires_at;
+        manager
+            .claim(id("unbound"), ClaimMode::Recover, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.inspect(&id("unbound"), &context).await.unwrap(),
+            "conflict"
+        );
+        let presence = central.presence().await;
+        assert_eq!(manager.inspect(&owner, &context).await.unwrap(), "bound");
+        assert_eq!(
+            manager.inspect(&id("other"), &context).await.unwrap(),
+            "conflict"
+        );
+        assert_eq!(
+            manager.registry.lock().await.sessions[&session.session_id].expires_at,
+            expiry
+        );
+        tokio::time::advance(Duration::from_secs(91)).await;
+        assert_eq!(manager.inspect(&owner, &context).await.unwrap(), "unbound");
+        assert_eq!(manager.registry.lock().await.sessions.len(), 2);
+        assert_eq!(central.presence().await, presence);
     }
 
     #[tokio::test]

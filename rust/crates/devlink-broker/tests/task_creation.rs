@@ -255,6 +255,7 @@ struct Broker {
 }
 impl Broker {
     async fn start(path: &std::path::Path, remote: &Central, request_timeout: Duration) -> Self {
+        devlink_broker::config::init(path).unwrap();
         let central = CentralState::new(Arc::new(RwLock::new(ConnectionStatus::Connecting)));
         let handle = central.begin_session().await;
         handle
@@ -275,6 +276,12 @@ impl Broker {
             TaskClient::with_timeout(&format!("ws://{}", remote.address), AGENT, request_timeout)
                 .unwrap();
         let cancel = CancellationToken::new();
+        let context = devlink_broker::context_api::ContextReader::new(
+            central.clone(),
+            sessions.clone(),
+            path.to_path_buf(),
+        )
+        .unwrap();
         let app = session_api::router(Arc::new(LOCAL.into()), sessions.clone())
             .merge(task_api::router(
                 Arc::new(LOCAL.into()),
@@ -288,6 +295,7 @@ impl Broker {
                 sessions.clone(),
                 task_client,
                 cancel.clone(),
+                context,
             ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -622,6 +630,46 @@ async fn registration_rejects_invalid_tool_before_central_io() {
             .await;
         assert_eq!(response["error"]["code"], "VALIDATION_FAILED");
     }
+    assert_eq!(remote.state.agent_calls.load(Ordering::SeqCst), 0);
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn registration_fences_changed_profile_before_confirmation_and_preserves_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let remote = Central::start(&path).await;
+    let broker = Broker::start(&path, &remote, Duration::from_secs(1)).await;
+    let session = broker.claim("host", false).await;
+    let original = devlink_broker::config::Config::load(&path)
+        .unwrap()
+        .server_url;
+    devlink_broker::config::set(&path, "serverUrl", "wss://other.example").unwrap();
+    let (status, result) = broker
+        .post(
+            "/v1/agents/register",
+            &agent_request(&session, "register_agent", json!({})),
+        )
+        .await;
+    assert_eq!(status, 403, "{result}");
+    assert_eq!(result["error"]["code"], "FORBIDDEN");
+    assert_eq!(remote.state.agent_calls.load(Ordering::SeqCst), 0);
+    devlink_broker::config::set(&path, "serverUrl", &original).unwrap();
+    let pending = json!({"schemaVersion":1,"origin":"https://api.devlink.ai.kr","userId":3,"teamId":1,
+        "projectRoot":dir.path().canonicalize().unwrap().to_str().unwrap(),
+        "state":{"kind":"create_pending","name":"pending","tool":"CODEX","project_name":"project"}});
+    let profile = devlink_broker::agent_profile::path(&path);
+    devlink_broker::private_file::write(&profile, &pending, 16384).unwrap();
+    let bytes = std::fs::read(&profile).unwrap();
+    let (status, result) = broker
+        .post(
+            "/v1/agents/register",
+            &agent_request(&session, "register_agent", json!({})),
+        )
+        .await;
+    assert_eq!(status, 503, "{result}");
+    assert_eq!(result["error"]["code"], "BROKER_CONTEXT_UNAVAILABLE");
+    assert_eq!(std::fs::read(profile).unwrap(), bytes);
     assert_eq!(remote.state.agent_calls.load(Ordering::SeqCst), 0);
     broker.stop().await;
 }

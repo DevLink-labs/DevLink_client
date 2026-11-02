@@ -8,6 +8,10 @@ import { BrokerFault } from './contracts.js';
 import { credentialSchema } from './schemas.js';
 
 export type BrokerSettings = Readonly<z.infer<typeof credentialSchema>>;
+class InvalidSettings extends Error {}
+export class SettingsFault extends BrokerFault {
+  constructor(readonly credentialState: 'missing' | 'invalid' | 'unknown') { super('CREDENTIAL_FILE_INVALID', 'settings'); }
+}
 
 export function validateSettings(value: unknown): BrokerSettings {
   const result = credentialSchema.safeParse(value);
@@ -25,12 +29,12 @@ export function validateSettings(value: unknown): BrokerSettings {
 /** CLI owns writing the snapshot. Reject links, broad permissions and oversized files. */
 export async function verifyPrivateFile(path: string): Promise<void> {
   const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink() || info.size > 16_384) throw new Error('Invalid settings file');
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 16_384) throw new InvalidSettings('Invalid settings file');
   const parent = await lstat(dirname(path));
-  if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error('Invalid parent');
+  if (!parent.isDirectory() || parent.isSymbolicLink()) throw new InvalidSettings('Invalid parent');
   if (process.platform !== 'win32') {
-    if (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0) throw new Error('Not private');
-    if ((parent.mode & 0o022) !== 0) throw new Error('Writable parent');
+    if (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0) throw new InvalidSettings('Not private');
+    if ((parent.mode & 0o022) !== 0) throw new InvalidSettings('Writable parent');
     return;
   }
   // No path interpolation into shell code. The child receives only the file path, never its token.
@@ -53,19 +57,22 @@ foreach ($target in @($p, [System.IO.Path]::GetDirectoryName($p))) {
   const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     env: { ...process.env, DEVLINK_ACL_CHECK_PATH: path }, windowsHide: true, timeout: 5000, maxBuffer: 4096,
   });
-  if (stdout !== 'private') throw new Error('Not private');
+  if (stdout !== 'private') throw new InvalidSettings('Not private');
 }
 
 export async function readBrokerSettings(path: string): Promise<BrokerSettings> {
   try {
-    if (!isAbsolute(path)) throw new Error('Absolute path required');
+    if (!path) throw new SettingsFault('missing');
+    if (!isAbsolute(path)) throw new InvalidSettings('Absolute path required');
+    try { await lstat(path); }
+    catch (error) { throw new SettingsFault(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT' ? 'missing' : 'unknown'); }
     await verifyPrivateFile(path);
     const before = await lstat(path);
     const file = await open(path, process.platform === 'win32' ? 'r' : constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const info = await file.stat();
-      if (!info.isFile() || info.size > 16_384 || before.ino !== info.ino || before.dev !== info.dev) throw new Error('Snapshot changed');
-      if (process.platform !== 'win32' && (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0)) throw new Error('Not private');
+      if (!info.isFile() || info.size > 16_384 || before.ino !== info.ino || before.dev !== info.dev) throw new InvalidSettings('Snapshot changed');
+      if (process.platform !== 'win32' && (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0)) throw new InvalidSettings('Not private');
       const buffer = Buffer.alloc(16_385);
       let length = 0;
       while (length < buffer.length) {
@@ -73,14 +80,17 @@ export async function readBrokerSettings(path: string): Promise<BrokerSettings> 
         if (bytesRead === 0) break;
         length += bytesRead;
       }
-      if (length > 16_384) throw new Error('Oversized settings');
+      if (length > 16_384) throw new InvalidSettings('Oversized settings');
       const after = await file.stat();
-      if (info.size !== after.size || info.mtimeMs !== after.mtimeMs) throw new Error('Snapshot changed');
+      if (info.size !== after.size || info.mtimeMs !== after.mtimeMs) throw new InvalidSettings('Snapshot changed');
       return validateSettings(JSON.parse(buffer.subarray(0, length).toString('utf8')));
     } finally {
       await file.close();
     }
-  } catch {
-    throw new BrokerFault('CREDENTIAL_FILE_INVALID', 'settings');
+  } catch (error) {
+    if (error instanceof SettingsFault) throw error;
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    const invalid = error instanceof InvalidSettings || error instanceof SyntaxError || error instanceof BrokerFault || code === 2 || code === 3;
+    throw new SettingsFault(invalid ? 'invalid' : 'unknown');
   }
 }

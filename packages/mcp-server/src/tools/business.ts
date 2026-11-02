@@ -25,8 +25,8 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
     });
   }
   return [
-    tool('register_agent', 'Confirm the existing CLI-created agent and bind its local MCP session. name and toolType must exactly match the CLI agent; omit role unless it exactly matches its roleDescription. This does not create or update a central agent.', z.strictObject({
-      name: providerText.max(100), toolType: z.enum(['codex', 'claude_code']), role: providerText.max(500).optional(),
+    tool('register_agent', 'Call with {} to confirm the existing CLI-created agent and bind this MCP session without repeating metadata. Optional name/toolType/role must exactly match the verified agent. This never creates or updates an Agent or rotates credentials; an active owner is protected.', z.strictObject({
+      name: providerText.max(100).optional(), toolType: z.enum(['codex', 'claude_code']).optional(), role: providerText.max(500).optional(),
     })),
     tool('list_agents', 'List agents visible to the authenticated team. Does not accept or complete tasks.', z.strictObject({}), true),
     tool('create_task', 'Request work from a recipient agent. A delivery failure is separate from the central task status. Timeout does not cancel the task; do not blindly resend.', z.strictObject({

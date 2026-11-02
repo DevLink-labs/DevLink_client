@@ -20,6 +20,10 @@ pub struct AgentContext {
     pub agent_id: u64,
     pub owner_user_id: u64,
     pub team_id: u64,
+    pub name: Option<String>,
+    pub role_description: Option<String>,
+    pub tool_type: Option<crate::agent_profile::Tool>,
+    pub project_name: Option<String>,
 }
 
 impl ContextClient {

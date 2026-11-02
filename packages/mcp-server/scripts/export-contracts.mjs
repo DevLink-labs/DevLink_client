@@ -2,11 +2,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { credentialSchema, principalSchema, sessionSchema } from '../dist/broker/schemas.js';
 import { brokerEnvelopeSchema } from '../dist/broker/envelopes.js';
+import { contextSchema, snapshotSchema, connectionSchema } from '../dist/broker/onboarding.js';
 
 const destination = new URL('../../../contracts/local-broker/v1/', import.meta.url);
 const check = process.argv.includes('--check');
 if (!check) await mkdir(destination, { recursive: true });
-for (const [name, schema] of Object.entries({ credentials: credentialSchema, principal: principalSchema, session: sessionSchema, envelope: brokerEnvelopeSchema })) {
+for (const [name, schema] of Object.entries({ credentials: credentialSchema, principal: principalSchema, session: sessionSchema, envelope: brokerEnvelopeSchema, context: contextSchema, snapshot: snapshotSchema, connection: connectionSchema })) {
   const value = { $id: `urn:devlink:local-broker:v1:${name}`, ...z.toJSONSchema(schema, { io: 'input' }) };
   const expected = `${JSON.stringify(value, null, 2)}\n`;
   const file = new URL(`${name}.schema.json`, destination);

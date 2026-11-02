@@ -386,6 +386,7 @@ test('credential rotation never silently reloads a running client', { timeout: 1
   const count = broker.calls.length;
   await assert.rejects(old.execute('get_tasks', {}), code('BROKER_UNAUTHORIZED'));
   assert.equal(broker.calls.length, count);
+  broker.restart(); // Explicit rotation restarts the broker and its volatile ownership registry.
   await fresh.execute('get_tasks', {});
   assert.equal(fresh.state, 'bound');
 });
