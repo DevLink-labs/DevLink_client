@@ -107,6 +107,7 @@ pub struct CentralState {
     identity: SharedIdentity,
     presence: SharedPresence,
     inbox: Option<Inbox>,
+    notifications: Option<crate::notifications::Notifications>,
     subject_changes: watch::Sender<u64>,
     auth_failures: watch::Sender<u64>,
 }
@@ -137,6 +138,7 @@ impl CentralState {
             identity,
             presence,
             inbox: None,
+            notifications: None,
             context_client: None,
             subject_changes: watch::channel(0).0,
             auth_failures: watch::channel(0).0,
@@ -146,6 +148,20 @@ impl CentralState {
     pub fn with_inbox(mut self, inbox: Inbox) -> Self {
         self.inbox = Some(inbox);
         self
+    }
+
+    pub fn with_notifications(
+        mut self,
+        notifications: crate::notifications::Notifications,
+    ) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+
+    pub fn notification_rejections(&self) -> Option<u64> {
+        self.notifications
+            .as_ref()
+            .map(crate::notifications::Notifications::rejected)
     }
 
     pub fn with_context_client(mut self, client: crate::agent_context::ContextClient) -> Self {
@@ -795,6 +811,25 @@ async fn session(
 
                     // 텍스트(JSON) 메시지 수신 처리
                     Some(Ok(Message::Text(text))) => {
+                        if ready && crate::notifications::TaskNotification::recognizes(&text) {
+                            let auth = handle.state.inner.read().await;
+                            if auth.generation != handle.generation { return Outcome::Stopped; }
+                            if auth.status != ConnectionStatus::Connected { return Outcome::AuthFailed; }
+                            let Some(identity) = &auth.identity else { return Outcome::ProtocolViolation; };
+                            // These events are sent to the authenticated requester, not the receiver
+                            // in TASK_CREATED. Never ACK them or infer a local acceptance.
+                            if let Some(store) = handle.state.notifications.clone() {
+                                match serde_json::from_str::<crate::notifications::TaskNotification>(&text) {
+                                    Ok(event) if event.validate().is_ok() => {
+                                        let origin = config.server_url.clone();
+                                        let agent = identity.agent_id;
+                                        store.enqueue(origin, agent, event);
+                                    }
+                                    _ => store.reject(),
+                                }
+                            }
+                            continue;
+                        }
                         if !ready {
                             match serde_json::from_str::<ServerMessage>(&text) {
                                 Ok(ServerMessage::BrokerReady(payload)) if payload.is_valid() => {

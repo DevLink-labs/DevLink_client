@@ -22,6 +22,7 @@
 | Agent 확인·목록·작업 생성 | [business-relay.md](business-relay.md) |
 | 작업 상태·완료·목록·결과 | [task-operations.md](task-operations.md) |
 | 수신함·중복 방지·저장 후 ACK·CLI 조회 | [task-inbox.md](task-inbox.md) |
+| 요청자 상태·결과 알림·보관·조회 대조 | [task-notifications.md](task-notifications.md) |
 
 MCP 도구의 소비자 계약·Host 설정은 [MCP 문서](../../packages/mcp-server/README.md), 중앙과의 계약 차이는 [중앙 연동 결정표](../../contracts/central/README.md)를 참고한다. Rust provider 구현과 MCP의 최종 입력 DTO 수렴(-97), 실제 Host 전체 왕복(-66)은 별도 범위다.
 
