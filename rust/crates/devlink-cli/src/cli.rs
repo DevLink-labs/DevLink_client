@@ -5,6 +5,7 @@ use devlink_broker::{
     config::{self, Config, state_directory},
     local::{self, Runtime},
 };
+use devlink_cli::setup::terminal::{self as setup_terminal, SetupArgs};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -20,8 +21,40 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 }
+
+pub fn parse() -> Cli {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let setup_requested = {
+        let mut arguments = arguments.iter().skip(1);
+        loop {
+            match arguments.next() {
+                Some(arg) if arg == "--config" => {
+                    // A profile named "setup" is a value, not a subcommand.
+                    arguments.next();
+                }
+                Some(arg) if arg.to_str().is_some_and(|s| s.starts_with("--config=")) => {}
+                Some(arg) => break arg == "setup",
+                None => break false,
+            }
+        }
+    };
+    match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // Invalid-value errors omit command usage, so identify the requested
+            // command before parsing. Never echo setup values; preserve legacy errors.
+            if setup_requested && error.use_stderr() {
+                eprintln!("Invalid setup arguments. Run devlink setup --help for usage.");
+                std::process::exit(2);
+            }
+            error.exit()
+        }
+    }
+}
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Run guided setup (execution foundation; stage integrations follow)
+    Setup(SetupArgs),
     /// Create a configuration file without overwriting existing settings
     Init,
     /// Start an independent background broker
@@ -203,41 +236,14 @@ fn password_input(from_stdin: bool) -> Result<String> {
 }
 
 fn secret_input(label: &str, limit: usize, from_stdin: bool) -> Result<String> {
-    use std::io::{BufRead, Read};
-    let password = if from_stdin {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .lock()
-            .take(1025)
-            .read_until(b'\n', &mut bytes)
-            .map_err(|_| anyhow::anyhow!("Cannot read password from stdin"))?;
-        if bytes.last() == Some(&b'\n') {
-            bytes.pop();
-            if bytes.last() == Some(&b'\r') {
-                bytes.pop();
-            }
-        }
-        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("Password must be UTF-8"))?
-    } else {
-        rpassword::prompt_password(format!("{label}: ")).map_err(|_| {
-            let flag = if label == "Password" {
-                "--password-stdin"
-            } else {
-                "--code-stdin"
-            };
-            anyhow::anyhow!("Cannot read hidden {label}; use {flag} for pipes")
-        })?
-    };
-    if password.is_empty() || password.len() > limit {
-        bail!("{label} must contain 1 to {limit} UTF-8 bytes");
-    }
-    Ok(password)
+    devlink_cli::terminal_input::secret_input(label, limit, from_stdin)
 }
 
 /// CLI 진입점: 파싱된 CLI 명령어에 따라 적절한 로직을 라우팅하여 실행합니다.
 pub async fn run(cli: Cli) -> Result<()> {
     let path = config::config_path(cli.config)?;
     match cli.command {
+        Commands::Setup(args) => setup_terminal::run(&path, args).await?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
             if clear {

@@ -31,6 +31,7 @@ pub struct MockState {
     pub redirect_login: Arc<AtomicBool>,
     pub changed_user: Arc<AtomicBool>,
     pub me_failure: Arc<AtomicBool>,
+    pub me_mode: Arc<AtomicU8>,
     pub calls: Arc<Mutex<Vec<String>>>,
     pub joined: Arc<AtomicBool>,
     pub membership_missing: Arc<AtomicBool>,
@@ -44,6 +45,7 @@ pub struct MockState {
     pub token_mode: Arc<AtomicU8>,
     pub wrong_context: Arc<AtomicBool>,
     pub csrf_failure: Arc<AtomicBool>,
+    pub csrf_mode: Arc<AtomicU8>,
     pub pause_token: Arc<AtomicBool>,
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
@@ -72,6 +74,11 @@ async fn csrf(State(state): State<MockState>, headers: HeaderMap) -> Response {
         return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
     }
     let authenticated = cookie(&headers, COOKIE);
+    match state.csrf_mode.load(Ordering::SeqCst) {
+        1 => return success(json!({"headerName":"untrusted-header","token":"untrusted-csrf"})),
+        2 => return success(json!({"headerName":"X-CSRF-TOKEN","token":"untrusted\ncsrf"})),
+        _ => {}
+    }
     let token = if authenticated {
         CSRF
     } else {
@@ -125,11 +132,23 @@ async fn me(State(state): State<MockState>, headers: HeaderMap) -> Response {
     if state.me_failure.load(Ordering::SeqCst) {
         return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED_SECRET_RESPONSE");
     }
+    match state.me_mode.load(Ordering::SeqCst) {
+        1 => return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED"),
+        2 => return (StatusCode::OK, "{invalid-response").into_response(),
+        _ => {}
+    }
     let mut value = user(&state);
     if state.changed_user.load(Ordering::SeqCst) {
         value["userId"] = json!(52);
     }
-    success(value)
+    let mut response = success(value);
+    if state.me_mode.load(Ordering::SeqCst) == 3 {
+        response.headers_mut().insert(
+            "set-cookie",
+            "JSESSIONID=; Max-Age=0; Path=/; HttpOnly".parse().unwrap(),
+        );
+    }
+    response
 }
 
 fn agent_value(id: u64, user: u64, team: u64, name: &str, tool: Value, project: Value) -> Value {
@@ -422,7 +441,7 @@ pub struct Fixture {
     pub _root: tempfile::TempDir,
     pub path: PathBuf,
     pub state: MockState,
-    server: JoinHandle<()>,
+    pub server: JoinHandle<()>,
 }
 
 impl Fixture {
