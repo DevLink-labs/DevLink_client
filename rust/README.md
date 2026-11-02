@@ -70,7 +70,7 @@ cargo run -p devlink-cli -- --config .\.devlink\config.json start
 
 | 키 | 기본값 | 제약 |
 | --- | --- | --- |
-| `serverUrl` | `ws://localhost:8080` | ws/wss URL. 경로는 비어 있거나 `/` 또는 `/ws/broker`만 허용. 사용자 정보·쿼리·프래그먼트 금지 |
+| `serverUrl` | `wss://api.devlink.ai.kr` | ws/wss URL. 경로는 비어 있거나 `/` 또는 `/ws/broker`만 허용. 사용자 정보·쿼리·프래그먼트 금지 |
 | `agent` | `codex` | 영문·숫자·`-`·`_`, 1~64자 |
 | `autoReconnect` | `true` | JSON boolean |
 | `localPort` | `43127` | 0~65535 중 80 제외, 0은 OS 자동 할당 |

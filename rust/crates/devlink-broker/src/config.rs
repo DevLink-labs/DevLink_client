@@ -53,7 +53,7 @@ impl Default for Config {
     /// 기본 권장 설정값 반환
     fn default() -> Self {
         Self {
-            server_url: "ws://localhost:8080".into(),
+            server_url: "wss://api.devlink.ai.kr".into(),
             agent: "codex".into(),
             auto_reconnect: true,
             local_port: default_port(),
