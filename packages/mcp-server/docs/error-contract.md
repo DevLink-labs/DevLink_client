@@ -1,6 +1,6 @@
 # 공통 오류·시간 제한 계약 (S15P31D108-63)
 
-작성일: 2026-10-28 (Asia/Seoul). MCP 소비자 구현 및 Rust/중앙 담당자와 대조할 계약 초안이다. 실제 Rust의 세션·업무 API, 중앙 오류 DTO·requestKey·멱등성은 아직 이 구현으로 검증하지 않았다.
+작성일: 2026-10-28, 갱신일: 2026-10-30 (S15P31D108-97, Asia/Seoul). 실제 Rust·중앙의 오류 코드·알려진 requestKey 보존과 SDK 입력 계약을 반영한다. [실제 중앙 왕복 검증](central-roundtrip.md)과 합성 오류 주입 시험의 범위를 구분한다.
 
 ## 오류 경계와 원본 요청
 
@@ -60,10 +60,12 @@ SDK 2.4.0이 처리하는 프로토콜 오류와 Tool 실행 오류를 구분한
 | session | SESSION_EXPIRED / AGENT_UNREGISTERED | 만료 또는 등록 필요를 구분. 만료만 제한적으로 세션 복구 |
 | domain | FORBIDDEN / BROKER_FORBIDDEN | 업무 경로의 권한 거부만으로 다른 업무 호출·heartbeat를 중단하지 않음 |
 | domain | CENTRAL_UNAUTHENTICATED | 중앙 인증 필요. 로컬 토큰 거부와 구분하고 Rust의 인증 복원을 기다릴 수 있음 |
-| domain | VALIDATION_FAILED / TASK_NOT_FOUND / TASK_STATE_CONFLICT | 업무 검증·대상·상태 오류를 구분 |
+| domain | VALIDATION_FAILED / TASK_NOT_FOUND / TASK_STATE_CONFLICT / TASK_VERSION_CONFLICT | 업무 검증·대상·상태·버전 오류를 구분. 충돌 뒤 자동 재전송하지 않음 |
+| domain | RESOURCE_NOT_FOUND / REQUEST_KEY_CONFLICT / BROKER_STORAGE_FAILED | Rust의 원본 코드와 알려진 taskId/requestKey 및 outcome을 보존. 중앙 키 충돌의 unknown과 로컬 사전 저장 실패의 rejected를 구분 |
 | domain | RECEIVER_NOT_FOUND / RECEIVER_OFFLINE | 저장 전 수신자 거부. 새 작업이 저장된 것으로 표시하지 않으며 오류의 taskId는 제거 |
 | domain | TASK_SAVE_FAILED | 저장 실패 보고. 5xx에서는 명시적 rejected가 없으면 unknown |
 | transport | CENTRAL_UNAVAILABLE / CENTRAL_TIMEOUT | 중앙 연결 오류. unknown이며 로컬 브로커 세션 자체의 장애로 치환하지 않음 |
+| transport | CENTRAL_PROTOCOL_ERROR / CENTRAL_RESULT_UNKNOWN | 중앙 응답 계약 위반·확정되지 않은 결과. unknown과 알려진 taskId/requestKey 보존 |
 | local transport | BROKER_UNAVAILABLE / BROKER_CONNECTION_CLOSED / BROKER_TIMEOUT | 미기동·연결 중단·시간 초과 구분. 결과 unknown, 세션 복구만 가능 |
 
 scope 없는 기존 세션 코드도 지원한다. 업무 경로의 분류되지 않은 403은 안전한 BROKER_FORBIDDEN이며 특정 업무 거부만으로 세션을 영구 중단하지 않는다. /v1/sessions 및 그 하위 claim/heartbeat/bind/delete의 미분류 403은 scope가 없어도 LOCAL_AUTH_FORBIDDEN으로 중단한다. 다만 requestId·본문 검증을 통과한 알려진 session 코드는 HTTP 403에서도 원래 사유를 보존한다. SESSION_EXPIRED는 복구하고 CONFLICT/REPLACED는 소유권 사유로 중단한다. 원문 status 매핑은 Rust와 대조할 항목이다. 업무 경로에서의 정확한 로컬 자격 거부에는 local_auth scope를 제공해야 한다. 401은 로컬 HTTP 자격 거부 전용으로 쓰고 중앙 인증 실패는 domain 오류로 전달하는 초안이다.

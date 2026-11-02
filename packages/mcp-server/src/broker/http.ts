@@ -11,9 +11,10 @@ const sessionCodes = new Set<FaultCode>([
 ]);
 const domainCodes = new Set<FaultCode>([
   'CENTRAL_UNAUTHENTICATED', 'BROKER_FORBIDDEN', 'VALIDATION_FAILED', 'RECEIVER_NOT_FOUND', 'RECEIVER_OFFLINE',
-  'TASK_NOT_FOUND', 'TASK_STATE_CONFLICT', 'TASK_SAVE_FAILED',
+  'TASK_NOT_FOUND', 'TASK_STATE_CONFLICT', 'TASK_VERSION_CONFLICT', 'TASK_SAVE_FAILED',
+  'RESOURCE_NOT_FOUND', 'REQUEST_KEY_CONFLICT', 'BROKER_STORAGE_FAILED',
 ]);
-const centralTransportCodes = new Set<FaultCode>(['CENTRAL_UNAVAILABLE', 'CENTRAL_TIMEOUT']);
+const centralTransportCodes = new Set<FaultCode>(['CENTRAL_UNAVAILABLE', 'CENTRAL_TIMEOUT', 'CENTRAL_PROTOCOL_ERROR', 'CENTRAL_RESULT_UNKNOWN']);
 
 function remoteFault(status: number, remote: RemoteError | undefined, requestId: string, requestKey: string | undefined, control: boolean): BrokerFault {
   let code: FaultCode = status === 403 ? 'BROKER_FORBIDDEN' : 'BROKER_REJECTED';

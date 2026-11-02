@@ -313,7 +313,7 @@ impl TaskClient {
         }
         Ok(
             json!({"taskId":data.task_id.to_string(),"receiverAgentId":data.receiver_agent_id.to_string(),
-            "status":data.status,"version":data.version,"replayed":data.replayed,
+            "status":data.status,"version":data.version.to_string(),"replayed":data.replayed,
             "requestKey":command.request_key,"delivery":data.delivery}),
         )
     }
@@ -341,14 +341,13 @@ impl TaskClient {
     pub async fn list_agents(&self, actor: &Principal) -> Result<Value, TaskError> {
         tokio::time::timeout(self.timeout, async {
             // Verify the credential still represents the local actor before using
-            // a provider whose team selection is implicit in that credential.
-            let confirmed = self.confirm_agent(actor).await?;
-            let team_id = confirmed
-                .get("teamId")
-                .and_then(|v| v.as_str())
-                .unwrap_or(actor.team_id.as_str());
-            let path = format!("/api/v1/agents/teams/{team_id}");
-            let data = self.read(&path).await?;
+            // selecting its verified team in the central list path.
+            self.confirm_agent(actor).await?;
+            let team_id = numeric_id(actor.team_id.as_str())
+                .ok_or_else(|| TaskError::rejected("VALIDATION_FAILED", 400))?;
+            let data = self
+                .read(&format!("/api/v1/agents/teams/{team_id}"))
+                .await?;
             let rows = data.as_array().ok_or_else(protocol_error)?;
             let mut ids = std::collections::HashSet::new();
             let mut agents = Vec::with_capacity(rows.len());
