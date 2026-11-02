@@ -10,6 +10,7 @@ pub mod config;
 pub mod credentials;
 pub mod inbox;
 pub mod local;
+pub mod notifications;
 pub mod private_file;
 pub mod protocol;
 pub mod session_api;
