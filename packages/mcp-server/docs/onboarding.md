@@ -170,3 +170,9 @@ After config inspection, reopen the trusted Host and explicitly call the two rea
 tools and register_agent({}). File applied, Host connected and task roundtrip are
 separate checks. Other MCP items/settings remain present; JSON large numbers
 retain their original values, and only the safe DevLink diff is exposed.
+
+## Actual Host verification
+
+[Two-Host onboarding and recovery verification](onboarding-host-verification.md)
+describes the opt-in isolated-central harness, native evidence, lease waits and
+which failure cases still rely on fixture/provider regressions.
