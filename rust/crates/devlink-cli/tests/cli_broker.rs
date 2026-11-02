@@ -482,6 +482,29 @@ fn config_create_show_update_and_validation() {
     assert!(f.ok(&["--help"]).contains("start"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_validates_existing_config_without_changing_a_running_broker() {
+    let f = Fixture::new();
+    devlink_broker::credentials::set_private_permissions(f.path.parent().unwrap()).unwrap();
+    devlink_broker::credentials::set_private_permissions(&f.path).unwrap();
+    f.ok(&["start"]);
+    let pid = f.health().await.pid;
+    let before = std::fs::read(&f.path).unwrap();
+    let credential_path = devlink_broker::credentials::path(&f.path);
+    let credentials = std::fs::read(&credential_path).unwrap();
+    let runtime = std::fs::read(Runtime::path(&f.path)).unwrap();
+    let output = f.run(&["setup", "--output", "json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["stages"][0]["status"], "succeeded");
+    assert_eq!(value["stages"][0]["reused"], true);
+    assert_eq!(std::fs::read(&f.path).unwrap(), before);
+    assert_eq!(std::fs::read(credential_path).unwrap(), credentials);
+    assert_eq!(std::fs::read(Runtime::path(&f.path)).unwrap(), runtime);
+    assert_eq!(f.health().await.pid, pid);
+    f.ok(&["stop"]);
+}
+
 #[test]
 fn config_names_matching_internal_files_are_preserved() {
     for name in [

@@ -5,6 +5,7 @@ use devlink_broker::{
     config::{self, Config, state_directory},
     local::{self, Runtime},
 };
+use devlink_cli::setup::terminal::{self as setup_terminal, SetupArgs};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -20,8 +21,40 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 }
+
+pub fn parse() -> Cli {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let setup_requested = {
+        let mut arguments = arguments.iter().skip(1);
+        loop {
+            match arguments.next() {
+                Some(arg) if arg == "--config" => {
+                    // A profile named "setup" is a value, not a subcommand.
+                    arguments.next();
+                }
+                Some(arg) if arg.to_str().is_some_and(|s| s.starts_with("--config=")) => {}
+                Some(arg) => break arg == "setup",
+                None => break false,
+            }
+        }
+    };
+    match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // Invalid-value errors omit command usage, so identify the requested
+            // command before parsing. Never echo setup values; preserve legacy errors.
+            if setup_requested && error.use_stderr() {
+                eprintln!("Invalid setup arguments. Run devlink setup --help for usage.");
+                std::process::exit(2);
+            }
+            error.exit()
+        }
+    }
+}
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Run guided setup (execution foundation; stage integrations follow)
+    Setup(SetupArgs),
     /// Create a configuration file without overwriting existing settings
     Init,
     /// Start an independent background broker
@@ -230,6 +263,7 @@ fn secret_input(label: &str, limit: usize, from_stdin: bool) -> Result<String> {
 pub async fn run(cli: Cli) -> Result<()> {
     let path = config::config_path(cli.config)?;
     match cli.command {
+        Commands::Setup(args) => setup_terminal::run(&path, args).await?,
         Commands::Inbox { command } => {
             use devlink_broker::inbox::Inbox;
             match command.unwrap_or(InboxCommand::List {

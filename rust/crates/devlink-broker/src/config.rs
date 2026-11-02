@@ -154,6 +154,11 @@ pub fn state_directory(config_path: &Path) -> PathBuf {
 /// 프로세스 간 상호 배제를 위한 파일 락을 획득합니다 (`fs2::FileExt::try_lock_exclusive`).
 /// 중복 실행이나 동시 설정 수정을 방지합니다.
 pub fn lock(path: &Path) -> Result<File> {
+    try_lock(path)?.context("Another DevLink operation is running")
+}
+
+/// Distinguish lock contention from unsafe paths and I/O failures without parsing text.
+pub fn try_lock(path: &Path) -> Result<Option<File>> {
     crate::credentials::ensure_safe_parent_directory(directory(path))?;
     crate::credentials::ensure_safe_target_if_exists(path)?;
     let file = OpenOptions::new()
@@ -163,15 +168,30 @@ pub fn lock(path: &Path) -> Result<File> {
         .write(true)
         .open(path)
         .context("Cannot open lock file")?;
-    file.try_lock_exclusive()
-        .context("Another DevLink operation is running")?;
-    Ok(file)
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Ok(None)
+        }
+        Err(error) => Err(error).context("Cannot lock DevLink state file"),
+    }
 }
 
 /// JSON 데이터를 원자적(Atomic)으로 파일에 씁니다.
 /// - 임시 파일(TempFile)에 먼저 기록 후 `persist`(rename)하여 도중에 손상되는 일을 방지합니다.
 /// - Unix 환경에서는 권한을 `0o600`(소유자 읽기/쓰기 전용)으로 제한합니다.
 pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let file = prepare_json(path, value, false)?;
+    file.persist(path)
+        .map_err(|_| anyhow::anyhow!("Cannot replace JSON file"))?;
+    Ok(())
+}
+
+fn prepare_json(
+    path: &Path,
+    value: &impl Serialize,
+    private: bool,
+) -> Result<tempfile::NamedTempFile> {
     let mut file =
         tempfile::NamedTempFile::new_in(directory(path)).context("Cannot create temporary file")?;
     #[cfg(unix)]
@@ -180,12 +200,31 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
         file.as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    if private {
+        crate::credentials::set_private_permissions(file.path())?;
+        crate::credentials::verify_private_permissions(file.path())?;
+    }
     serde_json::to_writer_pretty(&mut file, value)?;
     file.write_all(b"\n")?;
     file.as_file().sync_all()?;
-    file.persist(path)
-        .map_err(|_| anyhow::anyhow!("Cannot replace JSON file"))?;
-    Ok(())
+    Ok(file)
+}
+
+/// Shared init implementation. Caller holds control.lock; never clobber a raced file.
+pub(crate) fn initialize_missing(path: &Path, private: bool) -> Result<bool> {
+    if crate::credentials::ensure_safe_target_if_exists(path)? {
+        return Ok(false);
+    }
+    let file = prepare_json(path, &Config::default(), private)?;
+    match file.persist_noclobber(path) {
+        Ok(_) => {
+            #[cfg(unix)]
+            File::open(directory(path))?.sync_all()?;
+            Ok(true)
+        }
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => bail!("Cannot create configuration file"),
+    }
 }
 
 /// 설정 디렉터리와 기본 설정 파일을 초기화합니다.
@@ -194,12 +233,11 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 pub fn init(path: &Path) -> Result<bool> {
     fs::create_dir_all(directory(path)).context("Cannot create config directory")?;
     let _guard = lock(&state_directory(path).join("control.lock"))?;
-    if path.exists() {
+    let created = initialize_missing(path, false)?;
+    if !created {
         Config::load(path)?;
-        return Ok(false);
     }
-    atomic_json(path, &Config::default())?;
-    Ok(true)
+    Ok(created)
 }
 
 /// 설정 파일의 특정 키-값(key-value)을 업데이트합니다.

@@ -354,10 +354,12 @@ dependencies = [
  "devlink-broker",
  "futures-util",
  "rpassword",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

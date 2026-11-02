@@ -4,6 +4,8 @@ Rust CLI와 독립 로컬 브로커입니다. CLI는 설정과 프로세스 수�
 
 실제 중앙 사용자 로그인·팀 선택 이후 Agent 등록/기존 ID 재사용·토큰 발급·브로커 기동·MCP 자격 파일 연결은 [Agent bootstrap](docs/agent-bootstrap.md)을 참고합니다.
 
+`devlink setup --help`에서 [간편설정 실행 흐름·설정 자동 초기화](docs/setup.md)를 확인할 수 있습니다. 설정이 없으면 자동 생성하고 정상 기존 파일은 보존합니다. 입력 수집과 로그인·등록·MCP 단계 연동은 후속 작업입니다.
+
 이 디렉터리는 `devlink-cli`(실행 파일)와 `devlink-broker`(라이브러리)로 구성한 Cargo workspace입니다. CLI가 브로커 라이브러리를 참조하며 브로커는 CLI에 의존하지 않습니다. 아래 명령은 저장소 루트에서 `cd rust`로 이동한 뒤 실행합니다.
 
 2026-10-29: 중앙 `TASK_CREATED` 수신 → 디스크 수신함 저장 → `ACK` 전송을 추가했습니다. 재접속·재시작 후 중복 수신을 구분하고, 저장 실패는 ACK 없이 `InboxFailed`로 중단합니다. 상태·완료·목록·결과의 Rust HTTP provider도 구현되어 있으며, MCP 최종 DTO와 실제 Host 전체 왕복은 후속 범위입니다. [수신함·ACK와 Mock 데모](docs/task-inbox.md)에 보관 위치·제한·실패 정책과 공동 계약이 필요한 항목을 정리했습니다.
