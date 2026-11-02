@@ -1115,7 +1115,9 @@ mod tests {
         }
         timeout(Duration::from_secs(3), async {
             let mut pings = 0;
-            while pings < 3 {
+            // Heartbeats alone do not prove TASK_CREATED reached the storage
+            // worker. Replace the generation only after its write was accepted.
+            while pings < 3 || !inbox.has_pending_write() {
                 let Some(Ok(Message::Text(text))) = socket.next().await else {
                     panic!("connection closed")
                 };
@@ -1148,10 +1150,27 @@ mod tests {
             timeout(Duration::from_secs(5), async {
                 while let Some(Ok(frame)) = socket.next().await {
                     match frame {
-                        Message::Text(text) => assert!(!matches!(
-                            serde_json::from_str::<ClientMessage>(&text),
-                            Ok(ClientMessage::Ack(_))
-                        )),
+                        Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text)
+                            .unwrap()
+                        {
+                            ClientMessage::Ack(_) => panic!("old-generation receipt must not ACK"),
+                            ClientMessage::Heartbeat(HeartbeatPing::Ping { ping_id }) => {
+                                // Disk/ACL work can outlast the pong timeout under
+                                // parallel load. Keep the peer alive until the
+                                // completed receipt exercises the generation fence.
+                                socket
+                                    .send(Message::Text(
+                                        serde_json::to_string(&ServerMessage::heartbeat_pong(
+                                            ping_id,
+                                        ))
+                                        .unwrap()
+                                        .into(),
+                                    ))
+                                    .await
+                                    .unwrap();
+                            }
+                            _ => {}
+                        },
                         Message::Close(_) => break,
                         _ => {}
                     }

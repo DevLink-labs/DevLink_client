@@ -1,7 +1,7 @@
 //! Setup configuration preparation. No prompts, network, credential rotation, or deletion.
 use crate::{
     agent_profile,
-    config::{self, Config},
+    config::{self, Config, ConfigValidationError},
     credentials, private_file, teams, user_auth,
 };
 use std::{
@@ -50,7 +50,7 @@ impl Failure {
 pub struct PreparedConfig {
     pub config: Config,
     pub created: bool,
-    /// A held broker lock can mean running or starting; it forbids configuration writes.
+    /// Snapshot at preparation time, not a live status. A held broker lock forbids config writes.
     pub broker_running: bool,
 }
 
@@ -83,9 +83,10 @@ pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
         if broker_running {
             return Err(Failure::new(FailureKind::BrokerBusy, path));
         }
-        config::initialize_missing(path, true).map_err(|_| {
+        config::initialize_missing(path, true).map_err(|failure| {
             let mut error = Failure::new(FailureKind::Storage, path);
-            error.mutation_uncertain = true;
+            error.created = failure.published;
+            error.mutation_uncertain = failure.published;
             error
         })?
     } else {
@@ -93,6 +94,7 @@ pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
     };
     let config = match existing {
         Some(config) => config,
+        None if created => Config::default(),
         None => read_config(path)
             .map_err(|mut error| {
                 error.created = created;
@@ -143,11 +145,26 @@ fn validate_path(path: &Path) -> Result<(), Failure> {
 }
 
 fn read_config(path: &Path) -> Result<Option<Config>, Failure> {
-    let Some(bytes) = private_file::read_bytes(path, LIMIT)
+    // Config has no secrets, so others may read it. Its serverUrl decides where the
+    // password is sent, so only the current user and trusted principals may write it.
+    if !credentials::ensure_safe_target_if_exists(path)
         .map_err(|_| Failure::new(FailureKind::UnsafeFile, path))?
-    else {
+    {
         return Ok(None);
-    };
+    }
+    credentials::verify_trusted_writer_permissions(path)
+        .map_err(|_| Failure::new(FailureKind::UnsafeFile, path))?;
+    let bytes = private_file::read_bounded(path, LIMIT).map_err(|error| {
+        let io = error.chain().any(|cause| cause.is::<io::Error>());
+        Failure::new(
+            if io {
+                FailureKind::Storage
+            } else {
+                FailureKind::UnsafeFile
+            },
+            path,
+        )
+    })?;
     let config: Config = serde_json::from_slice(&bytes)
         .map_err(|_| Failure::new(FailureKind::InvalidConfig, path).field("$"))?;
     validate_config(&config, path)?;
@@ -156,59 +173,32 @@ fn read_config(path: &Path) -> Result<Option<Config>, Failure> {
 
 fn validate_config(config: &Config, path: &Path) -> Result<(), Failure> {
     let invalid = |field| Failure::new(FailureKind::InvalidConfig, path).field(field);
-    // Reuse provider validators without forwarding their raw messages or values.
-    if user_auth::origin(config).is_err() {
-        // Config::validate also checks other fields. Identify the field using a
-        // default copy so the public diagnostic remains useful and secret-free.
-        let server_only = Config {
-            server_url: config.server_url.clone(),
-            ..Config::default()
-        };
-        if user_auth::origin(&server_only).is_err() {
-            return Err(invalid("serverUrl"));
-        }
-    }
-    let agent_only = Config {
-        agent: config.agent.clone(),
-        ..Config::default()
-    };
-    if agent_only.validate().is_err() {
-        return Err(invalid("agent"));
-    }
-    let reconnect_only = Config {
-        reconnect_initial_ms: config.reconnect_initial_ms,
-        reconnect_max_ms: config.reconnect_max_ms,
-        ..Config::default()
-    };
-    if reconnect_only.validate().is_err() {
-        return Err(invalid("reconnectInitialMs/reconnectMaxMs"));
-    }
-    let timeout_only = Config {
-        auth_timeout_ms: config.auth_timeout_ms,
-        ..Config::default()
-    };
-    if timeout_only.validate().is_err() {
-        return Err(invalid("authTimeoutMs"));
-    }
-    if config.local_port == 80 {
-        return Err(invalid("localPort"));
-    }
-    config.validate().map_err(|_| invalid("$"))?;
+    // origin validates Config first, then enforces HTTPS/loopback. Typed fields
+    // avoid copying its validation rules or exposing the raw config values.
+    user_auth::origin(config).map_err(|error| {
+        invalid(
+            error
+                .downcast_ref::<ConfigValidationError>()
+                .map_or("serverUrl", |error| error.field),
+        )
+    })?;
     Ok(())
 }
 
 fn inspect_snapshots(path: &Path) -> Result<(), Failure> {
+    let file = credentials::path(path);
+    if credentials::ensure_safe_target_if_exists(&file)
+        .map_err(|_| Failure::new(FailureKind::UnsafeFile, &file))?
+    {
+        credentials::load(path).map_err(|_| Failure::new(FailureKind::UnsafeFile, &file))?;
+    }
     for file in [
-        credentials::path(path),
         user_auth::session_path(path),
         teams::selection_path(path),
         agent_profile::path(path),
     ] {
-        let snapshot = private_file::read::<serde_json::Value>(&file, LIMIT)
+        private_file::read::<serde_json::Value>(&file, LIMIT)
             .map_err(|_| Failure::new(FailureKind::UnsafeFile, &file))?;
-        if snapshot.is_some() && file == credentials::path(path) {
-            credentials::load(path).map_err(|_| Failure::new(FailureKind::UnsafeFile, &file))?;
-        }
     }
     Ok(())
 }

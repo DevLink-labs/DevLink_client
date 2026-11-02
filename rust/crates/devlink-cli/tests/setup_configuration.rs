@@ -92,6 +92,49 @@ fn valid_legacy_three_field_settings_keep_their_exact_bytes() {
 }
 
 #[test]
+fn init_and_manually_written_settings_work_without_private_permissions() {
+    for initialized in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        // Like a home profile directory: only trusted principals may write. %TEMP% may
+        // grant other users Modify, which setup correctly rejects for config.json.
+        credentials::set_private_permissions(root.path()).unwrap();
+        let path = root.path().join("config.json");
+        if initialized {
+            assert!(config::init(&path).unwrap());
+        } else {
+            fs::write(&path, serde_json::to_vec(&Config::default()).unwrap()).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            assert!(
+                Command::new("icacls.exe")
+                    .arg(&path)
+                    .args(["/grant", "*S-1-1-0:(R)"])
+                    .stdin(Stdio::null())
+                    .creation_flags(0x08000000)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        let before = fs::read(&path).unwrap();
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        let value = result(&setup(&path, "json"));
+        assert_eq!(value["stages"][0]["status"], "succeeded");
+        assert_eq!(value["stages"][0]["reused"], true);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::metadata(&path).unwrap().permissions(), permissions);
+    }
+}
+
+#[test]
 fn malformed_schema_and_values_are_preserved_with_safe_field_diagnostics() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("config.json");
@@ -307,7 +350,7 @@ fn a_junction_ancestor_is_rejected_before_creating_a_profile() {
 
 #[cfg(windows)]
 #[test]
-fn untrusted_file_permissions_are_rejected_without_changing_the_file() {
+fn public_config_permissions_are_allowed_but_private_snapshot_permissions_are_rejected() {
     use std::os::windows::process::CommandExt;
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("config.json");
@@ -323,7 +366,66 @@ fn untrusted_file_permissions_are_rejected_without_changing_the_file() {
             .status
             .success()
     );
-    assert_failure(&path, "SETUP_UNSAFE_FILE", 5, None);
+    let before = fs::read(&path).unwrap();
+    let value = result(&setup(&path, "json"));
+    assert_eq!(value["stages"][0]["status"], "succeeded");
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    credentials::publish(&path, "http://127.0.0.1:43127").unwrap();
+    let private = credentials::path(&path);
+    assert!(
+        Command::new("icacls.exe")
+            .arg(&private)
+            .args(["/grant", "*S-1-1-0:(R)"])
+            .stdin(Stdio::null())
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let value = assert_failure(&path, "SETUP_UNSAFE_FILE", 5, None);
+    assert_eq!(
+        value["error"]["location"]["file"],
+        private.to_str().unwrap()
+    );
+}
+
+// serverUrl decides where setup sends the password, so other principals must not write it.
+#[cfg(windows)]
+#[test]
+fn config_writable_by_other_principals_is_rejected_without_changing_it() {
+    use std::os::windows::process::CommandExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.json");
+    write_config(&path, &serde_json::to_value(Config::default()).unwrap());
+    assert!(
+        Command::new("icacls.exe")
+            .arg(&path)
+            .args(["/grant", "*S-1-1-0:(M)"])
+            .stdin(Stdio::null())
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let value = assert_failure(&path, "SETUP_UNSAFE_FILE", 5, None);
+    assert_eq!(value["error"]["location"]["file"], path.to_str().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn config_writable_by_group_or_others_is_rejected_without_changing_it() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in [0o664, 0o646] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        write_config(&path, &serde_json::to_value(Config::default()).unwrap());
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        let value = assert_failure(&path, "SETUP_UNSAFE_FILE", 5, None);
+        assert_eq!(value["error"]["location"]["file"], path.to_str().unwrap());
+    }
 }
 
 #[cfg(unix)]
@@ -335,6 +437,7 @@ fn symbolic_link_target_is_rejected_without_touching_its_destination() {
     let path = root.path().join("config.json");
     std::os::unix::fs::symlink(&target, &path).unwrap();
     let before = fs::read(&target).unwrap();
+    assert!(!config::init(&path).unwrap());
     assert_failure(&path, "SETUP_UNSAFE_FILE", 5, None);
     assert_eq!(fs::read(&target).unwrap(), before);
 }

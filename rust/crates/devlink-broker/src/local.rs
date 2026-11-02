@@ -117,15 +117,8 @@ pub fn running(config_path: &Path) -> Result<bool> {
         return Ok(false);
     }
     let path = state.join("broker.lock");
-    crate::credentials::ensure_safe_target_if_exists(&path)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)?;
-    match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => {
+    match config::try_lock(&path)? {
+        Some(_guard) => {
             // Remove stale discovery data while holding the same lock required by a new broker.
             crate::credentials::ensure_safe_target_if_exists(&Runtime::path(config_path))?;
             match fs::remove_file(Runtime::path(config_path)) {
@@ -135,10 +128,7 @@ pub fn running(config_path: &Path) -> Result<bool> {
             }
             Ok(false)
         }
-        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
-            Ok(true)
-        }
-        Err(_) => bail!("Cannot determine broker lock state"),
+        None => Ok(true),
     }
 }
 

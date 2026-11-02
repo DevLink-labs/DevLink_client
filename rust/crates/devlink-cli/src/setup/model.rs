@@ -180,7 +180,7 @@ impl ErrorCode {
                 "Another configuration operation holds the control lock. Wait for it to finish, then rerun setup."
             }
             Self::BrokerBusy => {
-                "The broker is running or starting. Stop this profile's broker before creating its missing configuration."
+                "The broker is running or starting. Stop this profile's broker before creating configuration or changing Agent credentials."
             }
             Self::ConfigStorageFailed => {
                 "Configuration storage failed. Inspect the indicated path and existing file before retrying; setup did not remove it."

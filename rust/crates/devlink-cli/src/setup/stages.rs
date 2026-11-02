@@ -159,43 +159,35 @@ impl<I: LoginInput, T: TeamInput> StepExecutor for SetupStages<I, T> {
 
     async fn resolve_input(&mut self, required: &SetupError) -> Result<(), SetupError> {
         if required.step == Step::SelectTeam {
-            return match self.team_input.request(&self.team_choices).await {
+            let code = match self.team_input.request(&self.team_choices).await {
                 Ok(id) => {
                     self.requested_team = Some(id);
-                    Ok(())
+                    return Ok(());
                 }
-                Err(TeamInputError::Unavailable) => Err(required.clone()),
-                Err(error) => {
-                    let mut safe = SetupError::new(
-                        if matches!(error, TeamInputError::Cancelled) {
-                            ErrorCode::Cancelled
-                        } else {
-                            ErrorCode::InputInvalid
-                        },
-                        Step::SelectTeam,
-                        Outcome::NotApplied,
-                    );
-                    safe.known = required.known.clone();
-                    Err(safe)
-                }
+                Err(TeamInputError::Unavailable) => return Err(required.clone()),
+                Err(TeamInputError::Cancelled) => ErrorCode::Cancelled,
+                Err(TeamInputError::ReadFailed) => ErrorCode::InternalError,
+                Err(TeamInputError::Invalid) => ErrorCode::InputInvalid,
             };
+            let mut safe = SetupError::new(code, Step::SelectTeam, Outcome::NotApplied);
+            safe.known = required.known.clone();
+            return Err(safe);
         }
-        match self.input.request().await {
+        let code = match self.input.request().await {
             Ok(credentials) => {
                 self.credentials = Some(credentials);
-                Ok(())
+                return Ok(());
             }
-            Err(LoginInputError::Unavailable) => Err(required.clone()),
-            Err(failure) => Err(SetupError::new(
-                match failure {
-                    LoginInputError::Invalid => ErrorCode::InputInvalid,
-                    LoginInputError::Cancelled => ErrorCode::Cancelled,
-                    _ => ErrorCode::InputInvalid,
-                },
-                Step::Authenticate,
-                Outcome::NotApplied,
-            )),
-        }
+            Err(LoginInputError::Unavailable) => return Err(required.clone()),
+            Err(LoginInputError::Invalid) => ErrorCode::InputInvalid,
+            Err(LoginInputError::Cancelled) => ErrorCode::Cancelled,
+            Err(LoginInputError::ReadFailed) => ErrorCode::InternalError,
+        };
+        Err(SetupError::new(
+            code,
+            Step::Authenticate,
+            Outcome::NotApplied,
+        ))
     }
 
     fn finish(self) {}
@@ -424,10 +416,18 @@ fn local_session_error(path: &std::path::Path, code: ErrorCode) -> SetupError {
 
 fn auth_error(path: &std::path::Path, error: &anyhow::Error, login_attempted: bool) -> SetupError {
     let status = user_auth::rejection_status(error);
-    let code = match error.downcast_ref::<AuthFault>().map(|fault| fault.kind) {
+    let kind = error.downcast_ref::<AuthFault>().map(|fault| fault.kind);
+    let code = match kind {
         Some(AuthFaultKind::Unavailable) => ErrorCode::CentralUnavailable,
         Some(AuthFaultKind::Protocol | AuthFaultKind::IdentityMismatch) => ErrorCode::ProtocolError,
         Some(AuthFaultKind::Busy) => ErrorCode::AuthBusy,
+        Some(AuthFaultKind::ConfigBusy) => ErrorCode::ConfigBusy,
+        Some(AuthFaultKind::BrokerBusy) => ErrorCode::BrokerBusy,
+        Some(AuthFaultKind::ConfigInvalid) => ErrorCode::ConfigInvalid,
+        Some(AuthFaultKind::ConfigUnreadable) => ErrorCode::ConfigStorageFailed,
+        Some(AuthFaultKind::ControlLockFailed | AuthFaultKind::BrokerLockFailed) => {
+            ErrorCode::UnsafeFile
+        }
         Some(AuthFaultKind::SessionConflict) => ErrorCode::AuthSessionConflict,
         None => match status {
             Some(408 | 429 | 500..=599) => ErrorCode::CentralUnavailable,
@@ -437,11 +437,28 @@ fn auth_error(path: &std::path::Path, error: &anyhow::Error, login_attempted: bo
         },
     };
     let mut safe = local_session_error(path, code);
-    if code == ErrorCode::AuthBusy {
-        safe.location = Some(ErrorLocation {
-            file: devlink_broker::config::state_directory(path).join("account.lock"),
-            field: None,
-        });
+    let state = || devlink_broker::config::state_directory(path);
+    let location = match kind {
+        Some(AuthFaultKind::ConfigInvalid) => Some((
+            path.to_path_buf(),
+            Some(
+                error
+                    .downcast_ref::<devlink_broker::config::ConfigValidationError>()
+                    .map_or("$", |invalid| invalid.field),
+            ),
+        )),
+        Some(AuthFaultKind::ConfigUnreadable) => Some((path.to_path_buf(), None)),
+        Some(AuthFaultKind::ConfigBusy | AuthFaultKind::ControlLockFailed) => {
+            Some((state().join("control.lock"), None))
+        }
+        Some(AuthFaultKind::BrokerBusy | AuthFaultKind::BrokerLockFailed) => {
+            Some((state().join("broker.lock"), None))
+        }
+        Some(AuthFaultKind::Busy) => Some((state().join("account.lock"), None)),
+        _ => None,
+    };
+    if let Some((file, field)) = location {
+        safe.location = Some(ErrorLocation { file, field });
     }
     safe.outcome = if code == ErrorCode::AuthStorageFailed
         || (login_attempted
@@ -450,10 +467,7 @@ fn auth_error(path: &std::path::Path, error: &anyhow::Error, login_attempted: bo
                 ErrorCode::CentralUnavailable | ErrorCode::ProtocolError
             )) {
         Outcome::Unknown
-    } else if matches!(
-        error.downcast_ref::<AuthFault>().map(|fault| fault.kind),
-        Some(AuthFaultKind::IdentityMismatch)
-    ) {
+    } else if kind == Some(AuthFaultKind::IdentityMismatch) {
         Outcome::Applied
     } else {
         Outcome::NotApplied
@@ -462,4 +476,43 @@ fn auth_error(path: &std::path::Path, error: &anyhow::Error, login_attempted: bo
         safe.outcome = Outcome::Applied;
     }
     safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct BrokenInput;
+    impl LoginInput for BrokenInput {
+        fn available(&self) -> bool {
+            true
+        }
+        async fn request(&mut self) -> Result<LoginCredentials, LoginInputError> {
+            Err(LoginInputError::ReadFailed)
+        }
+    }
+    impl TeamInput for BrokenInput {
+        fn available(&self) -> bool {
+            true
+        }
+        async fn request(&mut self, _: &[TeamChoice]) -> Result<u64, TeamInputError> {
+            Err(TeamInputError::ReadFailed)
+        }
+    }
+
+    #[tokio::test]
+    async fn input_io_failures_are_internal_errors_and_preserve_known_state() {
+        let mut stages = SetupStages::new(BrokenInput).with_team_input(BrokenInput);
+        for step in [Step::Authenticate, Step::SelectTeam] {
+            let mut required = SetupError::new(ErrorCode::InputRequired, step, Outcome::NotApplied);
+            required.known.user_id = Some("51".into());
+            let error = stages.resolve_input(&required).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::InternalError);
+            assert_eq!(error.step, step);
+            assert_eq!(error.outcome, Outcome::NotApplied);
+            if step == Step::SelectTeam {
+                assert_eq!(error.known.user_id.as_deref(), Some("51"));
+            }
+        }
+    }
 }

@@ -196,13 +196,28 @@ fn stopped(config_path: &Path) -> Result<SetupGuard> {
     let directory = config::state_directory(config_path);
     credentials::ensure_safe_parent_directory(&directory)?;
     let lock = directory.join("control.lock");
-    if std::fs::symlink_metadata(&lock).is_ok() {
-        credentials::verify_path_safety(&lock)?;
-    }
-    let guard = config::lock(&lock)?;
+    let guard = (|| {
+        if std::fs::symlink_metadata(&lock).is_ok() {
+            credentials::verify_path_safety(&lock)?;
+        }
+        config::try_lock(&lock)
+    })()
+    .map_err(|error| user_auth::classify(error, user_auth::AuthFaultKind::ControlLockFailed))?
+    .ok_or_else(|| {
+        user_auth::fault(
+            user_auth::AuthFaultKind::ConfigBusy,
+            "Another DevLink operation is running",
+        )
+    })?;
     // Also synchronize with direct/internal broker startup before runtime.json exists.
-    let broker = config::lock(&directory.join("broker.lock"))
-        .context("Stop the broker before changing Agent credentials (running or starting)")?;
+    let broker = config::try_lock(&directory.join("broker.lock"))
+        .map_err(|error| user_auth::classify(error, user_auth::AuthFaultKind::BrokerLockFailed))?
+        .ok_or_else(|| {
+            user_auth::fault(
+                user_auth::AuthFaultKind::BrokerBusy,
+                "Stop the broker before changing Agent credentials (running or starting)",
+            )
+        })?;
     Ok(SetupGuard {
         _control: guard,
         _broker: broker,
@@ -563,7 +578,7 @@ pub fn before_login_publish(config_path: &Path, user: u64) -> Result<()> {
     let Some(mut profile) = load_for_explicit_use(config_path)? else {
         return Ok(());
     };
-    let current = user_auth::origin(&Config::load(config_path)?)?;
+    let current = user_auth::config_origin(config_path)?;
     if profile.user_id != user || profile.origin != current.as_str() {
         let _control = stopped(config_path)?;
         if let Some(agent) = profile.agent().cloned() {

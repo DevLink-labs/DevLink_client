@@ -147,18 +147,29 @@ async fn cli_creates_tasks_with_agent_bearer_and_reuses_request_key_after_restar
         f.wait_status(ConnectionStatus::Connected).await;
         let runtime = Runtime::load(&f.path).unwrap();
         let credentials = devlink_broker::credentials::load(&f.path).unwrap();
+        // Runtime::client is a one-second health/control client. Task creation
+        // includes durable request-key storage and central REST verification;
+        // let the endpoint's own budget decide its result under parallel load.
         let client = runtime.client().unwrap();
+        let request_timeout = devlink_broker::business_api::LOCAL_BUDGET + Duration::from_secs(1);
         let session: serde_json::Value = client.post(runtime.url("/v1/sessions")).bearer_auth(&credentials.local_token)
+            .timeout(request_timeout)
             .json(&serde_json::json!({"requestId":"claim","instanceId":"creator","mode":"fresh","agentId":"12"}))
             .send().await.unwrap().json().await.unwrap();
         let mut context = session["data"]["principal"].clone();
         context["sessionId"] = session["data"]["sessionId"].clone();
         let response = client.post(runtime.url("/v1/tasks/create")).bearer_auth(&credentials.local_token)
+            .timeout(request_timeout)
             .json(&serde_json::json!({"requestId":"stable-cli-task","operation":"create_task","context":context,
                 "arguments":{"recipientAgentId":"13","title":"작업","description":"CLI 생성 검증"}}))
             .send().await.unwrap();
-        assert_eq!(response.status().as_u16(), 200);
+        let status = response.status();
         let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(
+            status.as_u16(),
+            200,
+            "task create attempt {attempt}: {body}"
+        );
         assert_eq!(body["data"]["taskId"], "101");
         assert_eq!(body["data"]["replayed"], attempt == 1);
         if let Some(key) = &original_key {

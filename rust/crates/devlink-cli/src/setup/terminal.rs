@@ -166,11 +166,24 @@ impl LoginInput for TerminalLoginInput {
                 return Err(LoginInputError::Unavailable);
             }
             let password = crate::terminal_input::secret_input("Password", 72, password_stdin)
-                .map_err(|_| LoginInputError::Invalid)?;
+                .map_err(secret_input_error)?;
             LoginCredentials::new(email, password)
         })
         .await
         .map_err(|_| LoginInputError::ReadFailed)?
+    }
+}
+
+fn secret_input_error(error: anyhow::Error) -> LoginInputError {
+    match error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+    {
+        Some(std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::Interrupted) => {
+            LoginInputError::Cancelled
+        }
+        Some(_) => LoginInputError::ReadFailed,
+        None => LoginInputError::Invalid,
     }
 }
 
@@ -247,5 +260,33 @@ impl<W: Write> Renderer<W> {
         writeln!(self.writer)
             .and_then(|_| self.writer.flush())
             .map_err(|_| ProgressUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_input_distinguishes_cancellation_io_and_invalid_values() {
+        for kind in [
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            let error =
+                anyhow::Error::from(std::io::Error::from(kind)).context("hidden input failed");
+            assert!(matches!(
+                secret_input_error(error),
+                LoginInputError::Cancelled
+            ));
+        }
+        assert!(matches!(
+            secret_input_error(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into()),
+            LoginInputError::ReadFailed
+        ));
+        assert!(matches!(
+            secret_input_error(anyhow::anyhow!("invalid length")),
+            LoginInputError::Invalid
+        ));
     }
 }
