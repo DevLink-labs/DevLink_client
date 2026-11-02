@@ -3,7 +3,7 @@ use crate::{
     config::{self, Config},
     credentials, private_file,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use reqwest::{
     Client, Method, Url,
     cookie::{CookieStore, Jar},
@@ -86,6 +86,56 @@ pub fn rejection_status(error: &anyhow::Error) -> Option<u16> {
     error.downcast_ref::<ApiRejection>().map(|e| e.status)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthFaultKind {
+    Unavailable,
+    Protocol,
+    IdentityMismatch,
+    Busy,
+    SessionConflict,
+}
+
+#[derive(Debug)]
+pub struct AuthFault {
+    pub kind: AuthFaultKind,
+    message: &'static str,
+}
+
+impl std::fmt::Display for AuthFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for AuthFault {}
+
+fn fault(kind: AuthFaultKind, message: &'static str) -> anyhow::Error {
+    AuthFault { kind, message }.into()
+}
+
+/// Public state only. Cookies and CSRF credentials stay inside UserClient.
+pub enum SessionCheck {
+    Authenticated(User),
+    LoginRequired { expired_now: bool },
+    OriginMismatch,
+    InvalidLocalSession,
+}
+
+pub struct LoginResult {
+    pub user: User,
+    pub reused: bool,
+}
+
+#[derive(Debug)]
+struct SessionInvalidated;
+impl std::fmt::Display for SessionInvalidated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The previous user session was confirmed expired")
+    }
+}
+pub fn session_was_invalidated(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SessionInvalidated>().is_some()
+}
+
 /// A locked, authenticated user session. No Debug implementation exposes cookies.
 pub struct UserClient {
     client: Client,
@@ -161,7 +211,8 @@ impl UserClient {
         if std::fs::symlink_metadata(&lock_path).is_ok() {
             credentials::verify_path_safety(&lock_path)?;
         }
-        let lock = config::lock(&lock_path)?;
+        let lock = config::try_lock(&lock_path)?
+            .ok_or_else(|| fault(AuthFaultKind::Busy, "Another DevLink operation is running"))?;
         let path = session_path(config_path);
         let empty = || Snapshot {
             schema_version: 1,
@@ -216,29 +267,37 @@ impl UserClient {
 
     pub async fn authenticated(config_path: &Path) -> Result<Self> {
         let mut this = Self::load(config_path)?;
+        this.verify_session().await?;
+        Ok(this)
+    }
+
+    async fn verify_session(&mut self) -> Result<()> {
         ensure!(
-            this.local_problem.is_none(),
+            self.local_problem.is_none(),
             "Local user session cannot be used; run devlink auth login or auth logout"
         );
-        let old_user = match &this.snapshot.state {
+        let old_user = match &self.snapshot.state {
             SessionState::Authenticated { user, .. } => user.user_id,
             SessionState::Expired => bail!("USER_SESSION_EXPIRED: run devlink auth login"),
             SessionState::LoggedOut => bail!("USER_LOGIN_REQUIRED: run devlink auth login"),
         };
-        let user: User = this
+        let user: User = self
             .exchange(Method::GET, "/api/v1/auth/users/me", None, None)
             .await?;
         if !valid_user(&user) || user.user_id != old_user {
-            this.snapshot.state = SessionState::Expired;
-            this.save()?;
-            bail!("Central user identity changed; sign in again");
+            self.snapshot.state = SessionState::Expired;
+            self.save()?;
+            return Err(fault(
+                AuthFaultKind::IdentityMismatch,
+                "Central user identity changed; sign in again",
+            ));
         }
-        this.snapshot.state = SessionState::Authenticated {
+        self.snapshot.state = SessionState::Authenticated {
             user,
-            cookie: this.cookie()?,
+            cookie: self.cookie()?,
         };
-        this.save()?;
-        Ok(this)
+        self.save()?;
+        Ok(())
     }
 
     pub fn user(&self) -> Result<&User> {
@@ -256,16 +315,16 @@ impl UserClient {
         let header = self
             .jar
             .cookies(&self.origin)
-            .context("Central session cookie missing")?;
+            .ok_or_else(|| fault(AuthFaultKind::Protocol, "Central session cookie missing"))?;
         let text = header
             .to_str()
-            .map_err(|_| anyhow::anyhow!("Invalid central cookie"))?;
+            .map_err(|_| fault(AuthFaultKind::Protocol, "Invalid central cookie"))?;
         let cookie = text
             .split(';')
             .map(str::trim)
             .find_map(|part| part.strip_prefix("JSESSIONID="))
             .filter(|value| valid_cookie(value))
-            .context("Central session cookie missing")?;
+            .ok_or_else(|| fault(AuthFaultKind::Protocol, "Central session cookie missing"))?;
         Ok(cookie.to_owned())
     }
 
@@ -277,12 +336,15 @@ impl UserClient {
         let csrf: Csrf = self
             .exchange(Method::GET, "/api/v1/auth/csrf", None, None)
             .await?;
-        ensure!(
-            matches!(csrf.header_name.as_str(), "X-CSRF-TOKEN" | "X-XSRF-TOKEN")
-                && !csrf.token.is_empty()
-                && csrf.token.len() <= 8192,
-            "Invalid central CSRF response"
-        );
+        if !(matches!(csrf.header_name.as_str(), "X-CSRF-TOKEN" | "X-XSRF-TOKEN")
+            && !csrf.token.is_empty()
+            && csrf.token.len() <= 8192)
+        {
+            return Err(fault(
+                AuthFaultKind::Protocol,
+                "Invalid central CSRF response",
+            ));
+        }
         Ok(csrf)
     }
 
@@ -330,15 +392,16 @@ impl UserClient {
         }
         if let Some(csrf) = csrf {
             let mut value = HeaderValue::from_str(&csrf.token)
-                .map_err(|_| anyhow::anyhow!("Invalid CSRF token"))?;
+                .map_err(|_| fault(AuthFaultKind::Protocol, "Invalid CSRF token"))?;
             value.set_sensitive(true);
             let name = HeaderName::from_bytes(csrf.header_name.as_bytes())
-                .map_err(|_| anyhow::anyhow!("Invalid CSRF header"))?;
+                .map_err(|_| fault(AuthFaultKind::Protocol, "Invalid CSRF header"))?;
             request = request.header(name, value);
         }
         let mut response = request.send().await.map_err(|_| {
-            anyhow::anyhow!(
-                "CENTRAL_UNAVAILABLE: request outcome may be unknown; no automatic retry"
+            fault(
+                AuthFaultKind::Unavailable,
+                "CENTRAL_UNAVAILABLE: request outcome may be unknown; no automatic retry",
             )
         })?;
         let status = response.status().as_u16();
@@ -351,30 +414,45 @@ impl UserClient {
             }
             .into());
         }
-        ensure!(
-            !(300..400).contains(&status),
-            "Central redirects are not supported"
-        );
+        if (300..400).contains(&status) {
+            return Err(fault(
+                AuthFaultKind::Protocol,
+                "Central redirects are not supported",
+            ));
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| {
-            anyhow::anyhow!("Central response incomplete; request outcome may be unknown")
+            fault(
+                AuthFaultKind::Unavailable,
+                "Central response incomplete; request outcome may be unknown",
+            )
         })? {
-            ensure!(
-                bytes.len() + chunk.len() <= RESPONSE_LIMIT,
-                "Central response exceeds size limit"
-            );
+            if bytes.len() + chunk.len() > RESPONSE_LIMIT {
+                return Err(fault(
+                    AuthFaultKind::Protocol,
+                    "Central response exceeds size limit",
+                ));
+            }
             bytes.extend_from_slice(&chunk);
         }
         let envelope: Envelope = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(_) if !(200..300).contains(&status) => return Err(rejection(status, None)),
-            Err(_) => bail!("Invalid central response; request outcome may be unknown"),
+            Err(_) => {
+                return Err(fault(
+                    AuthFaultKind::Protocol,
+                    "Invalid central response; request outcome may be unknown",
+                ));
+            }
         };
         if !(200..300).contains(&status) || !envelope.success {
             return Err(rejection(status, envelope.code.as_deref()));
         }
         serde_json::from_value(envelope.data.unwrap_or(Value::Null)).map_err(|_| {
-            anyhow::anyhow!("Invalid central response data; request outcome may be unknown")
+            fault(
+                AuthFaultKind::Protocol,
+                "Invalid central response data; request outcome may be unknown",
+            )
         })
     }
 }
@@ -400,7 +478,7 @@ fn rejection(status: u16, code: Option<&str>) -> anyhow::Error {
     .into()
 }
 
-pub async fn login(config_path: &Path, email: &str, password: &str) -> Result<User> {
+fn validate_login_input(email: &str, password: &str) -> Result<()> {
     ensure!(
         !email.trim().is_empty()
             && email.len() <= 320
@@ -408,7 +486,65 @@ pub async fn login(config_path: &Path, email: &str, password: &str) -> Result<Us
             && password.len() <= 72,
         "Invalid login input (password limit: 72 UTF-8 bytes)"
     );
+    Ok(())
+}
+
+pub async fn login(config_path: &Path, email: &str, password: &str) -> Result<User> {
+    validate_login_input(email, password)?;
+    login_with_client(UserClient::load(config_path)?, config_path, email, password).await
+}
+
+/// Recheck under the same account lock used for login. A session created while the
+/// UI was collecting input wins; setup must not replace a now-valid session.
+pub async fn login_for_setup(
+    config_path: &Path,
+    email: &str,
+    password: &str,
+    expected_origin: &str,
+) -> Result<LoginResult> {
     let mut client = UserClient::load(config_path)?;
+    require_setup_origin(&client, expected_origin)?;
+    if client.local_problem.is_some() {
+        return Err(fault(
+            AuthFaultKind::SessionConflict,
+            "The local session changed; inspect it before signing in",
+        ));
+    }
+    let mut expired_now = false;
+    if matches!(client.snapshot.state, SessionState::Authenticated { .. }) {
+        match client.verify_session().await {
+            Ok(()) => {
+                return Ok(LoginResult {
+                    user: client.user()?.clone(),
+                    reused: true,
+                });
+            }
+            Err(error) if rejection_status(&error) == Some(401) => expired_now = true,
+            Err(error) => return Err(error),
+        }
+    }
+    validate_login_input(email, password)?;
+    login_with_client(client, config_path, email, password)
+        .await
+        .map(|user| LoginResult {
+            user,
+            reused: false,
+        })
+        .map_err(|error| {
+            if expired_now {
+                error.context(SessionInvalidated)
+            } else {
+                error
+            }
+        })
+}
+
+async fn login_with_client(
+    mut client: UserClient,
+    config_path: &Path,
+    email: &str,
+    password: &str,
+) -> Result<User> {
     // Start a new cookie jar: failed login must preserve an existing local session.
     client.jar = Arc::new(Jar::default());
     client.client = transport(client.jar.clone())?;
@@ -426,10 +562,12 @@ pub async fn login(config_path: &Path, email: &str, password: &str) -> Result<Us
         let verified: User = client
             .exchange(Method::GET, "/api/v1/auth/users/me", None, None)
             .await?;
-        ensure!(
-            valid_user(&verified) && user.user_id == verified.user_id,
-            "Central login identity mismatch"
-        );
+        if !valid_user(&verified) || user.user_id != verified.user_id {
+            return Err(fault(
+                AuthFaultKind::IdentityMismatch,
+                "Central login identity mismatch",
+            ));
+        }
         crate::agent_profile::before_login_publish(config_path, verified.user_id)?;
         client.csrf().await?; // Login rotates the session and the CSRF token.
         client.snapshot = Snapshot {
@@ -467,6 +605,38 @@ pub async fn status(config_path: &Path) -> Result<Value> {
             Ok(json!({"state":"authenticated","authenticated":true,"user":client.user()?}))
         }
     }
+}
+
+/// Check once under the account lock. Only a confirmed 401 requests reauthentication;
+/// transport, 5xx, protocol, and identity failures remain errors and preserve their class.
+pub async fn check_session(config_path: &Path, expected_origin: &str) -> Result<SessionCheck> {
+    let mut client = UserClient::load(config_path)?;
+    require_setup_origin(&client, expected_origin)?;
+    match client.local_problem {
+        Some("origin_mismatch") => return Ok(SessionCheck::OriginMismatch),
+        Some(_) => return Ok(SessionCheck::InvalidLocalSession),
+        None => {}
+    }
+    if !matches!(client.snapshot.state, SessionState::Authenticated { .. }) {
+        return Ok(SessionCheck::LoginRequired { expired_now: false });
+    }
+    match client.verify_session().await {
+        Ok(()) => Ok(SessionCheck::Authenticated(client.user()?.clone())),
+        Err(error) if rejection_status(&error) == Some(401) => {
+            Ok(SessionCheck::LoginRequired { expired_now: true })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn require_setup_origin(client: &UserClient, expected_origin: &str) -> Result<()> {
+    if client.central_origin() != expected_origin {
+        return Err(fault(
+            AuthFaultKind::SessionConflict,
+            "The central origin changed during setup; inspect the profile and start setup again",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn logout(config_path: &Path) -> Result<bool> {

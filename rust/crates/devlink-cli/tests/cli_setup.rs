@@ -67,11 +67,11 @@ fn setup_initializes_the_selected_profile_then_reuses_it_without_an_init_command
     .enumerate()
     {
         let out = cli(&args);
-        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(out.status.code(), Some(4));
         assert!(out.stderr.is_empty());
         let result: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(result["exitCode"], 3);
-        assert_eq!(result["error"]["code"], "SETUP_STEP_UNAVAILABLE");
+        assert_eq!(result["exitCode"], 4);
+        assert_eq!(result["error"]["code"], "SETUP_AUTH_REQUIRED");
         assert_eq!(result["error"]["step"], "authenticate");
         assert_eq!(result["stages"].as_array().unwrap().len(), 9);
         assert_eq!(result["stages"][0]["status"], "succeeded");
@@ -96,7 +96,7 @@ fn jsonl_streams_progress_then_exactly_one_final_result() {
         "--output",
         "jsonl",
     ]);
-    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(out.status.code(), Some(4));
     assert!(out.stderr.is_empty());
     let lines: Vec<Value> = String::from_utf8(out.stdout)
         .unwrap()

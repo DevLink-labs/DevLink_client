@@ -4,7 +4,7 @@ Rust CLI와 독립 로컬 브로커입니다. CLI는 설정과 프로세스 수�
 
 실제 중앙 사용자 로그인·팀 선택 이후 Agent 등록/기존 ID 재사용·토큰 발급·브로커 기동·MCP 자격 파일 연결은 [Agent bootstrap](docs/agent-bootstrap.md)을 참고합니다.
 
-`devlink setup --help`에서 [간편설정 실행 흐름·설정 자동 초기화](docs/setup.md)를 확인할 수 있습니다. 설정이 없으면 자동 생성하고 정상 기존 파일은 보존합니다. 입력 수집과 로그인·등록·MCP 단계 연동은 후속 작업입니다.
+`devlink setup --help`에서 [간편설정 실행 흐름·설정 초기화·사용자 로그인](docs/setup.md)을 확인할 수 있습니다. 설정을 준비한 뒤 서버에서 확인한 정상 세션을 재사용하고, 미로그인·확인된 만료 상태에서만 로그인 입력을 요청합니다. 팀·Agent 선택과 등록·MCP 단계 연동은 후속 작업입니다.
 
 이 디렉터리는 `devlink-cli`(실행 파일)와 `devlink-broker`(라이브러리)로 구성한 Cargo workspace입니다. CLI가 브로커 라이브러리를 참조하며 브로커는 CLI에 의존하지 않습니다. 아래 명령은 저장소 루트에서 `cd rust`로 이동한 뒤 실행합니다.
 

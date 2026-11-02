@@ -59,7 +59,7 @@ fn fresh_setup_creates_private_defaults_and_preserves_them_on_second_run() {
     let path = root.path().join("프로필 with spaces/config.json");
     let first = setup(&path, "json");
     let value = result(&first);
-    assert_eq!(first.status.code(), Some(3));
+    assert_eq!(first.status.code(), Some(4));
     assert_eq!(value["stages"][0]["outcome"], "applied");
     assert_eq!(value["error"]["step"], "authenticate");
     let config = Config::load(&path).unwrap();
@@ -187,7 +187,7 @@ fn existing_credentials_are_preserved_and_never_printed_or_rotated() {
     let credential_path = credentials::path(&path);
     let before = fs::read(&credential_path).unwrap();
     let output = setup(&path, "json");
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(4));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(&creds.local_token));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&creds.local_token));
     assert_eq!(fs::read(&credential_path).unwrap(), before);
@@ -256,7 +256,7 @@ fn concurrent_setup_processes_publish_defaults_at_most_once() {
     let mut created = 0;
     for output in outputs {
         assert!(
-            matches!(output.status.code(), Some(3 | 6)),
+            matches!(output.status.code(), Some(4 | 6)),
             "{}",
             String::from_utf8_lossy(&output.stdout)
         );

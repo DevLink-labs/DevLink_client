@@ -100,6 +100,22 @@ pub enum ErrorCode {
     BrokerBusy,
     #[serde(rename = "SETUP_CONFIG_STORAGE_FAILED")]
     ConfigStorageFailed,
+    #[serde(rename = "SETUP_AUTH_REQUIRED")]
+    AuthRequired,
+    #[serde(rename = "SETUP_AUTH_REJECTED")]
+    AuthRejected,
+    #[serde(rename = "SETUP_CENTRAL_UNAVAILABLE")]
+    CentralUnavailable,
+    #[serde(rename = "SETUP_PROTOCOL_ERROR")]
+    ProtocolError,
+    #[serde(rename = "SETUP_AUTH_SESSION_CONFLICT")]
+    AuthSessionConflict,
+    #[serde(rename = "SETUP_AUTH_STORAGE_FAILED")]
+    AuthStorageFailed,
+    #[serde(rename = "SETUP_AUTH_BUSY")]
+    AuthBusy,
+    #[serde(rename = "SETUP_CANCELLED")]
+    Cancelled,
 }
 
 impl ErrorCode {
@@ -113,6 +129,11 @@ impl ErrorCode {
             Self::InternalError => 1,
             Self::UnsafeFile | Self::ConfigStorageFailed => 5,
             Self::ConfigBusy | Self::BrokerBusy => 6,
+            Self::AuthRequired | Self::AuthRejected => 4,
+            Self::CentralUnavailable | Self::ProtocolError => 7,
+            Self::AuthSessionConflict | Self::AuthBusy => 6,
+            Self::AuthStorageFailed => 5,
+            Self::Cancelled => 130,
         }
     }
 
@@ -146,6 +167,30 @@ impl ErrorCode {
             Self::ConfigStorageFailed => {
                 "Configuration storage failed. Inspect the indicated path and existing file before retrying; setup did not remove it."
             }
+            Self::AuthRequired => {
+                "Sign in is required. Provide an email and hidden password, or use --email with --password-stdin."
+            }
+            Self::AuthRejected => {
+                "Authentication was rejected. Check the account credentials and retry explicitly."
+            }
+            Self::CentralUnavailable => {
+                "The central service is temporarily unavailable. Check the connection and retry; this is not evidence of session expiry."
+            }
+            Self::ProtocolError => {
+                "The central authentication response could not be verified. Inspect the provider contract before retrying."
+            }
+            Self::AuthSessionConflict => {
+                "The central origin or stored session changed. Inspect the profile, then restart setup or sign in explicitly with devlink auth login."
+            }
+            Self::AuthStorageFailed => {
+                "The user session could not be read or saved. Inspect its private files, permissions, and any running broker before retrying."
+            }
+            Self::AuthBusy => {
+                "Another user session operation holds the account lock. Wait for it to finish, then rerun setup."
+            }
+            Self::Cancelled => {
+                "Setup input was cancelled. Inspect the completed stages before resuming."
+            }
         }
     }
 
@@ -163,6 +208,14 @@ impl ErrorCode {
             Self::ConfigBusy => "wait_for_config_operation",
             Self::BrokerBusy => "stop_owned_broker_then_retry",
             Self::ConfigStorageFailed => "inspect_config_before_retry",
+            Self::AuthRequired => "login",
+            Self::AuthRejected => "login",
+            Self::CentralUnavailable => "check_network_then_retry",
+            Self::ProtocolError => "check_provider_contract",
+            Self::AuthSessionConflict => "inspect_profile_then_reauthenticate",
+            Self::AuthStorageFailed => "inspect_private_session",
+            Self::AuthBusy => "wait_for_auth_operation",
+            Self::Cancelled => "inspect_status_before_resume",
         }
     }
 }
@@ -255,6 +308,9 @@ impl SetupError {
                     | ErrorCode::ConfigPathInvalid
                     | ErrorCode::ConfigBusy
                     | ErrorCode::BrokerBusy
+                    | ErrorCode::AuthRequired
+                    | ErrorCode::AuthRejected
+                    | ErrorCode::CentralUnavailable
             ),
             recovery: Recovery {
                 action: code.recovery(),
@@ -276,6 +332,7 @@ impl SetupError {
 pub enum StepResult {
     Complete { outcome: Outcome, reused: bool },
     Failed(SetupError),
+    InputRequired(SetupError),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -290,6 +347,8 @@ pub struct ProgressEvent {
     pub step: Step,
     pub step_status: StageStatus,
     pub outcome: Outcome,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_inputs: Vec<RequiredInput>,
 }
 
 /// Flattened variants enforce exactly one of data/error in a final result.

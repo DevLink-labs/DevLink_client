@@ -1,17 +1,30 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
-use super::{Completion, ProgressEvent, ProgressUnavailable, RunResult, SetupContext, SetupStages};
+use super::{
+    Completion, LoginCredentials, LoginInput, LoginInputError, ProgressEvent, ProgressUnavailable,
+    RunResult, SetupContext, SetupStages,
+};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
-use std::{fmt, io::Write, path::Path};
+use std::{
+    fmt,
+    io::{IsTerminal, Write},
+    path::Path,
+};
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes missing configuration and validates existing settings.\nInput collection and remaining stage integrations will be added in subsequent work.\nExisting auth, team, agent, start, and mcp commands remain available."
+    after_help = "Setup initializes settings and reuses a server-verified user session.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nTeam selection and remaining stage integrations will be added in subsequent work."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
+    /// Used only when the current session is missing or confirmed expired
+    #[arg(long, value_name = "EMAIL")]
+    pub email: Option<String>,
+    /// Read one password line only when sign-in is required (never an argument/env secret)
+    #[arg(long)]
+    pub password_stdin: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -40,7 +53,11 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     };
     let stdout = std::io::stdout();
     let mut output = Renderer::new(stdout.lock(), args.output);
-    let result = super::run(&context, SetupStages::default(), |event| {
+    let input = TerminalLoginInput {
+        email: args.email,
+        password_stdin: args.password_stdin,
+    };
+    let result = super::run(&context, SetupStages::new(input), |event| {
         output.progress(event)
     })
     .await;
@@ -49,6 +66,64 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
         return Err(SetupExit(result.exit_code).into());
     }
     Ok(())
+}
+
+struct TerminalLoginInput {
+    email: Option<String>,
+    password_stdin: bool,
+}
+
+impl LoginInput for TerminalLoginInput {
+    fn available(&self) -> bool {
+        self.interactive() || (self.password_stdin && self.email.is_some())
+    }
+
+    fn interactive(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+
+    async fn request(&mut self) -> Result<LoginCredentials, LoginInputError> {
+        let email = self.email.clone();
+        let password_stdin = self.password_stdin;
+        let interactive = self.interactive();
+        tokio::task::spawn_blocking(move || {
+            let email = match email {
+                Some(email) => email,
+                None if interactive => {
+                    use std::io::{BufRead, Read};
+                    eprint!("Email: ");
+                    std::io::stderr()
+                        .flush()
+                        .map_err(|_| LoginInputError::ReadFailed)?;
+                    let mut bytes = Vec::new();
+                    let count = std::io::stdin()
+                        .lock()
+                        .take(1025)
+                        .read_until(b'\n', &mut bytes)
+                        .map_err(|_| LoginInputError::ReadFailed)?;
+                    if count == 0 {
+                        return Err(LoginInputError::Cancelled);
+                    }
+                    String::from_utf8(bytes)
+                        .map_err(|_| LoginInputError::Invalid)?
+                        .trim()
+                        .to_owned()
+                }
+                None => return Err(LoginInputError::Unavailable),
+            };
+            if email.trim().is_empty() || email.len() > 320 {
+                return Err(LoginInputError::Invalid);
+            }
+            if !password_stdin && !interactive {
+                return Err(LoginInputError::Unavailable);
+            }
+            let password = crate::terminal_input::secret_input("Password", 72, password_stdin)
+                .map_err(|_| LoginInputError::Invalid)?;
+            LoginCredentials::new(email, password)
+        })
+        .await
+        .map_err(|_| LoginInputError::ReadFailed)?
+    }
 }
 
 /// Caller-supplied writer also supports tests and non-terminal embedding.

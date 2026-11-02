@@ -17,6 +17,7 @@ fn progress() -> ProgressEvent {
         step: Step::Validate,
         step_status: StageStatus::Running,
         outcome: Outcome::NotApplied,
+        required_inputs: Vec::new(),
     }
 }
 

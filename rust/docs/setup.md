@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03. 2026-11-02 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 자동 초기화를 구현했다.
+작업 02·03·04. 2026-11-02 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인을 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -9,13 +9,15 @@ devlink setup --help
 devlink --config C:\work\profile\config.json setup
 devlink setup --config C:\work\profile\config.json --output json
 devlink setup --output jsonl
+# 비밀번호는 비밀 관리 도구 등이 stdin 한 줄로 전달한다.
+devlink setup --email user@example.test --password-stdin --output json
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 파일 초기화/검증**이다. 입력 수집과 실제 로그인/등록/기동/MCP 설정/상태 조회를 setup에 연결하는 일은 후속 작업이다. `--input`, `--non-interactive`, `--password-stdin`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인**이다. 팀·프로젝트·도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 파일은 내용·수정 시각·권한을 바꾸지 않고 `succeeded/not_applied/reused:true`로 기록한다. 이후 authenticate는 아직 미연결이므로 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. 이 경우에도 완료한 설정 초기화는 유지한다. 기존 `auth/team/agent/start/mcp` 명령은 계속 사용할 수 있다.
+기본 실행기는 validate에서 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. 인증이 완료되면 아직 미연결인 select_team에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -26,17 +28,20 @@ devlink setup --output jsonl
 | `devlink-cli/src/cli.rs` | setup 라우팅·기존 전역 config 경로 해석. 기존 개별 명령 로직 유지 |
 | `devlink-cli/src/setup/model.rs` | 9개 Step, 단계 상태·변경 outcome, 안전한 공통 오류, 진행/최종 DTO |
 | `devlink-cli/src/setup/flow.rs` | StepExecutor를 순차 호출하고 주입한 콜백으로 progress 전달 |
-| `devlink-cli/src/setup/stages.rs` | validate에 설정 준비 연결, 검증한 설정을 후속 단계용으로 보관 |
+| `devlink-cli/src/setup/stages.rs` | 설정 준비·세션 확인·로그인 연결, 검증한 설정/사용자를 후속 단계용으로 보관 |
+| `devlink-cli/src/setup/login_input.rs` | 비밀을 직렬화/Debug하지 않는 입력 DTO와 주입 가능한 입력 인터페이스 |
 | `devlink-cli/src/setup/terminal.rs` | clap 옵션·human/JSON/JSONL 렌더링·프로세스 종료 코드 전달 |
+| `devlink-cli/src/terminal_input.rs` | 기존 auth/team 명령과 setup이 공유하는 숨김/전용 stdin 입력 |
+| `devlink-broker/src/user_auth.rs` | 기존 로그인·CSRF·세션 저장과 typed session check·장애 분류 |
 | `devlink-broker/src/setup_config.rs` | 설정 경로·형식·값·자격 파일 안전성·브로커 잠금 검사 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
 
-터미널 입력을 수집하는 후속 어댑터는 입력을 먼저 준비해 StepExecutor에 주입한다. 실행기는 상태를 내부에 보관하거나 필요한 입력 descriptor를 오류로 반환한다. 공통 flow에서 `stdin/read_line/prompt/println`을 호출하지 않는다. 기존 CLI 명령을 자식 프로세스로 실행해 stdout을 분석하지 않는다.
+로그인 입력은 LoginInput 인터페이스로 주입한다. 인증 로직은 필요한 입력 descriptor를 반환하며, 터미널 어댑터가 숨김 입력 또는 전용 stdin을 처리한다. 공통 flow와 인증 로직에서 직접 `stdin/read_line/prompt/println`을 호출하지 않는다. 기존 CLI 명령을 자식 프로세스로 실행해 stdout을 분석하지 않는다.
 
 ## 단계 실행기·진행 구독
 
-호출자는 config_path가 든 SetupContext, StepExecutor 구현, 진행 콜백을 넘긴다. StepExecutor의 execute는 현재 Step과 같은 context를 받아 `StepResult::Complete { outcome, reused }` 또는 `StepResult::Failed(SetupError)`를 반환한다. 전체 성공 데이터는 모든 단계가 통과한 뒤에만 finish에서 꺼낸다. 등록 상태·자격은 실행기 내부에 두고 공개 결과에 비밀을 담지 않는다.
+호출자는 config_path가 든 SetupContext, StepExecutor 구현, 진행 콜백을 넘긴다. StepExecutor는 Complete/Failed/InputRequired를 반환한다. 입력을 처리할 수 있는 어댑터가 있으면 resolve_input을 한 번 호출하고 해당 단계만 재개한다. 대화형에서는 waiting_input과 필요한 필드만 진행 이벤트로 알린다. 이전 단계는 다시 실행하지 않으며 로그인/네트워크 실패 때문에 요청을 자동 재전송하지 않는다. 전체 성공 데이터는 모든 단계가 통과한 뒤에만 finish에서 꺼낸다. 자격 값은 공개 결과에 담지 않는다.
 
 ```rust,ignore
 let result = devlink_cli::setup::run(&context, stage_executor, |event| {
@@ -58,7 +63,7 @@ json은 최종 result만, jsonl은 progress 뒤 result 한 개를 출력한다. 
 rust 디렉터리에서 실행한다.
 
 ```powershell
-cargo test --offline --locked -p devlink-cli --test setup_flow --test cli_setup --test setup_output --test setup_configuration -- --test-threads=1
+cargo test --offline --locked -p devlink-cli --test setup_flow --test cli_setup --test setup_output --test setup_configuration --test setup_authentication --test cli_auth -- --test-threads=1
 cargo test --offline --locked -p devlink-cli --test cli_broker setup_validates_existing_config_without_changing_a_running_broker -- --test-threads=1
 cargo test --offline --locked --workspace --all-targets -- --test-threads=1
 cargo fmt --all -- --check
@@ -150,3 +155,55 @@ Windows stable MSVC, 임시 프로필·합성 중앙 fixture 기준이다.
 | 최신 fmt / workspace/all-targets Clippy `-D warnings` | 종료 0 |
 
 처음 검사에서 새 설정 디렉터리의 비공개 권한 준비 누락을 발견해 수정했다. 이어서 오류 위치에 유니코드로 표현할 수 없는 OS 경로가 있으면 일반 Path 직렬화가 실패하는 경계를 보완하고 관련 테스트에서 기본 직렬화 실패와 보완 후 정상 응답을 대조했다. 보완 후에는 위 30개와 실제 브로커 1개를 재실행했으며 전체 199개 결과와 합산하지 않는다. 초기화·검증·브로커 변경 가능 여부에 대한 작업 03 기준은 충족한다. 실제 로그인·등록·Host 연결까지 완료한 결과는 아니다.
+
+## 작업 04: 로그인 상태 확인과 단계 통합
+
+authenticate는 먼저 기존 사용자 세션을 확인한다. 로그인 정보가 있으면 기존 사용자 인증 모듈의 `/api/v1/auth/users/me`로 실제 신원을 검증한다. 동일한 사용자 ID가 확인돼야 세션을 재사용하고 이메일/비밀번호 입력 어댑터를 호출하지 않는다. `--password-stdin`을 지정했더라도 정상 세션이면 stdin을 읽지 않는다. 검증 후 갱신한 공개 사용자·쿠키 스냅샷은 기존 private writer로 저장하므로 `reused:true`와 `outcome:applied`가 함께 올 수 있다.
+
+미로그인·로컬 expired 상태 또는 서버에서 확인한 HTTP 401 만료만 로그인 입력을 요청한다. 401이면 기존 로직대로 cookie를 제거한 expired 스냅샷을 먼저 저장하며 입력 취소/실패에도 이 변경을 applied로 유지한다. 네트워크/본문 수신 실패·5xx·429·408은 CENTRAL_UNAVAILABLE이며 기존 세션을 만료로 바꾸거나 자격을 다시 요청하지 않는다. 403은 인증 거부, 잘못된 응답/CSRF/쿠키·신원 불일치는 PROTOCOL_ERROR다. 원본 응답과 오류 문구는 복사하지 않는다.
+
+대화형 입력은 주입한 LoginInput 어댑터가 맡는다. 이메일을 입력받고 기존 숨김 비밀번호 reader를 호출한다. 입력이 없는 실행 환경에서는 대기하지 않고 AUTH_REQUIRED와 필요한 필드를 반환한다. 자동화는 `--email <EMAIL> --password-stdin`을 사용하며 비밀번호 한 줄을 stdin으로 전달한다. 이메일과 비밀번호를 얻은 뒤에도 세션을 다시 확인하고, 입력 대기 중 다른 프로세스가 정상 로그인했다면 그 세션을 재사용한다.
+
+입력이 필요한 단계는 InputRequired를 반환한다. 처리 가능한 어댑터가 있을 때 resolve_input을 호출하고 해당 단계만 재개한다. 대화형이면 waiting_input 이벤트에 필드 descriptor만 포함하며 stdin 자동화는 별도 대화형 대기 상태를 만들지 않는다. 한 단계의 입력 해결은 최대 한 번이며 로그인 실패 후 자동 재입력·재전송은 없다. 진행 수신자가 입력 전에 끊기면 입력 어댑터도 호출하지 않는다. 입력 취소는 cancelled/종료 130이며 이전 적용 상태를 보존한다. 강제 종료·OS 신호로 출력 자체가 불가능하면 최종 JSON 전달까지 보장하지 않는다.
+
+로그인은 기존 Rust의 CSRF 조회 → 로그인 POST → `/users/me` 신원 일치 확인 → 회전된 CSRF 확인 → private 세션 저장 경로를 공유한다. account.lock 안에서 현재 세션 확인과 필요 시 로그인을 수행해 정상 세션을 불필요하게 교체하지 않는다. 검증한 설정의 중앙 origin을 확인/로그인 호출에 고정하고, 입력 중 서버가 바뀌면 요청을 보내기 전에 SESSION_CONFLICT로 중단한다. origin 불일치나 손상된 로컬 세션도 자동 입력/덮어쓰기로 복구하지 않으며 명시적 auth login 등으로 먼저 확인한다.
+
+LoginCredentials에는 Debug/Serialize를 구현하지 않는다. 비밀번호는 입력부터 호출까지 메모리에서만 전달하며 CLI 인수·환경변수·설정·Agent 프로필·로그·진행/결과 JSON에 저장하지 않는다. 기존 auth/team 명령과 setup의 비밀 입력을 terminal_input으로 공유했다. LF/CRLF 줄 끝만 제거하며 비밀번호 공백은 보존한다. 사용자 cookie·CSRF·Agent/MCP 자격은 기존 분리를 유지한다.
+
+| 코드 | 종료 | 복구 action |
+| --- | --- | --- |
+| SETUP_AUTH_REQUIRED | 4 | login: 숨김 입력 또는 --email/--password-stdin 제공 |
+| SETUP_AUTH_REJECTED | 4 | login: 계정/자격 확인 후 명시 재시도 |
+| SETUP_CENTRAL_UNAVAILABLE | 7 | check_network_then_retry: 연결·서비스 복구 후 재시도 |
+| SETUP_PROTOCOL_ERROR | 7 | check_provider_contract: 응답·신원·CSRF/쿠키 확인 |
+| SETUP_AUTH_SESSION_CONFLICT | 6 | inspect_profile_then_reauthenticate: 중앙 origin/프로필 확인 |
+| SETUP_AUTH_BUSY | 6 | wait_for_auth_operation: account.lock 소유 작업 종료 대기 |
+| SETUP_AUTH_STORAGE_FAILED | 5 | inspect_private_session: 세션 파일·권한·실행 중 브로커 확인 |
+| SETUP_CANCELLED | 130 | inspect_status_before_resume: 완료 단계 확인 후 재개 |
+
+인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 아직 미연결인 select_team은 STEP_UNAVAILABLE/종료 3이며 알려진 userId만 안전하게 유지한다. 회원가입·팀 선택·Agent 등록·Host 전체 연결은 후속 작업이다.
+
+```powershell
+# rust 디렉터리에서 인증 통합과 기존 인증 회귀 확인
+cargo test --offline --locked -p devlink-cli --test setup_authentication --test cli_auth --test setup_flow -- --test-threads=1
+```
+
+인증 검사는 정상 세션의 열린 stdin 비소비·미로그인/만료 로그인·서버 신원 확인·실패 시 snapshot 보존·네트워크/5xx/403/프로토콜 분류·비밀 비노출·입력 중 타 프로세스 로그인/서버 변경·계정 잠금·입력 취소를 포함한다. 입력 요청은 주입한 어댑터로 검사하고 실제 숨김 입력에는 기존 rpassword reader를 사용한다. 합성 중앙·임시 프로필 검증을 실제 운영 중앙/DB나 Host 업무 왕복 완료로 확대하지 않는다.
+
+### 작업 04 검증 결과
+
+2026-11-02, Windows stable MSVC에서 최종 소스를 검사했다. 합성 중앙 서버·임시 비공개 프로필·실제 CLI 자식 프로세스를 사용했으며 기존 사용자 기본 설정을 변경하지 않았다.
+
+| 검사 | 결과 |
+| --- | --- |
+| 전체 workspace/all-targets | 221 passed / 0 failed / 기존 opt-in 2 ignored |
+| 새 setup 인증 통합 | 18 passed |
+| 기존 인증 / Agent / 팀 / 브로커 회귀 | 각각 8 / 12 / 5 / 35 passed |
+| setup CLI / 설정 / 흐름 / 출력 | 각각 6 / 12 / 10 / 5 passed |
+| `cargo fmt --all -- --check` | 종료 0 |
+| workspace/all-targets Clippy `-D warnings` | 종료 0 |
+| `devlink setup --help` | 종료 0, 이메일·전용 stdin 옵션과 현재 범위 확인 |
+
+개별 테스트 수는 전체 221개에 포함되며 합산하지 않는다. 제외된 2개는 Node 24 이상·현재 MCP 빌드와 별도 실행 조건이 필요한 기존 MCP 통합 검사다. 실제 운영 중앙/DB·Host 전체 왕복 및 실제 대화형 콘솔의 숨김 입력 수동 검증은 수행하지 않았다.
+
+인증 오류 분류·입력 재개·동시 로그인·중앙 origin 변경·저장/출력 경계를 검토했다. 작업 04의 완료 기준은 위 자동 검증 범위에서 충족하며, 인증 후 팀 선택은 후속 작업이다. 변경 파일은 모두 rust 내부이고 실명을 추가하지 않았다.

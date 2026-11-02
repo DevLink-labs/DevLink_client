@@ -261,3 +261,131 @@ async fn completed_step_with_unknown_outcome_cannot_advance_or_report_success() 
     assert_eq!(error.code, ErrorCode::InternalError);
     assert_eq!(error.outcome, Outcome::Unknown);
 }
+
+struct ResumingExecutor {
+    inner: Executor,
+    supplied: bool,
+    repeat_required: bool,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl StepExecutor for ResumingExecutor {
+    type Data = Vec<Step>;
+    async fn execute(&mut self, step: Step, context: &SetupContext) -> StepResult {
+        if step == Step::Authenticate && (!self.supplied || self.repeat_required) {
+            self.inner.calls.lock().unwrap().push(step);
+            let mut required = SetupError::new(ErrorCode::AuthRequired, step, Outcome::Applied);
+            required.required_inputs.push(RequiredInput {
+                field: "password",
+                kind: InputKind::Secret,
+                secret: true,
+                source: InputSource::HiddenPromptOrStdin,
+            });
+            return StepResult::InputRequired(required);
+        }
+        self.inner.execute(step, context).await
+    }
+    fn can_resolve_input(&self) -> bool {
+        true
+    }
+    fn input_is_interactive(&self) -> bool {
+        true
+    }
+    async fn resolve_input(&mut self, _required: &SetupError) -> Result<(), SetupError> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.supplied = true;
+        Ok(())
+    }
+    fn finish(self) -> Self::Data {
+        self.inner.finish()
+    }
+}
+
+fn resuming(context: &SetupContext, repeat_required: bool) -> ResumingExecutor {
+    ResumingExecutor {
+        inner: executor(context),
+        supplied: false,
+        repeat_required,
+        requests: std::sync::Arc::default(),
+    }
+}
+
+#[tokio::test]
+async fn input_resolution_resumes_only_the_current_stage_and_preserves_prior_mutation() {
+    let context = context();
+    let executor = resuming(&context, false);
+    let calls = executor.inner.calls.clone();
+    let mut events = Vec::new();
+    let result = run(&context, executor, |event| {
+        events.push(event.clone());
+        Ok(())
+    })
+    .await;
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stages[1].outcome, Outcome::Applied);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|step| **step == Step::Validate)
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|step| **step == Step::Authenticate)
+            .count(),
+        2
+    );
+    let waiting = events
+        .iter()
+        .find(|event| event.step_status == StageStatus::WaitingInput)
+        .unwrap();
+    assert_eq!(waiting.status, RunStatus::WaitingInput);
+    assert_eq!(waiting.required_inputs[0].field, "password");
+    assert_eq!(result.sequence, 21);
+}
+
+#[tokio::test]
+async fn a_stage_cannot_request_credentials_repeatedly_after_one_resolution() {
+    let context = context();
+    let executor = resuming(&context, true);
+    let requests = executor.requests.clone();
+    let result = run(&context, executor, |_| Ok(())).await;
+    assert_eq!(result.exit_code, 4);
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(result.stages[1].outcome, Outcome::Applied);
+    assert!(
+        result.stages[2..]
+            .iter()
+            .all(|stage| stage.status == StageStatus::Skipped)
+    );
+}
+
+#[tokio::test]
+async fn losing_the_progress_consumer_before_input_does_not_collect_credentials() {
+    let context = context();
+    let executor = resuming(&context, false);
+    let requests = executor.requests.clone();
+    let result = run(&context, executor, |event| {
+        if event.step_status == StageStatus::WaitingInput {
+            Err(ProgressUnavailable)
+        } else {
+            Ok(())
+        }
+    })
+    .await;
+    assert_eq!(result.exit_code, 1);
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(result.stages[1].outcome, Outcome::Applied);
+    assert!(
+        result.stages[2..]
+            .iter()
+            .all(|stage| stage.status == StageStatus::Skipped)
+    );
+}

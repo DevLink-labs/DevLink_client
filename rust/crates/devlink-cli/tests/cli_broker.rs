@@ -494,7 +494,7 @@ async fn setup_validates_existing_config_without_changing_a_running_broker() {
     let credentials = std::fs::read(&credential_path).unwrap();
     let runtime = std::fs::read(Runtime::path(&f.path)).unwrap();
     let output = f.run(&["setup", "--output", "json"]);
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(4));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["stages"][0]["status"], "succeeded");
     assert_eq!(value["stages"][0]["reused"], true);
