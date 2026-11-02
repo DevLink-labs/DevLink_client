@@ -12,6 +12,7 @@ pub mod context_api;
 pub mod credentials;
 pub mod inbox;
 pub mod local;
+pub mod mcp_config;
 pub mod notifications;
 pub mod private_file;
 pub mod protocol;

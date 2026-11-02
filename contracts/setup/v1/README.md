@@ -301,6 +301,9 @@ Registration.ensure(context, selection) -> PublicRegistrationState
 
 ### 6.2 MCP 설정: 임효민 연동 창구
 
+2026-11-02 구현: [Rust McpConfig 공급부·지원 버전·파일/오류 계약](mcp-config-provider.md).
+모듈은 임효민(-143), CLI 호출·통합은 최준혁(-111) 경계를 유지한다.
+
 ```text
 McpConfig.plan({toolType, projectPath, targetPath, brokerFile, executable}) -> ConfigPlan
 McpConfig.apply({planId, expectedDigest}) -> ConfigApplyResult
@@ -312,7 +315,7 @@ McpConfig.inspect({toolType, targetPath, brokerFile, executable}) -> ConfigInspe
 - plan 응답: planId, toolType, targetPath, expectedDigest(미존재면 null), `change: create | merge | unchanged | conflict`, 안전한 DevLink 항목 diff, `restartRequired`. plan은 파일을 쓰지 않는다. diff에 다른 MCP 항목/환경변수의 비밀을 포함하지 않는다.
 - apply는 동일 경로/예상 digest를 다시 확인하고 DevLink 항목만 병합한다. 다른 MCP 서버 항목은 보존한다. 기존 DevLink 항목이 다른 실행 경로/자격 파일을 가리키면 conflict이며 묵시적으로 덮어쓰지 않는다. global 설정은 이번 범위에서 제외한다.
 - 기존 파일이 있으면 같은 사용자 전용 위치에 비공개 백업을 내구 저장한 후 원자 교체한다. 원본/백업·부모의 링크/권한을 검사한다. 성공 후 해당 항목을 다시 파싱해 확인한다. 검사 실패 시 본인이 쓴 버전인 경우만 백업 복원하며, 동시 변경이 발견되면 덮어쓰지 않고 오류를 반환한다. 백업 내용은 출력하지 않는다.
-- apply 결과: `status: applied | unchanged`, targetPath, 선택 backupPath, restartRequired. 실패도 `outcome`과 `rollback: restored | not_needed | failed | conflict`를 보존한다. inspect 결과는 `applied | missing | conflict | unknown`과 targetPath다.
+- apply 결과: `status: applied | unchanged`, targetPath, 선택 backupPath, restartRequired. 백업 저장소 용량 한도 오류는 선택 recoveryDirectory로 수동 점검 위치를 제공한다. 실패도 `outcome`과 `rollback: restored | not_needed | failed | conflict`를 보존한다. inspect 결과는 `applied | missing | conflict | unknown`과 targetPath다.
 - 도구별 파일 문법/프로젝트 설정 지원·실행 경로는 adapter 구현에서 고정 지원 버전에 대조한다. 지원하지 않는 Host 버전은 명시적으로 manual 또는 TOOL_UNAVAILABLE이며, 임의 전역 경로에 대신 쓰지 않는다.
 - manual은 안전한 DevLink 설정 조각과 적용 위치/재시작 안내만 반환한다. 적용 완료로 표시하지 않는다. 적용 후 새 setup 실행에서 inspect가 일치하면 unchanged로 통과한다.
 

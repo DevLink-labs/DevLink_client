@@ -308,6 +308,15 @@ pub fn set_private_permissions(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 pub fn verify_private_permissions(path: &Path) -> Result<()> {
+    verify_permissions(path, false, false, false)
+}
+#[cfg(windows)]
+pub fn verify_directory_permissions(path: &Path) -> Result<()> {
+    verify_parent_safety(path)?;
+    verify_permissions(path, true, true, false)
+}
+#[cfg(windows)]
+fn verify_permissions(path: &Path, directory: bool, public_read: bool, source: bool) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -325,12 +334,23 @@ $ErrorActionPreference = 'Stop'
 $p = $env:DEVLINK_ACL_CHECK_PATH
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544')
-foreach ($target in @($p, [System.IO.Path]::GetDirectoryName($p))) {
-  $acl = if ($target -eq $p) { [System.IO.File]::GetAccessControl($target) } else { [System.IO.Directory]::GetAccessControl($target) }
-  if ($target -eq $p -and $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 2 }
+$directory = $env:DEVLINK_ACL_DIRECTORY -eq '1'
+$public = $env:DEVLINK_ACL_PUBLIC -eq '1'
+$source = $env:DEVLINK_ACL_SOURCE -eq '1'
+$owners = @($sid)
+if ($source) {
+  $owners = $trusted
+  try { $owners += ([System.Security.Principal.NTAccount]'NT SERVICE\TrustedInstaller').Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+  $trusted = $owners
+}
+$targets = if ($directory) { @($p) } else { @($p, [System.IO.Path]::GetDirectoryName($p)) }
+foreach ($target in $targets) {
+  $acl = if ($target -eq $p -and -not $directory) { [System.IO.File]::GetAccessControl($target) } else { [System.IO.Directory]::GetAccessControl($target) }
+  if ($target -eq $p -and $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $owners) { exit 2 }
   foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+    if ($public -and $rule.IdentityReference.Value -in @('S-1-3-0','S-1-3-1') -and (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) { continue }
     if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $trusted) {
-      if ($target -eq $p -or (($rule.FileSystemRights -band 852310) -ne 0)) { exit 3 }
+      if (($target -eq $p -and -not $directory -and -not $public) -or (($rule.FileSystemRights -band 852310) -ne 0)) { exit 3 }
     }
   }
 }
@@ -340,6 +360,9 @@ foreach ($target in @($p, [System.IO.Path]::GetDirectoryName($p))) {
     let mut cmd = Command::new("powershell.exe");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
         .env("DEVLINK_ACL_CHECK_PATH", &abs_path)
+        .env("DEVLINK_ACL_DIRECTORY", if directory { "1" } else { "0" })
+        .env("DEVLINK_ACL_PUBLIC", if public_read { "1" } else { "0" })
+        .env("DEVLINK_ACL_SOURCE", if source { "1" } else { "0" })
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -419,6 +442,59 @@ pub fn verify_private_permissions(path: &Path) -> Result<()> {
     if (parent_info.mode() & 0o022) != 0 {
         bail!("Credential parent directory is writable by group/other");
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn verify_directory_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    verify_parent_safety(path)?;
+    let meta = fs::symlink_metadata(path)?;
+    ensure!(
+        meta.uid() == unsafe { libc::getuid() } && meta.mode() & 0o022 == 0,
+        "Unsafe project directory permissions"
+    );
+    Ok(())
+}
+
+/// State ancestors may be owned by the operating system (for example a Windows home).
+#[cfg(windows)]
+pub(crate) fn verify_state_directory_permissions(path: &Path) -> Result<()> {
+    verify_parent_safety(path)?;
+    verify_permissions(path, true, true, true)
+}
+#[cfg(unix)]
+pub(crate) fn verify_state_directory_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    verify_parent_safety(path)?;
+    let meta = fs::symlink_metadata(path)?;
+    ensure!(
+        (meta.uid() == unsafe { libc::getuid() } || meta.uid() == 0) && meta.mode() & 0o022 == 0,
+        "Unsafe state directory"
+    );
+    Ok(())
+}
+
+/// Host configuration permits other readers; source binaries may be system-owned.
+/// Credentials continue to use the stricter private-file verifier.
+#[cfg(windows)]
+pub(crate) fn verify_public_file_permissions(path: &Path, source: bool) -> Result<()> {
+    verify_permissions(path, false, true, source)
+}
+#[cfg(unix)]
+pub(crate) fn verify_public_file_permissions(path: &Path, source: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let info = fs::symlink_metadata(path)?;
+    let parent = fs::symlink_metadata(path.parent().context("No parent")?)?;
+    let uid = unsafe { libc::getuid() };
+    ensure!(
+        info.uid() == uid || (source && info.uid() == 0),
+        "Unsafe file owner"
+    );
+    ensure!(
+        info.mode() & 0o022 == 0 && parent.mode() & 0o022 == 0,
+        "Unsafe write permissions"
+    );
     Ok(())
 }
 

@@ -158,3 +158,5 @@ cargo test --offline --locked -p devlink-cli --test cli_broker json_heartbeat_ke
 [중앙 WebSocket 연동 규칙](docs/central-websocket-contract.md)에 인증, READY·PRESENCE, 연결 교체·종료 규칙과 Rust 적용 현황을 정리했습니다. READY 신원·작업 수신함·ACK·업무 provider는 로컬 회귀와 고정 중앙·DB에서 검증한 기록이 있습니다. 실제 배포 환경과 Host 전체 왕복은 별도입니다.
 
 [문서 안내](docs/README.md), [진행 현황](PROJECT_STATUS.md), [검증 요약](docs/verification.md)을 참고하세요. 현재 계약은 기능별 문서에, 과거 실습·검증 기록은 docs/archive에 보관합니다.
+
+2026-11-02 (-143): 프로젝트 Host 설정용 [Rust McpConfig.plan/apply/inspect 공급부](../contracts/setup/v1/mcp-config-provider.md)를 제공합니다. CLI -111의 호출·통합과 구분하며 전역 설정을 쓰지 않습니다.

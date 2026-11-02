@@ -157,3 +157,16 @@ fixture policy findings were fixed; final review had no blocking findings. Its
 remaining stale wording and recovery-wire predicate suggestions were also applied.
 Actual Host acceptance of the new workflow remains -144, distinct from fixture
 coverage or historical first-MVP Host results.
+
+## Host configuration provider (S15P31D108-143)
+
+The Rust library exposes McpConfig.plan/apply/inspect for project Codex and Claude
+configuration. CLI -111 calls that provider; it owns the full setup orchestration.
+See [the public provider contract](../../../contracts/setup/v1/mcp-config-provider.md)
+for exact versions, Node launch argv, path/permission checks, digest conflicts,
+private backups, conditional restoration and the Rust demonstration harness.
+The Host receives only DEVLINK_BROKER_FILE; never copy any credential values.
+After config inspection, reopen the trusted Host and explicitly call the two read
+tools and register_agent({}). File applied, Host connected and task roundtrip are
+separate checks. Other MCP items/settings remain present; JSON large numbers
+retain their original values, and only the safe DevLink diff is exposed.
