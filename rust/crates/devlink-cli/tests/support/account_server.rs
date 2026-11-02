@@ -35,7 +35,11 @@ pub struct MockState {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub joined: Arc<AtomicBool>,
     pub membership_missing: Arc<AtomicBool>,
+    pub pause_members: Arc<AtomicBool>,
+    pub members_entered: Arc<tokio::sync::Notify>,
+    pub members_resume: Arc<tokio::sync::Notify>,
     pub teams: Arc<Mutex<std::collections::BTreeMap<u64, Value>>>,
+    pub team_list_mode: Arc<AtomicU8>,
     pub user_id: Arc<AtomicU64>,
     pub agents: Arc<Mutex<std::collections::BTreeMap<u64, Value>>>,
     pub tokens: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
@@ -351,6 +355,30 @@ async fn team_list(State(state): State<MockState>, headers: HeaderMap) -> Respon
     if !authorized(&state, &headers, false) {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
     }
+    match state.team_list_mode.load(Ordering::SeqCst) {
+        1 => {
+            return success(json!(
+                state
+                    .teams
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            ));
+        }
+        2 => return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED"),
+        3 => {
+            return success(json!([
+                team_for(&state, 71).unwrap(),
+                team_for(&state, 71).unwrap()
+            ]));
+        }
+        4 => return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED"),
+        5 => return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),
+        8 => return failure(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR"),
+        _ => {}
+    }
     let mut teams = vec![team_for(&state, 71).unwrap()];
     if let Some(team) = team_for(&state, 72) {
         teams.push(team);
@@ -387,6 +415,9 @@ async fn team_detail(
     headers: HeaderMap,
 ) -> Response {
     state.calls.lock().unwrap().push("team_detail".into());
+    if state.team_list_mode.load(Ordering::SeqCst) == 6 {
+        return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
+    }
     if !authorized(&state, &headers, false) {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
     }
@@ -403,6 +434,9 @@ async fn team_members(
     headers: HeaderMap,
 ) -> Response {
     state.calls.lock().unwrap().push("team_members".into());
+    if state.team_list_mode.load(Ordering::SeqCst) == 7 {
+        return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
+    }
     if !authorized(&state, &headers, false) {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
     }
@@ -412,6 +446,10 @@ async fn team_members(
     let Some(team) = team_for(&state, id) else {
         return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
     };
+    if state.pause_members.load(Ordering::SeqCst) {
+        state.members_entered.notify_one();
+        state.members_resume.notified().await;
+    }
     let user = if state.membership_missing.load(Ordering::SeqCst) {
         777
     } else {

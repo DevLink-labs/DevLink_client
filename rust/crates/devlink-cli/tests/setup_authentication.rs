@@ -80,9 +80,12 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
     let value = parsed(&child.wait_with_output().unwrap(), 3);
     assert_eq!(value["stages"][1]["status"], "succeeded");
     assert_eq!(value["stages"][1]["reused"], true);
-    assert_eq!(value["error"]["step"], "select_team");
+    assert_eq!(value["error"]["step"], "bind_project");
     assert_eq!(value["error"]["known"]["userId"], "51");
-    assert_eq!(*f.state.calls.lock().unwrap(), ["me"]);
+    assert_eq!(
+        *f.state.calls.lock().unwrap(),
+        ["me", "me", "team_list", "team_detail", "team_members"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -94,7 +97,16 @@ async fn missing_session_logs_in_with_csrf_verifies_me_and_stores_only_the_sessi
     assert_eq!(value["error"]["known"]["userId"], "51");
     assert_eq!(
         *f.state.calls.lock().unwrap(),
-        ["csrf", "login", "me", "csrf"]
+        [
+            "csrf",
+            "login",
+            "me",
+            "csrf",
+            "me",
+            "team_list",
+            "team_detail",
+            "team_members"
+        ]
     );
     let saved: Value = private_file::read(&user_auth::session_path(&f.path), 16_384)
         .unwrap()
@@ -118,7 +130,17 @@ async fn confirmed_expiry_allows_explicit_login_without_retrying_the_expired_coo
     assert_eq!(value["stages"][1]["reused"], false);
     assert_eq!(
         *f.state.calls.lock().unwrap(),
-        ["me", "csrf", "login", "me", "csrf"]
+        [
+            "me",
+            "csrf",
+            "login",
+            "me",
+            "csrf",
+            "me",
+            "team_list",
+            "team_detail",
+            "team_members"
+        ]
     );
 }
 

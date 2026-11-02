@@ -18,6 +18,7 @@ fn progress() -> ProgressEvent {
         step_status: StageStatus::Running,
         outcome: Outcome::NotApplied,
         required_inputs: Vec::new(),
+        team_choices: Vec::new(),
     }
 }
 
@@ -152,7 +153,9 @@ fn invalid_os_path_units_do_not_hide_the_structured_error_and_recovery() {
         file: invalid_path,
         field: None,
     });
-    failure.completion = Completion::Failure { error };
+    failure.completion = Completion::Failure {
+        error: Box::new(error),
+    };
     let mut output = Vec::new();
     Renderer::new(&mut output, OutputFormat::Json)
         .result(&failure)

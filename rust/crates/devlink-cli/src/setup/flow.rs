@@ -87,6 +87,7 @@ pub async fn run<E: StepExecutor>(
                             &mut sequence,
                             &stages[index],
                             &required.required_inputs,
+                            &required.team_choices,
                             &mut observe,
                         )
                         .is_err()
@@ -193,7 +194,7 @@ fn emit(
     stage: &Stage,
     observe: &mut impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
 ) -> Result<(), ProgressUnavailable> {
-    emit_with_inputs(run_id, sequence, stage, &[], observe)
+    emit_with_inputs(run_id, sequence, stage, &[], &[], observe)
 }
 
 fn emit_with_inputs(
@@ -201,6 +202,7 @@ fn emit_with_inputs(
     sequence: &mut u64,
     stage: &Stage,
     required_inputs: &[RequiredInput],
+    team_choices: &[TeamChoice],
     observe: &mut impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
 ) -> Result<(), ProgressUnavailable> {
     *sequence += 1;
@@ -218,6 +220,7 @@ fn emit_with_inputs(
         step_status: stage.status,
         outcome: stage.outcome,
         required_inputs: required_inputs.to_vec(),
+        team_choices: team_choices.to_vec(),
     })
 }
 
@@ -252,7 +255,9 @@ fn failure<D>(
         },
         exit_code,
         stages,
-        completion: Completion::Failure { error },
+        completion: Completion::Failure {
+            error: Box::new(error),
+        },
     }
 }
 

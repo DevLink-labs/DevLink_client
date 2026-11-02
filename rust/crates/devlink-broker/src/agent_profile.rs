@@ -135,6 +135,19 @@ pub fn bound_agent_id(config_path: &Path) -> Result<Option<u64>> {
     }
     Ok(profile.agent().map(|agent| agent.agent_id))
 }
+
+/// Caller holds account/control locks. Pending creation also binds a principal.
+pub(crate) fn setup_team_conflicts(
+    config_path: &Path,
+    origin: &str,
+    user: u64,
+    team: u64,
+) -> Result<bool> {
+    Ok(load(config_path)?.is_some_and(|profile| {
+        !matches!(profile.state, State::Vacant)
+            && (profile.origin != origin || profile.user_id != user || profile.team_id != team)
+    }))
+}
 fn valid_id(id: u64) -> bool {
     id > 0 && id <= i64::MAX as u64
 }

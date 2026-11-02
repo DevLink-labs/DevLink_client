@@ -1,19 +1,25 @@
 use super::{
     ErrorCode, ErrorLocation, InputKind, InputSource, LoginCredentials, LoginInput,
-    LoginInputError, NoLoginInput, Outcome, RequiredInput, SetupContext, SetupError, Step,
-    StepExecutor, StepResult,
+    LoginInputError, NoLoginInput, NoTeamInput, Outcome, RequiredInput, SetupContext, SetupError,
+    Step, StepExecutor, StepResult, TeamChoice, TeamInput, TeamInputError,
 };
 use devlink_broker::{
     setup_config::{self, FailureKind, PreparedConfig},
+    teams::{self, SetupSelection, SetupTeamFault, SetupTeamFaultKind, Team},
     user_auth::{self, AuthFault, AuthFaultKind, SessionCheck, User},
 };
 
 /// Production setup stages. Each completed feature is connected here incrementally.
-pub struct SetupStages<I = NoLoginInput> {
+pub struct SetupStages<I = NoLoginInput, T = NoTeamInput> {
     prepared: Option<PreparedConfig>,
     input: I,
     credentials: Option<LoginCredentials>,
     user: Option<User>,
+    team_input: T,
+    requested_team: Option<u64>,
+    team_choices: Vec<TeamChoice>,
+    waiting_team: bool,
+    team: Option<Team>,
 }
 
 impl Default for SetupStages<NoLoginInput> {
@@ -22,14 +28,44 @@ impl Default for SetupStages<NoLoginInput> {
     }
 }
 
-impl<I> SetupStages<I> {
+impl<I> SetupStages<I, NoTeamInput> {
     pub fn new(input: I) -> Self {
         Self {
             prepared: None,
             input,
             credentials: None,
             user: None,
+            team_input: NoTeamInput,
+            requested_team: None,
+            team_choices: Vec::new(),
+            waiting_team: false,
+            team: None,
         }
+    }
+}
+
+impl<I, T> SetupStages<I, T> {
+    pub fn with_team_input<U>(self, input: U) -> SetupStages<I, U> {
+        SetupStages {
+            prepared: self.prepared,
+            input: self.input,
+            credentials: self.credentials,
+            user: self.user,
+            team_input: input,
+            requested_team: self.requested_team,
+            team_choices: self.team_choices,
+            waiting_team: self.waiting_team,
+            team: self.team,
+        }
+    }
+
+    pub fn with_team_id(mut self, id: Option<u64>) -> Self {
+        self.requested_team = id;
+        self
+    }
+
+    pub fn team(&self) -> Option<&Team> {
+        self.team.as_ref()
     }
 
     pub fn configuration(&self) -> Option<&PreparedConfig> {
@@ -41,17 +77,23 @@ impl<I> SetupStages<I> {
     }
 }
 
-impl<I: LoginInput> StepExecutor for SetupStages<I> {
+impl<I: LoginInput, T: TeamInput> StepExecutor for SetupStages<I, T> {
     type Data = ();
 
     async fn execute(&mut self, step: Step, context: &SetupContext) -> StepResult {
         if step == Step::Authenticate {
             return self.authenticate(context).await;
         }
+        if step == Step::SelectTeam {
+            return self.select_team(context).await;
+        }
         if step != Step::Validate {
             let mut error = SetupError::new(ErrorCode::StepUnavailable, step, Outcome::NotApplied);
             if let Some(user) = &self.user {
                 error.known.user_id = Some(user.user_id.to_string());
+            }
+            if let Some(team) = &self.team {
+                error.known.team_id = Some(team.team_id.to_string());
             }
             return StepResult::Failed(error);
         }
@@ -101,13 +143,43 @@ impl<I: LoginInput> StepExecutor for SetupStages<I> {
     }
 
     fn can_resolve_input(&self) -> bool {
-        self.input.available()
+        if self.waiting_team {
+            self.team_input.available()
+        } else {
+            self.input.available()
+        }
     }
     fn input_is_interactive(&self) -> bool {
-        self.input.interactive()
+        if self.waiting_team {
+            self.team_input.interactive()
+        } else {
+            self.input.interactive()
+        }
     }
 
     async fn resolve_input(&mut self, required: &SetupError) -> Result<(), SetupError> {
+        if required.step == Step::SelectTeam {
+            return match self.team_input.request(&self.team_choices).await {
+                Ok(id) => {
+                    self.requested_team = Some(id);
+                    Ok(())
+                }
+                Err(TeamInputError::Unavailable) => Err(required.clone()),
+                Err(error) => {
+                    let mut safe = SetupError::new(
+                        if matches!(error, TeamInputError::Cancelled) {
+                            ErrorCode::Cancelled
+                        } else {
+                            ErrorCode::InputInvalid
+                        },
+                        Step::SelectTeam,
+                        Outcome::NotApplied,
+                    );
+                    safe.known = required.known.clone();
+                    Err(safe)
+                }
+            };
+        }
         match self.input.request().await {
             Ok(credentials) => {
                 self.credentials = Some(credentials);
@@ -129,7 +201,77 @@ impl<I: LoginInput> StepExecutor for SetupStages<I> {
     fn finish(self) {}
 }
 
-impl<I: LoginInput> SetupStages<I> {
+impl<I: LoginInput, T: TeamInput> SetupStages<I, T> {
+    async fn select_team(&mut self, context: &SetupContext) -> StepResult {
+        let (Some(prepared), Some(user)) = (&self.prepared, &self.user) else {
+            return StepResult::Failed(SetupError::new(
+                ErrorCode::InternalError,
+                Step::SelectTeam,
+                Outcome::NotApplied,
+            ));
+        };
+        let Ok(origin) = user_auth::origin(&prepared.config) else {
+            return StepResult::Failed(SetupError::new(
+                ErrorCode::ConfigInvalid,
+                Step::SelectTeam,
+                Outcome::NotApplied,
+            ));
+        };
+        let result = teams::select_for_setup(
+            &context.config_path,
+            origin.as_str(),
+            user.user_id,
+            self.requested_team,
+        )
+        .await;
+        let mut error = match result {
+            Ok(SetupSelection::Selected { team, reused }) => {
+                self.team = Some(team);
+                self.waiting_team = false;
+                return StepResult::Complete {
+                    outcome: if reused {
+                        Outcome::NotApplied
+                    } else {
+                        Outcome::Applied
+                    },
+                    reused,
+                };
+            }
+            Ok(SetupSelection::Choose(teams)) => {
+                self.team_choices = teams
+                    .into_iter()
+                    .map(|team| TeamChoice {
+                        id: team.team_id.to_string(),
+                        name: team.name,
+                    })
+                    .collect();
+                self.waiting_team = true;
+                let mut required = SetupError::new(
+                    ErrorCode::TeamRequired,
+                    Step::SelectTeam,
+                    Outcome::NotApplied,
+                );
+                required.required_inputs = vec![RequiredInput {
+                    field: "team.id",
+                    kind: InputKind::Selection,
+                    secret: false,
+                    source: InputSource::VerifiedTeamList,
+                }];
+                required.team_choices = self.team_choices.clone();
+                required.known.user_id = Some(user.user_id.to_string());
+                return StepResult::InputRequired(required);
+            }
+            Ok(SetupSelection::NoTeams) => SetupError::new(
+                ErrorCode::TeamMembershipRequired,
+                Step::SelectTeam,
+                Outcome::NotApplied,
+            ),
+            Err(error) => team_error(&context.config_path, &error),
+        };
+        error.known.user_id = Some(user.user_id.to_string());
+        StepResult::Failed(error)
+    }
+
     async fn authenticate(&mut self, context: &SetupContext) -> StepResult {
         let Some(prepared) = &self.prepared else {
             return StepResult::Failed(SetupError::new(
@@ -215,6 +357,60 @@ impl<I: LoginInput> SetupStages<I> {
             Err(error) => StepResult::Failed(auth_error(&context.config_path, &error, false)),
         }
     }
+}
+
+fn team_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
+    if let Some(fault) = error.downcast_ref::<SetupTeamFault>() {
+        if fault.kind == SetupTeamFaultKind::ListResourceNotFound {
+            return SetupError::new(
+                ErrorCode::TeamListResourceNotFound,
+                Step::SelectTeam,
+                Outcome::NotApplied,
+            );
+        }
+        let code = match fault.kind {
+            SetupTeamFaultKind::Forbidden => ErrorCode::TeamForbidden,
+            SetupTeamFaultKind::ListResourceNotFound => ErrorCode::TeamListResourceNotFound,
+            SetupTeamFaultKind::Protocol => ErrorCode::ProtocolError,
+            SetupTeamFaultKind::Storage => ErrorCode::TeamStorageFailed,
+            SetupTeamFaultKind::BindingConflict => ErrorCode::TeamBindingConflict,
+            SetupTeamFaultKind::Busy => ErrorCode::ConfigBusy,
+            SetupTeamFaultKind::SessionConflict => ErrorCode::AuthSessionConflict,
+        };
+        let mut safe = SetupError::new(
+            code,
+            Step::SelectTeam,
+            if fault.mutation_uncertain {
+                Outcome::Unknown
+            } else {
+                Outcome::NotApplied
+            },
+        );
+        safe.location = Some(ErrorLocation {
+            file: fault.file.clone().unwrap_or_else(|| {
+                if code == ErrorCode::TeamBindingConflict {
+                    devlink_broker::agent_profile::path(path)
+                } else if code == ErrorCode::ConfigBusy {
+                    devlink_broker::config::state_directory(path).join("control.lock")
+                } else {
+                    teams::selection_path(path)
+                }
+            }),
+            field: None,
+        });
+        return safe;
+    }
+    let mut safe = match user_auth::rejection_status(error) {
+        Some(401) => SetupError::new(ErrorCode::AuthRequired, Step::SelectTeam, Outcome::Applied),
+        Some(403 | 404) => SetupError::new(
+            ErrorCode::TeamForbidden,
+            Step::SelectTeam,
+            Outcome::NotApplied,
+        ),
+        _ => auth_error(path, error, false),
+    };
+    safe.step = Step::SelectTeam;
+    safe
 }
 
 fn local_session_error(path: &std::path::Path, code: ErrorCode) -> SetupError {

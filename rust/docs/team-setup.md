@@ -2,6 +2,8 @@
 
 S15P31D108-90. 먼저 [사용자 로그인](user-auth.md)을 완료한다. 모든 권한은 사용자 세션과 중앙의 현재 멤버십으로 검증한다.
 
+간편설정의 조회·선택·재사용은 [setup 작업 05](setup.md#작업-05-팀-조회선택과-재사용)를 참고한다. 기존 개별 명령의 명시적 선택 동작과 달리 setup은 기존 Agent 바인딩과 충돌하는 팀 선택을 저장 전에 중단한다.
+
 ```powershell
 devlink team create --name "My team"
 devlink team list

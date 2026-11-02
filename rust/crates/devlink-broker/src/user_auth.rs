@@ -271,6 +271,26 @@ impl UserClient {
         Ok(this)
     }
 
+    /// Pin the setup principal before sending requests, including after UI input.
+    pub async fn authenticated_for_setup(
+        config_path: &Path,
+        expected_origin: &str,
+        expected_user: u64,
+    ) -> Result<Self> {
+        let mut this = Self::load(config_path)?;
+        require_setup_origin(&this, expected_origin)?;
+        if this.local_problem.is_some()
+            || !matches!(&this.snapshot.state, SessionState::Authenticated { user, .. } if user.user_id == expected_user)
+        {
+            return Err(fault(
+                AuthFaultKind::SessionConflict,
+                "The setup user session changed; restart setup",
+            ));
+        }
+        this.verify_session().await?;
+        Ok(this)
+    }
+
     async fn verify_session(&mut self) -> Result<()> {
         ensure!(
             self.local_problem.is_none(),
