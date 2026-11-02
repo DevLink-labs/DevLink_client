@@ -25,3 +25,16 @@ JSON Schema draft 2020-12는 `packages/mcp-server/src/broker/schemas.ts`의 Zod 
 2026-10-28: -63에서 [오류·시간 제한 소비자 계약](../../../packages/mcp-server/docs/error-contract.md)을 추가했다. envelope의 코드/scope와 key 필드는 MCP 측 제안이며 실제 Rust/중앙의 합의·소비자 테스트를 대신하지 않는다. 오류 object의 부가 message/details는 소비자에서 제거하며, JSON Schema는 input 기준으로 생성한다.
 
 2026-11-02 (-140): GET /v1/context와 get_my_context({})는 세션 생성·bind·lease 갱신 없이 문맥을 조회한다. localToken 인증과 Origin 거부를 적용한다. 출처·미연결 상태·변경 차단·요청 헤더와 예제는 [온보딩 계약](../../../packages/mcp-server/docs/onboarding.md)을 따른다. context schema는 broker/onboarding.ts에서 생성하며 기존 v0.1 principal schema와 구분한다.
+
+### MCP 프로세스 차단 진단 확장
+
+MCP `get_connection_status`는 공통 ConnectionSnapshot에 `mcp: running`과 선택
+`clientIssue`를 추가한다. `clientIssue`는 MCP 내부의 지속적인 terminal/contextBlocked
+안전 차단이며, Rust provider의 현재 관측·`issue`와 구분한다. code/scope/outcome과
+진단 호출의 requestId를 제공하고 provider가 이 필드를 공급하지는 않는다.
+
+공통 setupReady의 환경 준비 공식과 원격 hostSession 관측은 유지한다. MCP 응답의
+collaborationReady는 clientIssue가 있으면 항상 false이며, 없을 때는 공통 공식을
+따른다. 따라서 환경 설정이 준비됐어도 현재 MCP 프로세스의 업무가 차단될 수 있다.
+차단 중에는 register_agent 안내를 제거하고 원인 점검/복구 후 open_or_restart_host를
+안내한다. 조회 자체로 차단 해제·세션/업무 변경이나 자격 재로딩을 수행하지 않는다.

@@ -9,7 +9,7 @@ export function onboardingTools(broker: Pick<BrokerClient, 'getMyContext' | 'get
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     handler: (_args, ctx) => broker.getMyContext({ signal: ctx.signal, mcpRequestId: ctx.mcpRequestId }),
   }), defineTool({ name: 'get_connection_status',
-    description: 'Read MCP/credential/broker/central/identity/Host-session readiness and safe nextActions. Unknown is not ready. This never starts a broker, changes settings, claims or binds a session, renews a lease, or changes work.',
+    description: 'Read MCP/credential/broker/central/identity/Host-session readiness and safe nextActions. clientIssue reports a persistent local MCP block even after the provider recovers; repair as advised and reopen the Host. Unknown is not ready. This never starts a broker, changes settings, claims or binds a session, renews a lease, or changes work.',
     inputSchema: z.strictObject({}), outputSchema: connectionOutput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     handler: (_args, ctx) => broker.getConnectionStatus({ signal: ctx.signal, mcpRequestId: ctx.mcpRequestId }),

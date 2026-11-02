@@ -379,3 +379,9 @@ setup과 `setup status`가 같은 집계 규칙을 사용한다. 조회 때문�
 | timeout/취소·비밀 표식 주입 | 중앙 결과 불명 보존, 자동 생성/발급/업무 재전송 0회, stdout/stderr/로그 비밀 0건 |
 
 변경 시 계약 버전·담당 경계·fixture를 함께 검토한다. 단순 필드 추가라도 필수값/기본 동작/종료 의미를 바꾸면 기존 자동화와 호환되는지 먼저 확인한다.
+
+MCP 소비 확장: `get_connection_status`는 로컬 프로세스의 persistent 차단을 선택
+`clientIssue`로 별도 제공한다. provider의 위 표·setupReady·issue는 유지하고,
+MCP collaborationReady는 clientIssue가 있으면 false로 제한한다. 이는 CLI/Rust의
+공통 ConnectionSnapshot 공식을 변경하지 않는다. 자세한 소비 계약은
+`contracts/local-broker/v1`과 MCP onboarding 가이드를 따른다.

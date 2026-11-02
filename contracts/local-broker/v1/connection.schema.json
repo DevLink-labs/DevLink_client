@@ -179,6 +179,53 @@
     "mcp": {
       "type": "string",
       "const": "running"
+    },
+    "clientIssue": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "SESSION_REPLACED",
+            "SESSION_CONFLICT",
+            "BROKER_UNAUTHORIZED",
+            "LOCAL_AUTH_FORBIDDEN",
+            "CREDENTIAL_FILE_INVALID",
+            "BROKER_CONTEXT_INVALID"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "credentials",
+            "local_auth",
+            "session",
+            "transport",
+            "domain",
+            "protocol"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "rejected"
+          ]
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "code",
+        "scope",
+        "outcome",
+        "requestId"
+      ],
+      "additionalProperties": false,
+      "description": "Persistent block in this MCP process. Provider stages and issue remain separate; reopen the Host after the advised repair."
     }
   },
   "required": [

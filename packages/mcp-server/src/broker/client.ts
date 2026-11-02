@@ -43,6 +43,7 @@ export class BrokerClient {
   private registrationTail: Promise<void> | undefined;
   private epoch = 0;
   private terminal: FaultCode | undefined;
+  private terminalDetails: Pick<BrokerFault, 'scope' | 'outcome'> | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private retryCount = 0;
   private closed = false;
@@ -67,12 +68,15 @@ export class BrokerClient {
     const budget = new CallBudget(requestId, this.options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, options.signal, this.lifetime.signal);
     let credentialsChecked = false;
     const result = (data: Record<string, unknown>) => ({ requestId,
-      ...(options.mcpRequestId !== undefined ? { mcpRequestId: options.mcpRequestId } : {}), data });
+      ...(options.mcpRequestId !== undefined ? { mcpRequestId: options.mcpRequestId } : {}),
+      data: this.withClientIssue(data, requestId) });
     try {
       budget.check();
       const http = await budget.wait(this.transport()); credentialsChecked = true;
       const raw = await http.request('/v1/connection', { requestId, instanceId: this.instanceId }, { method: 'GET', signal: budget.signal });
       budget.check();
+      // This field belongs to this MCP process, never to a provider response.
+      if (Object.hasOwn(raw, 'clientIssue')) throw new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
       const parsed = connectionSchema.safeParse({ ...raw, mcp: 'running' });
       if (!parsed.success) throw new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
       return result(parsed.data);
@@ -102,6 +106,29 @@ export class BrokerClient {
       // Never observe/retry/claim here, including when a previous business session is terminal.
       return result(data);
     } finally { budget.dispose(); }
+  }
+
+  private withClientIssue(data: Record<string, unknown>, requestId: string): Record<string, unknown> {
+    // Read after the HTTP await: a concurrent context/registration call may have blocked us.
+    const code = this.contextBlocked ? 'BROKER_CONTEXT_INVALID' : this.terminal;
+    if (!code) return data;
+    const fault = new BrokerFault(code, requestId);
+    const details = this.contextBlocked ? undefined : this.terminalDetails;
+    const localAuth = ['BROKER_UNAUTHORIZED', 'LOCAL_AUTH_FORBIDDEN'].includes(code);
+    const conflict = ['SESSION_CONFLICT', 'SESSION_REPLACED'].includes(code);
+    const scope = details?.scope ?? (localAuth ? 'local_auth' : conflict ? 'session'
+      : code === 'CREDENTIAL_FILE_INVALID' ? 'credentials' : 'domain');
+    const action = conflict ? 'inspect_connection_owner' : localAuth ? 'repair_private_file'
+      : code === 'CREDENTIAL_FILE_INVALID' ? data.credentials === 'invalid' ? 'repair_private_file'
+        : data.credentials === 'missing' ? 'prepare_cli_profile' : undefined
+        : 'inspect_profile_then_rebind';
+    const nextActions = [...new Set([...(action ? [action] : []),
+      ...(data.nextActions as string[]).filter(value => !['register_agent', 'open_or_restart_host'].includes(value)),
+      'open_or_restart_host'])];
+    // Preserve live provider stages/issue. Environment setup can be ready while this
+    // process is blocked; collaboration must remain false until a new Host is opened.
+    return connectionSchema.parse({ ...data, collaborationReady: false, nextActions,
+      clientIssue: { code, scope, outcome: details?.outcome ?? fault.outcome, requestId } });
   }
 
   async getMyContext(options: CallOptions = {}): Promise<BrokerResult> {
@@ -170,6 +197,7 @@ export class BrokerClient {
     if (snapshot && this.session !== snapshot) return;
     if (terminalSessionFaults.has(error.code)) {
       this.terminal = error.code;
+      this.terminalDetails = { scope: error.scope, outcome: error.outcome };
       this.discard();
     } else if (['BROKER_UNAVAILABLE', 'BROKER_CONNECTION_CLOSED', 'BROKER_TIMEOUT', 'SESSION_EXPIRED'].includes(error.code)) {
       this.discard();

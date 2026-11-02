@@ -176,3 +176,32 @@ retain their original values, and only the safe DevLink diff is exposed.
 [Two-Host onboarding and recovery verification](onboarding-host-verification.md)
 describes the opt-in isolated-central harness, native evidence, lease waits and
 which failure cases still rely on fixture/provider regressions.
+
+### Persistent MCP client blocks (-141 / PR #33)
+
+`get_connection_status` keeps provider observations (`broker`, `central`,
+`identity`, `credentials`, `mcpConfig`, `hostSession`, `setupReady`, and `issue`)
+separate from this process's persistent safety fence. An optional **`clientIssue`**
+contains the local terminal/context error's code, scope and outcome, correlated to
+this diagnostic call's requestId. A provider cannot supply this MCP-only field.
+Without a local block the field is absent and the original response is unchanged.
+
+A released/expired owner may make the provider report `unbound` while this MCP
+process remains terminal after `SESSION_CONFLICT`. An observed identity/project
+contradiction can similarly leave `contextBlocked` set even after the provider
+returns a healthy snapshot. In either case `clientIssue` remains visible,
+`collaborationReady=false`, and `register_agent` is removed from `nextActions`.
+Environment `setupReady` retains the shared five-stage formula: an applied,
+healthy environment can be setup-ready while its old MCP process cannot work.
+The MCP-specific collaboration formula additionally requires no `clientIssue`.
+
+Advice includes reopening/restarting the Host after the cause is addressed:
+check the connection owner (and wait for its lease only after confirming that
+process stopped), inspect/rebind the profile for a context mismatch, or repair
+credentials for a local-auth failure. The remote `issue` and other useful advice
+remain available independently. A restart alone does not override another owner.
+
+The local fence is sampled after the provider response, including a block caused
+by a concurrent context/registration call. Diagnosis does not clear it, reload
+credentials, observe a fault into session state, claim/bind/renew, schedule a
+retry, or resend work. Cancelled/closed calls keep their existing error behavior.

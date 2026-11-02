@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { toolTypeSchema } from './schemas.js';
-import { faultCodes } from './faults.js';
+import { faultCodes, terminalSessionFaults, type FaultCode } from './faults.js';
 export const decimalId = z.string().regex(/^[1-9][0-9]{0,18}$/)
   .refine(value => BigInt(value) <= 9_223_372_036_854_775_807n, 'ID must fit Java Long.');
 export const contextSchema = z.strictObject({
@@ -41,10 +41,14 @@ export const snapshotSchema = z.strictObject({
   setupReady: z.boolean(), collaborationReady: z.boolean().nullable(),
   nextActions: z.array(nextAction), issue: diagnosticIssue.optional(),
 });
-export const connectionSchema = snapshotSchema.extend({ mcp: z.literal('running') }).superRefine((v, ctx) => {
+export const connectionSchema = snapshotSchema.extend({ mcp: z.literal('running'),
+  clientIssue: diagnosticIssue.extend({ code: z.enum([...terminalSessionFaults] as [FaultCode, ...FaultCode[]]) })
+    .describe('Persistent block in this MCP process. Provider stages and issue remain separate; reopen the Host after the advised repair.')
+    .optional(),
+}).superRefine((v, ctx) => {
   const ready = v.broker === 'running' && v.central === 'Connected' && v.identity === 'verified'
     && v.credentials === 'valid' && v.mcpConfig === 'applied';
-  const collaboration = !ready ? false : v.hostSession === 'bound' ? true
+  const collaboration = !ready || v.clientIssue ? false : v.hostSession === 'bound' ? true
     : ['unbound', 'conflict'].includes(v.hostSession) ? false : null;
   if (v.setupReady !== ready || v.collaborationReady !== collaboration
     || (ready && v.issue !== undefined)
