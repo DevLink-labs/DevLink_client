@@ -5,11 +5,24 @@ import { verifyCalls, verifyWire } from '../scripts/verify-hosts.mjs';
 import { captureHost } from './helpers/host-process.mjs';
 import { fakeBroker } from './helpers/fake-broker.mjs';
 import { BrokerHttp } from '../dist/broker/http.js';
+import { hostFixture } from './helpers/host-fixture.mjs';
 
 const jsonl = (events) => events.map((event) => JSON.stringify(event)).join('\n');
 const success = { requestId: 'http-call', mcpRequestId: 0, requestKey: 'broker-key', data: { taskId: 'task', status: 'PENDING', delivery: { status: 'UNKNOWN' } } };
 const toolResult = (value, snake = false) => ({ content: [{ type: 'text', text: JSON.stringify(value) }], [snake ? 'structured_content' : 'structuredContent']: value });
 const steps = [{ tool: 'create_task', args: { recipientAgentId: 'recipient' }, expect: 'PENDING' }];
+
+test('Host rotation fixture clears volatile ownership and preserves the Agent under recover', async (t) => {
+  const fixture = await hostFixture();const old = fixture.profile('codex');
+  const settings = profile => ({ schemaVersion: 1, brokerUrl: fixture.broker.settings.brokerUrl, localToken: profile.localToken });
+  const before = new BrokerHttp(settings(old));let after;
+  t.after(async () => { before.close(); after?.close(); await fixture.broker.close(); });
+  await before.request('/v1/sessions', { instanceId: 'old-host', mode: 'recover', agentId: old.agentId });
+  const rotated = fixture.rotate('codex');assert.equal(rotated.agentId, old.agentId);
+  after = new BrokerHttp(settings(rotated));
+  const recovered = await after.request('/v1/sessions', { instanceId: 'new-host', mode: 'recover', agentId: rotated.agentId });
+  assert.equal(recovered.principal.agentId, old.agentId);assert.equal(fixture.broker.owners.size, 1);
+});
 
 test('Codex JSONL uses actual completed MCP events and snake-case structured results', () => {
   const transcript = readHostTranscript('codex', jsonl([

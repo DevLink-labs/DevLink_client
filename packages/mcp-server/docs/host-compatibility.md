@@ -59,7 +59,7 @@ node packages/mcp-server/scripts/verify-hosts.mjs --host both `
 
 | 시나리오 | 검사 내용 |
 | --- | --- |
-| 초기화·목록·ping | Claude init의 8개 도구 목록, 두 Host에서 ping+7개 업무 도구 실제 호출, ping의 브로커 요청 0건 |
+| 초기화·목록·ping | 당시 Claude init의 8개 도구 목록(현재 verifier 대조는 10개), 두 Host에서 ping+7개 업무 도구 실제 호출, ping의 브로커 요청 0건 |
 | 등록·목록·생성·조회 | Host별 `userId/teamId/agentId/toolType`을 HTTP 테스트 브로커에서 검증, 생성 직후 PENDING과 전달 UNKNOWN 구분 |
 | FAILED 입력 오류 | reason 생략을 의도적으로 호출, SDK 입력 오류가 Host에 노출되고 브로커에 도달하지 않음 |
 | 명시적 상태 전이·완료 | IN_PROGRESS 및 complete_task만 전달, 장애 때문에 FAILED를 자동 전송하거나 create_task를 재전송하지 않음 |
@@ -67,7 +67,7 @@ node packages/mcp-server/scripts/verify-hosts.mjs --host both `
 | HTTP 지연 | BROKER_TIMEOUT/unknown, 다음 정상 조회 성공, 중앙 상태를 실패로 추정하지 않음 |
 | 브로커 상태 소실 | 연결 종료 뒤 다음 호출에서 recover, 동일 MCP instanceId 유지 |
 | 자격 거부 | BROKER_UNAUTHORIZED/rejected, 같은 프로세스의 다음 호출도 동일 인증 오류 표시 |
-| 자격 교체·재시작 | 기존 토큰 폐기, 새 private 파일을 새 MCP 프로세스가 읽음, 종료 시 DELETE 관찰 여부를 별도 기록 |
+| 자격 교체·재시작 | 기존 토큰 폐기, 새 private 파일을 새 MCP 프로세스가 읽음, 종료 시 DELETE 관찰 여부를 별도 기록. -142 이후 fixture는 회전 시 브로커를 재시작해 이전 소유권을 비움 |
 | 브로커 미기동 | 닫힌 loopback 포트의 조회가 BROKER_UNAVAILABLE/unknown으로 노출 |
 | 종료 | 시작 시 marker 조회의 양성 대조군 검증, 고유 Node marker로 각 실행의 잔여 MCP 자식 0개 확인, 강제 정리가 필요하면 실패 |
 

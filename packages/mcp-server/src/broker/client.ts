@@ -42,7 +42,6 @@ export class BrokerClient {
   private connecting: Promise<BrokerSession> | undefined;
   private registrationTail: Promise<void> | undefined;
   private epoch = 0;
-  private claimAttempted = false;
   private terminal: FaultCode | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private retryCount = 0;
@@ -223,8 +222,7 @@ export class BrokerClient {
       const epoch = this.epoch;
       const http = await this.transport();
       const requestId = randomUUID();
-      const mode = this.claimAttempted ? 'recover' : 'fresh';
-      this.claimAttempted = true;
+      const mode = 'recover';
       const data = await http.request('/v1/sessions', {
         requestId, instanceId: this.instanceId, mode,
         ...((this.agentId ?? this.pendingAgentId) ? { agentId: this.agentId ?? this.pendingAgentId } : {}),

@@ -86,8 +86,17 @@ async function start(p) {
  assert.equal(context.data.principal.toolType,p.tool);assert.equal(context.data.hostSession,'unbound');
  assert.equal(context.data.project.source,'bound_profile');
  assert.equal(context.data.project.path,(await saved(p,'agent-profile.json')).projectRoot);
- const registered=await call(p,'register_agent',{name:p.name,toolType:p.tool});
+ const tokenBefore=(await saved(p,'agent-profile.json')).state.token;
+ const registered=await call(p,'register_agent',{});
  assert.equal(registered.data.agentId,String(p.agent.agentId));
+ const repeats=await Promise.all([call(p,'register_agent',{}),call(p,'register_agent',{})]);
+ assert(repeats.every(r=>r.data.agentId===String(p.agent.agentId)));
+ assert.equal((await call(p,'register_agent',{name:p.name,toolType:p.tool})).data.agentId,String(p.agent.agentId));
+ for(const args of [{name:'wrong-name'},{toolType:p.tool==='codex'?'claude_code':'codex'},{role:'wrong-role'}]) {
+  const denied=await p.client.callTool({name:'register_agent',arguments:args});assert.equal(denied.isError,true);
+  assert.equal(denied.structuredContent.error.code,'VALIDATION_FAILED');assert.equal(denied.structuredContent.error.scope,'domain');
+ }
+ assert.equal((await saved(p,'agent-profile.json')).state.token,tokenBefore,'Registration cannot rotate the CLI credential');
  assert.equal((await call(p,'get_my_context',{})).data.hostSession,'bound');
  assert.equal((await call(p,'get_connection_status',{})).data.hostSession,'bound');
  await until(()=>central(p,'/api/v1/agents/me'),a=>a.status==='ONLINE','ONLINE presence '+p.label);

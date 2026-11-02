@@ -99,18 +99,20 @@ test('close aborts business calls and bounds unregistration even when the broker
 
 test('fresh replacement fences stale heartbeat/delete; losing instance stops recovery', async (t) => {
   const { broker, client: a } = await fixture(t);
-  const b = new BrokerClient({ settings: { ...broker.settings, agentId: 'agent-a' } });
-  t.after(() => b.close());
+  const advanced = new BrokerHttp(broker.settings);
+  t.after(() => advanced.close());
   await a.execute('get_tasks', {});
-  await b.execute('get_tasks', {});
+  const old = a.session;
+  const replacement = await advanced.request('/v1/sessions', { instanceId: 'explicit-owner', mode: 'fresh', agentId: 'agent-a' });
   const winner = broker.owners.get('agent-a');
   await assert.rejects(a.heartbeat(), code('SESSION_REPLACED'));
   const count = broker.calls.length;
   await assert.rejects(a.execute('get_tasks', {}), code('SESSION_REPLACED'));
   assert.equal(broker.calls.length, count);
+  await assert.rejects(advanced.request(`/v1/sessions/${old.sessionId}`, { instanceId: a.instanceId }, { method: 'DELETE' }), code('SESSION_REPLACED'));
   await a.close();
   assert.equal(broker.owners.get('agent-a'), winner);
-  await b.heartbeat();
+  await advanced.request(`/v1/sessions/${replacement.sessionId}/heartbeat`, { instanceId: 'explicit-owner' });
 });
 
 test('after broker restart the first recovery wins; a later recovery cannot steal ownership', async (t) => {
@@ -118,6 +120,8 @@ test('after broker restart the first recovery wins; a later recovery cannot stea
   const b = new BrokerClient({ settings: { ...broker.settings, agentId: 'agent-a' }, retryBaseMs: 60_000 });
   t.after(() => b.close());
   await a.execute('get_tasks', {});
+  const advanced = new BrokerHttp(broker.settings); t.after(() => advanced.close());
+  await advanced.request('/v1/sessions', { instanceId: b.instanceId, mode: 'fresh', agentId: 'agent-a' });
   await b.execute('get_tasks', {}); // A has not observed its replacement yet.
   broker.restart();
   await assert.rejects(a.heartbeat(), (e) => ['SESSION_EXPIRED', 'BROKER_UNAVAILABLE'].includes(e.code));
@@ -153,7 +157,7 @@ test('a lost session response retries with the same instance and recovery mode',
   await assert.rejects(client.execute('get_tasks', {}), code('BROKER_CONNECTION_CLOSED'));
   await client.execute('get_tasks', {});
   const calls = broker.calls.filter((c) => c.path === '/v1/sessions');
-  assert.deepEqual(calls.map((c) => c.body.mode), ['fresh', 'recover']);
+  assert.deepEqual(calls.map((c) => c.body.mode), ['recover', 'recover']);
   assert.equal(calls[0].body.instanceId, calls[1].body.instanceId);
 });
 

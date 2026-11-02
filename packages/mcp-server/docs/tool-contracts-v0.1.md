@@ -22,7 +22,7 @@
 
 | 도구 | 입력 규칙 |
 | --- | --- |
-| register_agent | CLI에서 생성·토큰 발급한 기존 Agent 확인 및 로컬 세션 bind. name 1–100자, toolType `codex / claude_code`, 선택 role 1–500자. 중앙에 새 Agent를 생성·수정하지 않음 |
+| register_agent | `{}`로 CLI가 준비한 기존 Agent 확인·bind. name(1–100자), toolType(`codex / claude_code`), role(1–500자)은 각각 선택이며 전달 시 중앙 정보와 정확히 일치해야 함. 중앙 생성·수정·토큰 회전 없음 |
 | list_agents | 빈 객체 |
 | create_task | recipientAgentId 1–128자, title 1–200자, description 1–16000자, 선택 taskContext 1–16000자 |
 | update_task_status | taskId, version, status `IN_PROGRESS / FAILED` 필수. FAILED에는 failureReason·partiallyModified 필수. IN_PROGRESS에는 실패 필드를 넣지 않음. 선택 requestKey는 알려진 상관 키이며 멱등 키가 아님 |

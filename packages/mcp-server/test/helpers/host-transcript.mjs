@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-export const hostTools = ['devlink_ping', 'register_agent', 'list_agents', 'create_task', 'update_task_status', 'complete_task', 'get_tasks', 'get_task_result'];
+export const hostTools = ['devlink_ping', 'register_agent', 'list_agents', 'create_task', 'update_task_status', 'complete_task', 'get_tasks', 'get_task_result', 'get_my_context', 'get_connection_status'];
 
 function decodeResult(result, hostError) {
   if (typeof result === 'string') result = { content: result };

@@ -183,8 +183,8 @@ export async function verifyHosts(options) {
         assert.equal(wire.filter((call) => call.body.operation === 'create_task').length, 1, 'Host replayed task creation');
         assert.deepEqual(wire.filter((call) => call.body.operation === 'update_task_status').map((call) => call.body.arguments.status), ['IN_PROGRESS'], 'Negative input or automatic FAILED reached the broker');
         const claims = wire.filter((call) => call.path === '/v1/sessions');
-        assert.equal(claims[0].body.mode, 'fresh');
-        assert.ok(claims.some((call) => call.body.mode === 'recover'), 'No session recovery was observed');
+        assert.equal(claims[0].body.mode, 'recover');
+        assert.ok(claims.slice(1).some((call) => call.body.mode === 'recover'), 'No session recovery after the initial claim was observed');
         assert.equal(new Set(claims.map((call) => call.body.instanceId)).size, 1, 'Recovery replaced the MCP instance');
         result.stages.push({ name: 'business-errors-and-recovery', passed: true, checks, contextVerifiedAgainst: 'HTTP test double',
           rpcIdEchoConsistent: true, hostWireRpcIdObserved: false, interpretation, ownedMcpProcessesAfterExit: 0 });
@@ -198,12 +198,12 @@ export async function verifyHosts(options) {
         verifyCalls(restarted, [{ tool: 'get_tasks', args: {}, expect: 'success' }]);
         await fixture.broker.drain();
         const restartedWire = fixture.broker.calls.slice(before);
-        assert.ok(restartedWire.some((call) => call.path === '/v1/sessions' && call.body.mode === 'fresh'));
+        assert.ok(restartedWire.some((call) => call.path === '/v1/sessions' && call.body.mode === 'recover'));
         const sessionReleaseObserved = fixture.broker.arrivals.slice(arrivalStart).some((call) => call.method === 'DELETE');
         // Host process termination can preempt best-effort DELETE. Report that limit
         // explicitly; ownership expiry belongs to the broker, not a fabricated release.
         result.stages.push({ name: 'credential-rotation-and-process-restart', passed: true, newMcpProcess: true, sessionReleaseObserved,
-          ...(sessionReleaseObserved ? {} : { limitation: 'Host exit did not deliver a session DELETE; broker lease expiry is required.' }), ownedMcpProcessesAfterExit: 0 });
+          ...(sessionReleaseObserved ? {} : { limitation: 'Host exit did not deliver a session DELETE. This records exit behavior; fixture rotation restarts the broker and clears prior ownership.' }), ownedMcpProcessesAfterExit: 0 });
 
         options.onProgress?.(`${host}: unavailable broker`);
         // Reserve and then close an ephemeral loopback port; this stage performs read-only get_tasks only.

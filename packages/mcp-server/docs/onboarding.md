@@ -113,3 +113,47 @@ Correlation, unknown credential state, cancellation, local-vs-central failure an
 advice findings were fixed. Final focused review reported no actionable defects.
 Remaining optional handler/issue-shape coverage suggestions are not claimed as
 executed real Host evidence; real Codex/Claude acceptance remains -144.
+
+## No-argument registration and recovery (S15P31D108-142)
+
+After explicit CLI login/team/project/Agent preparation, use
+get_connection_status({}) → get_my_context({}) → register_agent({}).
+Name, toolType and role are independently optional; supplied values must exactly
+match central Agent metadata. Blank/null/unknown fields are rejected, and mismatch
+never edits or creates an Agent. Existing complete-input examples remain compatible.
+
+All automatic MCP claims use recover from the first attempt, including legacy Agent
+selectors, so a new registration cannot steal an active owner. Queued/concurrent
+registration reuses the existing confirmed ID. Broker/MCP restart retains the
+existing recovery policy: the first valid recovery owns the slot. Recovery does
+not replay Agent confirmation or any business request. Parallel business bootstrap
+cannot join an implicit fresh claim. Only Rust's explicit fresh API can intentionally
+replace an owner; MCP no longer does so automatically.
+
+Rust verifies the startup profile/project/origin binding both before confirmation
+and after the authenticated result, before metadata matching. Changed context is
+rejected; unobservable files return BROKER_CONTEXT_UNAVAILABLE. Pending/known IDs
+and tokens remain in existing private CLI state; no creation or issuance API is
+added. Use existing explicit CLI inspection/recovery for pending or token failures.
+Only an explicit register_agent binds; the new read tools do not bind implicitly.
+
+For inspect_connection_owner: check that the other process is yours and whether it
+is still alive. After a crash without DELETE, wait for the old 90-second broker-clock
+lease to expire, then restart/reopen this MCP Host. SESSION_CONFLICT remains terminal
+inside the losing process; it does not silently retry or steal an active owner.
+A live owner's heartbeat keeps its lease, so waiting is not a way to force it away.
+Rust also compares the confirmed Agent/user/team against the startup profile,
+after checking the live session and before returning registration data.
+
+## -142 verification (2026-11-02, Asia/Seoul)
+
+MCP full regression: 143 passed. Rust library: 70 passed; actual HTTP provider:
+22 passed, 2 ignored. Actual SDK/native Rust/isolated Spring+PostgreSQL verified
+empty-argument repeated/concurrent registration, legacy inputs, metadata mismatch,
+unchanged stored token and existing task roundtrip. The final automatic-claim
+policy and startup-profile comparison were additionally verified by full unit suites.
+Claude Code CLI actual claude-opus-5-5/high reviewed three rounds. Core and Host
+fixture policy findings were fixed; final review had no blocking findings. Its
+remaining stale wording and recovery-wire predicate suggestions were also applied.
+Actual Host acceptance of the new workflow remains -144, distinct from fixture
+coverage or historical first-MVP Host results.

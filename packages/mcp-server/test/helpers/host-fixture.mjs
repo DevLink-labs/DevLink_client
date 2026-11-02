@@ -37,6 +37,7 @@ export async function hostFixture() {
       broker.revokeToken(previous.localToken);
       profiles[host] = { ...previous, localToken: randomBytes(32).toString('base64url') };
       broker.addProfile(profiles[host]);
+      broker.restart(); // Explicit rotation restarts the synthetic broker; stale owners are not fenced implicitly.
       return profiles[host];
     },
   };

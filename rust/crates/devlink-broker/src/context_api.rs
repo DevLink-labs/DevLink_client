@@ -35,7 +35,7 @@ impl ContextFailure {
 }
 
 #[derive(Clone)]
-pub(crate) struct ContextReader {
+pub struct ContextReader {
     pub central: CentralState,
     sessions: SessionManager,
     config: PathBuf,
@@ -43,6 +43,23 @@ pub(crate) struct ContextReader {
     origin: String,
 }
 impl ContextReader {
+    pub(crate) fn verify_registered_agent(
+        &self,
+        principal: &crate::sessions::Principal,
+        agent: &Identifier,
+    ) -> Result<(), ContextFailure> {
+        if self.binding.as_ref().is_some_and(|binding| {
+            binding.user_id.to_string() != principal.user_id.as_str()
+                || binding.team_id.to_string() != principal.team_id.as_str()
+                || binding.agent_id.to_string() != agent.as_str()
+        }) {
+            return Err(IdentityError::Forbidden.into());
+        }
+        Ok(())
+    }
+    pub(crate) async fn validate_binding(&self) -> Result<(), ContextFailure> {
+        self.check_binding().await.map_err(ContextFailure::local)
+    }
     pub(crate) fn config_path(&self) -> &std::path::Path {
         &self.config
     }
@@ -321,6 +338,35 @@ pub(crate) mod tests {
     }
     fn host() -> Identifier {
         Identifier::parse("host").unwrap()
+    }
+    #[tokio::test]
+    async fn registration_verifies_the_confirmed_subject_against_startup_profile() {
+        let (dir, mut reader, _reply, task) = fixture().await;
+        reader.binding = Some(InspectionBinding {
+            origin: reader.origin.clone(),
+            user_id: 3,
+            team_id: 1,
+            agent_id: 12,
+            project_root: dir.path().canonicalize().unwrap().to_str().unwrap().into(),
+        });
+        let original: crate::sessions::Principal =
+            serde_json::from_value(json!({"userId":"3","teamId":"1"})).unwrap();
+        let agent = Identifier::parse("12").unwrap();
+        assert_eq!(reader.verify_registered_agent(&original, &agent), Ok(()));
+        for field in ["userId", "teamId"] {
+            let mut value = serde_json::to_value(&original).unwrap();
+            value[field] = json!("99");
+            let principal = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                reader.verify_registered_agent(&principal, &agent),
+                Err(ContextFailure::Identity(IdentityError::Forbidden))
+            );
+        }
+        assert_eq!(
+            reader.verify_registered_agent(&original, &Identifier::parse("99").unwrap()),
+            Err(ContextFailure::Identity(IdentityError::Forbidden))
+        );
+        task.abort();
     }
     #[tokio::test]
     async fn unreadable_or_unparseable_profile_is_unknown_not_an_identity_mismatch() {

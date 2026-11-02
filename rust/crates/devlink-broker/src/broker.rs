@@ -148,7 +148,7 @@ pub async fn run(path: &Path) -> Result<()> {
         .merge(crate::connection_api::router(
             mcp_token.clone(),
             broker_url.clone(),
-            context_reader,
+            context_reader.clone(),
         ))
         .merge(crate::session_api::router(
             mcp_token.clone(),
@@ -160,6 +160,7 @@ pub async fn run(path: &Path) -> Result<()> {
             sessions.clone(),
             task_client.clone(),
             cancel.clone(),
+            context_reader,
         ))
         .merge(crate::task_api::router(
             mcp_token.clone(),
