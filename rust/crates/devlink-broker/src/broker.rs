@@ -115,6 +115,11 @@ pub async fn run(path: &Path) -> Result<()> {
         central_state.clone(),
     );
     let expiration = tokio::spawn(sessions.clone().run_expiration(cancel.clone()));
+    let context_reader = crate::context_api::ContextReader::new(
+        central_state.clone(),
+        sessions.clone(),
+        path.to_path_buf(),
+    )?;
 
     // 중앙 서버와 통신하는 비동기 태스크 시작
     let central = tokio::spawn(central::run_with_state(
@@ -136,6 +141,10 @@ pub async fn run(path: &Path) -> Result<()> {
             mcp_token: mcp_token.clone(),
         })
         // 세션 관리 API 라우터 병합 (/v1/sessions/*)
+        .merge(crate::context_api::router(
+            mcp_token.clone(),
+            context_reader,
+        ))
         .merge(crate::session_api::router(
             mcp_token.clone(),
             sessions.clone(),

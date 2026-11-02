@@ -75,9 +75,16 @@ async function start(p) {
  p.stderr='';p.stderrOverflow=false;
  transport.stderr.on('data',chunk=>{if(p.stderr.length+chunk.length<=2_000_000)p.stderr+=chunk.toString();else p.stderrOverflow=true;});
  await client.connect(transport);p.client=client;
- const names=(await client.listTools()).tools.map(t=>t.name);assert.equal(names.length,8);
+ const names=(await client.listTools()).tools.map(t=>t.name);assert.equal(names.length,9);
+ const context=await call(p,'get_my_context',{});
+ assert.equal(context.data.identity,'verified');assert.equal(context.data.principal.userId,String(p.user.userId));
+ assert.equal(context.data.principal.teamId,String(p.agent.teamId));assert.equal(context.data.principal.agentId,String(p.agent.agentId));
+ assert.equal(context.data.principal.toolType,p.tool);assert.equal(context.data.hostSession,'unbound');
+ assert.equal(context.data.project.source,'bound_profile');
+ assert.equal(context.data.project.path,(await saved(p,'agent-profile.json')).projectRoot);
  const registered=await call(p,'register_agent',{name:p.name,toolType:p.tool});
  assert.equal(registered.data.agentId,String(p.agent.agentId));
+ assert.equal((await call(p,'get_my_context',{})).data.hostSession,'bound');
  await until(()=>central(p,'/api/v1/agents/me'),a=>a.status==='ONLINE','ONLINE presence '+p.label);
 }
 async function call(p,name,args,expectedCode) {

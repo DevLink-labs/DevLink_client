@@ -135,6 +135,41 @@ pub fn bound_agent_id(config_path: &Path) -> Result<Option<u64>> {
     }
     Ok(profile.agent().map(|agent| agent.agent_id))
 }
+
+/// Display provenance only. A live central identity must validate these selectors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InspectionBinding {
+    pub origin: String,
+    pub user_id: u64,
+    pub team_id: u64,
+    pub agent_id: u64,
+    pub project_root: String,
+}
+pub(crate) fn inspection_binding(config_path: &Path) -> Result<Option<InspectionBinding>> {
+    let Some(profile) = load(config_path)? else {
+        return Ok(None);
+    };
+    let selected = teams::stored_selection(config_path)?.context("Missing selected team")?;
+    ensure!(
+        profile.origin == user_auth::origin(&Config::load(config_path)?)?.as_str()
+            && selected.origin == profile.origin
+            && selected.user_id == profile.user_id
+            && selected.team_id == profile.team_id
+            && project(Path::new(&profile.project_root))? == profile.project_root,
+        "Profile context changed"
+    );
+    let agent_id = profile
+        .agent()
+        .context("Agent profile is not ready")?
+        .agent_id;
+    Ok(Some(InspectionBinding {
+        origin: profile.origin,
+        user_id: profile.user_id,
+        team_id: profile.team_id,
+        agent_id,
+        project_root: profile.project_root,
+    }))
+}
 fn valid_id(id: u64) -> bool {
     id > 0 && id <= i64::MAX as u64
 }

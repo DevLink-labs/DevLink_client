@@ -45,7 +45,7 @@ async function invalid(client, name, args) {
 test('all seven tools use the common invocation/result path and trusted broker context', async (t) => {
   const { client, broker } = await connected(t);
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 8);
+  assert.equal(listed.tools.length, 9);
   assert.equal(broker.calls.length, 0);
   for (const [name, args] of Object.entries(samples)) {
     const result = await client.callTool({ name, arguments: args });
@@ -101,7 +101,7 @@ test('a functional module extends registration without changing the registry; un
     handler: async () => { if (name === 'throws_secret') throw new Error('secret raw internal detail'); return { privateToken: 'secret raw internal detail' }; },
   }))];
   const { client, broker } = await connected(t, { extensions: examples });
-  assert.equal((await client.listTools()).tools.length, 11);
+  assert.equal((await client.listTools()).tools.length, 12);
   assert.deepEqual((await client.callTool({ name: 'example_echo', arguments: { message: 'hello' } })).structuredContent, { message: 'hello' });
   for (const name of ['throws_secret', 'invalid_output']) {
     const result = await client.callTool({ name, arguments: {} });
@@ -119,7 +119,7 @@ test('missing broker settings produce a tool error while diagnostics remain usab
   const result = await client.callTool({ name: 'register_agent', arguments: samples.register_agent });
   assert.equal(result.structuredContent.error.code, 'CREDENTIAL_FILE_INVALID');
   assert.equal((await client.callTool({ name: 'devlink_ping', arguments: {} })).structuredContent.status, 'ok');
-  assert.equal((await client.listTools()).tools.length, 8);
+  assert.equal((await client.listTools()).tools.length, 9);
   assert.equal(broker.calls.length, 0);
 });
 
@@ -135,7 +135,7 @@ for (const mode of ['legacy', { pin: '2026-07-28' }]) {
     transport.stderr.on('data', (chunk) => { logs += chunk; });
     t.after(async () => { await client.close(); try { await file.cleanup(); } finally { await broker.close(); } });
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 8);
+    assert.equal((await client.listTools()).tools.length, 9);
     await invalid(client, 'create_task', { ...samples.create_task, teamId: 'forged' });
     await client.callTool({ name: 'devlink_ping', arguments: {} });
     assert.equal(broker.calls.length, 0);

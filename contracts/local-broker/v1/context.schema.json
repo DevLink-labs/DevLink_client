@@ -1,0 +1,155 @@
+{
+  "$id": "urn:devlink:local-broker:v1:context",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "identity": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "unavailable"
+      ]
+    },
+    "principal": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "userId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            },
+            "teamId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            },
+            "agentId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            },
+            "toolType": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude_code"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "userId",
+            "teamId",
+            "agentId",
+            "toolType"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "agent": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "roleDescription": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "toolType": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude_code"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "projectName": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string",
+              "const": "central_agents_me"
+            }
+          },
+          "required": [
+            "name",
+            "roleDescription",
+            "toolType",
+            "projectName",
+            "source"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "bound_profile",
+            "unavailable"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "hostSession": {
+      "type": "string",
+      "enum": [
+        "bound",
+        "unbound",
+        "conflict",
+        "not_checked"
+      ]
+    }
+  },
+  "required": [
+    "identity",
+    "principal",
+    "agent",
+    "project",
+    "hostSession"
+  ],
+  "additionalProperties": false
+}

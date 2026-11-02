@@ -8,6 +8,7 @@ import { readBrokerSettings, validateSettings, type BrokerSettings } from './set
 import type { Logger } from '../logger.js';
 import { safeIdentifier, type Correlation } from './faults.js';
 import { CallBudget, DEFAULT_CALL_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, validateTimeout } from './call-budget.js';
+import { contextSchema } from './onboarding.js';
 
 export interface BrokerClientOptions {
   settingsPath?: string;
@@ -43,6 +44,9 @@ export class BrokerClient {
   private closed = false;
   private closePromise: Promise<void> | undefined;
   private readonly lifetime = new AbortController();
+  private observedContext: string | undefined;
+  private contextConstraint: Readonly<{ userId: string; teamId: string; agentId: string }> | undefined;
+  private contextBlocked = false;
 
   constructor(private readonly options: BrokerClientOptions = {}) {
     validateTimeout(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
@@ -53,6 +57,38 @@ export class BrokerClient {
 
   get pendingCount(): number { return this.http?.pendingCount ?? 0; }
   get state(): string { return this.closed ? 'closed' : this.terminal ?? (this.session?.principal.agentId ? 'bound' : this.session ? 'unbound' : 'inactive'); }
+
+  async getMyContext(options: CallOptions = {}): Promise<BrokerResult> {
+    const requestId = randomUUID();
+    const budget = new CallBudget(requestId, this.options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, options.signal, this.lifetime.signal);
+    try {
+      budget.check();
+      if (this.terminal) throw new BrokerFault(this.terminal, requestId);
+      const http = await budget.wait(this.transport());
+      const raw = await http.request('/v1/context', { requestId, instanceId: this.instanceId }, { method: 'GET', signal: budget.signal });
+      budget.check();
+      const parsed = contextSchema.safeParse(raw);
+      if (!parsed.success) throw new BrokerFault('BROKER_CONTEXT_INVALID', requestId);
+      const data = parsed.data;
+      if (data.principal) {
+        const p = data.principal;
+        const context = JSON.stringify([p.userId, p.teamId, p.agentId, p.toolType, data.project]);
+        if ((this.observedContext && context !== this.observedContext)
+          || (this.identity && (p.userId !== this.identity.userId || p.teamId !== this.identity.teamId))
+          || (this.agentId && p.agentId !== this.agentId)) {
+          this.contextBlocked = true;
+          throw new BrokerFault('BROKER_CONTEXT_INVALID', requestId);
+        }
+        this.observedContext ??= context;
+        this.contextConstraint ??= Object.freeze({ userId: p.userId, teamId: p.teamId, agentId: p.agentId });
+      }
+      return { requestId, ...(options.mcpRequestId !== undefined ? { mcpRequestId: options.mcpRequestId } : {}), data };
+    } catch (error) {
+      const mapped = budget.map(error);
+      // Diagnostic failures never schedule a heartbeat or recover/claim a session.
+      throw mapped instanceof BrokerFault ? mapped : new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
+    } finally { budget.dispose(); }
+  }
 
   private async transport(): Promise<BrokerHttp> {
     this.transportPromise ??= (async () => {
@@ -106,6 +142,8 @@ export class BrokerClient {
     if (!result.success) throw new BrokerFault('BROKER_CONTEXT_INVALID', requestId);
     const { principal } = result.data;
     if ((this.identity && (principal.userId !== this.identity.userId || principal.teamId !== this.identity.teamId))
+      || (this.contextConstraint && (principal.userId !== this.contextConstraint.userId || principal.teamId !== this.contextConstraint.teamId
+        || (principal.agentId !== undefined && principal.agentId !== this.contextConstraint.agentId)))
       || (this.agentId && principal.agentId !== this.agentId)
       || (this.pendingAgentId && principal.agentId && principal.agentId !== this.pendingAgentId)
       || (this.toolType && (!principal.toolType || (!refresh && principal.toolType !== this.toolType)))) {
@@ -197,6 +235,7 @@ export class BrokerClient {
     try {
       budget.check();
       if (!Object.hasOwn(operationRoutes, operation)) throw new BrokerFault('BROKER_PROTOCOL_ERROR', requestId);
+      if (this.contextBlocked) throw new BrokerFault('BROKER_CONTEXT_INVALID', requestId);
       const input = structuredClone(args);
       const taskId = safeIdentifier(input.taskId);
       if (taskId && !['create_task', 'register_agent'].includes(operation)) trace.taskId = taskId;
@@ -254,7 +293,7 @@ export class BrokerClient {
       let issuedAgentId: string | undefined;
       if (operation === 'register_agent') {
         const agent = identifierSchema.safeParse(data.agentId);
-        const expectedAgentId = this.agentId ?? this.pendingAgentId;
+        const expectedAgentId = this.agentId ?? this.pendingAgentId ?? this.contextConstraint?.agentId;
         if (!agent.success || (expectedAgentId && expectedAgentId !== agent.data)) throw new BrokerFault('BROKER_CONTEXT_INVALID', requestId);
         // Preserve an ID that actually arrived, even if the overall budget just expired.
         if (!this.agentId) this.pendingAgentId = agent.data;
