@@ -97,6 +97,8 @@ impl Runtime {
 #[serde(rename_all = "camelCase")]
 pub struct Health {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_rejections: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbox: Option<crate::inbox::InboxDiagnostics>,
     pub service: String,
     pub api_version: u32,

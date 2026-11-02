@@ -93,6 +93,14 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<InboxCommand>,
     },
+    /// Show retained requester-side status/result notifications (central details remain authoritative)
+    Notifications {
+        #[arg(long, default_value_t = 20, value_parser=clap::value_parser!(u16).range(1..=1024))]
+        limit: u16,
+        /// Clear only local advisory retention while the broker is stopped
+        #[arg(long)]
+        clear: bool,
+    },
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
     Broker,
@@ -236,6 +244,36 @@ pub async fn run(cli: Cli) -> Result<()> {
     let path = config::config_path(cli.config)?;
     match cli.command {
         Commands::Setup(args) => setup_terminal::run(&path, args).await?,
+        Commands::Notifications { limit, clear } => {
+            let config = Config::load(&path)?;
+            if clear {
+                let directory = state_directory(&path);
+                devlink_broker::credentials::ensure_safe_parent_directory(&directory)?;
+                let _control = config::lock(&directory.join("control.lock"))?;
+                let _broker = config::lock(&directory.join("broker.lock"))
+                    .context("Stop the broker before clearing notifications")?;
+                devlink_broker::notifications::Notifications::clear_config(&path)?;
+                print_json(&serde_json::json!({"cleared":true,"centralTasksChanged":false}))?;
+                return Ok(());
+            }
+            let agent = devlink_broker::agent_profile::bound_agent_id(&path)?
+                .context("Bind an owned Agent before reading notifications; use the bound MCP session to query sent tasks/results")?;
+            match devlink_broker::notifications::Notifications::list_config(
+                &path,
+                &config.server_url,
+                agent,
+                limit as usize,
+            ) {
+                Ok(events) => print_json(
+                    &serde_json::json!({"notifications":events,"authoritative":false,
+                    "nextAction":"Use get_tasks(direction=sent) and get_task_result(taskId) in the bound MCP session to verify central results, including missed notifications."}),
+                )?,
+                Err(_) => print_json(
+                    &serde_json::json!({"notifications":[],"authoritative":false,"error":"NOTIFICATION_STORE_UNAVAILABLE",
+                    "nextAction":"Use get_tasks(direction=sent) and get_task_result(taskId) in the bound MCP session; local retention is unavailable."}),
+                )?,
+            }
+        }
         Commands::Inbox { command } => {
             use devlink_broker::inbox::Inbox;
             match command.unwrap_or(InboxCommand::List {
@@ -393,6 +431,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                     println!(
                         "Inbox rejects : {} (last: {:?})",
                         inbox.rejected_events, inbox.last_error
+                    );
+                }
+                if let Some(count) = health.notification_rejections {
+                    println!(
+                        "Notification rejects: {count}; verify central details with get_task_result/get_tasks in the bound MCP session"
                     );
                 }
             }
