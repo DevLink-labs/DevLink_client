@@ -2,17 +2,17 @@
 
 S15P31D108-59의 TypeScript·Node.js MCP 실행 기반, -60 로컬 브로커 호출 계층, -61 공통 등록 구조와 7개 업무 도구, -62 인증 컨텍스트 처리입니다. MCP Host가 stdio 자식 프로세스로 실행합니다. 초기화·목록·`devlink_ping`은 브로커 없이 동작하며, 업무 도구 요청부터 브로커 세션을 활성화합니다.
 
-브로커 호출 계층의 [HTTP·세션 계약 초안](docs/broker-contract-v0.1.md)은 먼저 복구한 인스턴스를 인정하는 정책과 가짜 브로커 테스트를 포함합니다. 실제 Rust 브로커와의 상호 검증은 남아 있습니다.
+브로커 호출 계층의 [HTTP·세션 계약](docs/broker-contract-v0.1.md)은 먼저 복구한 인스턴스를 인정하는 정책을 설명합니다. S15P31D108-97에서 실제 SDK→Rust→격리 중앙의 Agent 등록과 양방향 컨텍스트·결과 전달을 검증했습니다. [중앙 계약·재현 방법](docs/central-roundtrip.md)에서 실행 범위와 한계를 확인할 수 있습니다.
 
-[인증 컨텍스트·프로필 자격 파일](docs/agent-context.md)에 -62의 처리 정책과 검증 범위를, [공유 계약](../../contracts/local-broker/v1/README.md)에 Rust 측에서 재사용할 JSON Schema와 fixture를 정리했습니다. 현재 Rust 구현은 `/health`·`/shutdown`만 제공하므로 세션·업무 API와 자격 파일 발행은 후속 연동이 필요합니다.
+[인증 컨텍스트·프로필 자격 파일](docs/agent-context.md)에 -62의 처리 정책을, [공유 계약](../../contracts/local-broker/v1/README.md)에 JSON Schema와 fixture를 정리했습니다. 현재 Rust는 CLI 프로필 자격 발행, 세션 API와 7개 업무 도구의 중계를 제공합니다. Agent 생성은 CLI, MCP register_agent는 기존 Agent 확인·세션 연결입니다.
 
 [공통 오류·시간 제한 계약](docs/error-contract.md)은 -63의 오류 코드·원본 요청 식별자·requestKey 보존, 저장/전달 결과와 전체 호출 예산을 설명합니다. SDK의 입력 검증과 프로토콜 오류는 원래 wire id를 유지합니다.
 
-[도구 입력·결과 예제와 확장 방법](docs/tool-contracts-v0.1.md)에 7개 도구의 MCP 측 v0.1 JSON을 정리했습니다. Notion API 페이지가 빈 템플릿인 상태에서 선구현한 DTO이므로 도구 담당자의 필드 확인이 필요합니다.
+[도구 입력·결과 예제와 확장 방법](docs/tool-contracts-v0.1.md)에 중앙/Rust 계약에 맞춘 7개 도구 JSON을 정리했습니다. 상태·완료에는 최신 version이 필수이며 완료는 resultText/taskFiles를 사용합니다. 중앙의 별도 verification 필드는 없으므로 검증 내용은 resultText에 명시합니다.
 
 [요청·수락·결과 등록 지침](docs/agent-workflow.md)은 -65의 사용자 지정 수신자, 요청 템플릿, 명시적 수락 후 로컬 작업, 완료·실패·결과 불명 처리 순서를 설명합니다. [Codex](docs/hosts/codex.md)·[Claude Code](docs/hosts/claude-code.md)용 붙여 넣을 지침과 [스키마 검증 가능한 JSON 예제](examples/workflow.json)를 함께 제공합니다.
 
-[MVP 통합 검증 절차](docs/mvp-integration.md)는 -66의 실제 Rust 준비 상태 재현과 두 사용자 왕복·실패·권한·중복 검증의 증거 양식을 제공합니다. `integration:check`는 세션·업무를 변경하지 않고 차단 사유를 확인하며 실제 MVP 통과를 판정하지 않습니다. 현재 실제 중앙 API·두 사용자 환경을 사용한 수용 기준은 미검증입니다.
+[MVP 통합 검증 절차](docs/mvp-integration.md)는 -66의 실제 Host 검증 증거 양식을 제공합니다. `integration:check`는 차단 사유 확인용이며 실제 MVP 통과를 판정하지 않습니다. -97의 실제 중앙 두 사용자 SDK 왕복과 LLM Host의 자율 코드 수정 검증은 구분합니다.
 
 ## 설치와 실행
 

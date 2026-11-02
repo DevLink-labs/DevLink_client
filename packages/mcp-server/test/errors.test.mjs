@@ -215,9 +215,10 @@ test('a non-success HTTP status cannot discard a task ID and key that arrived in
 });
 
 test('a single call deadline bounds session, central registration and bind together', { timeout: 5000 }, async (t) => {
-  const { broker, client } = await fixture(t, { requestTimeoutMs: 500, callTimeoutMs: 150 }, true);
+  const { broker, client } = await fixture(t, { requestTimeoutMs: 2000, callTimeoutMs: 500 }, true);
   broker.setHook(async ({ path, body, send }) => {
-    if (path === '/v1/sessions' || body.operation === 'register_agent' || path.endsWith('/bind')) await delay(60);
+    if (path === '/v1/sessions' || body.operation === 'register_agent') await delay(25);
+    if (path.endsWith('/bind')) await delay(1000);
     if (body.operation === 'register_agent') { send({ requestKey: 'known-register-key', data: { agentId: 'registered-agent' } }); return true; }
     return false;
   });
@@ -225,10 +226,34 @@ test('a single call deadline bounds session, central registration and bind toget
   const error = await faultOf(client.execute('register_agent', { name: 'worker' }, { mcpRequestId: 'deadline-rpc' }));
   assert.equal(error.code, 'BROKER_TIMEOUT'); assert.equal(error.outcome, 'unknown');
   assert.equal(error.requestKey, 'known-register-key');
-  assert.ok(Date.now() - start < 450);
+  assert.ok(Date.now() - start < 1000);
   await drained(client); await delay(100);
   assert.notEqual(client.state, 'bound');
   assert.equal(broker.calls.filter((call) => call.body.operation === 'register_agent').length, 1);
+});
+
+test('a mutation aborted before any response preserves the caller-known task and request key', async (t) => {
+  const { broker, client } = await fixture(t);
+  await client.execute('get_tasks', {});
+  const entered = gate();
+  broker.setHook(({ body }) => {
+    if (body.operation !== 'update_task_status') return false;
+    entered.resolve();
+    return true;
+  });
+  const controller = new AbortController();
+  const pending = faultOf(client.execute('update_task_status', {
+    taskId: 'known-task', requestKey: 'known-key-before-response', version: '1', status: 'IN_PROGRESS',
+  }, { signal: controller.signal, mcpRequestId: 'known-mcp-id' }));
+  await entered.promise;
+  controller.abort();
+  const error = await pending;
+  assert.equal(error.code, 'REQUEST_ABORTED');
+  assert.equal(error.outcome, 'unknown');
+  assert.equal(error.taskId, 'known-task');
+  assert.equal(error.requestKey, 'known-key-before-response');
+  assert.equal(error.mcpRequestId, 'known-mcp-id');
+  assert.equal(broker.calls.filter(call => call.body.operation === 'update_task_status').length, 1);
 });
 
 test('one timed-out caller cannot abort a shared session claim or send its late business call', { timeout: 5000 }, async (t) => {

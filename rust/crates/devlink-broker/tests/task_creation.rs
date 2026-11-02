@@ -111,7 +111,7 @@ async fn central_create(
         7 => (StatusCode::CREATED, "x".repeat(256 * 1024 + 1)).into_response(),
         _ => (if replayed {StatusCode::OK} else {StatusCode::CREATED}, Json(json!({
             "success":true,"data":{"taskId":task_id,"receiverAgentId":body["receiverAgentId"],
-            "status":if mode == 12 {"FUTURE_STATUS"} else if mode == 17 {"REJECTED"} else {"PENDING"},"version":1,"replayed":replayed,
+            "status":if mode == 12 {"FUTURE_STATUS"} else if mode == 17 {"REJECTED"} else {"PENDING"},"version":if mode == 18 {9_007_199_254_740_993_u64} else {1},"replayed":replayed,
             "delivery": if mode == 10 {json!({"status":"ACK_RECEIVED","reasonCode":SECRET})}
                 else if mode == 8 {json!({"status":"DELIVERY_UNKNOWN","reasonCode":"ACK_TIMEOUT"})} else {json!({"status":"ACK_PENDING","reasonCode":null})}},
             "code":null,"message":null
@@ -158,7 +158,12 @@ async fn central_agent(State(state): State<MockState>, headers: HeaderMap) -> Re
     }
     Json(json!({"success":true,"data":agent})).into_response()
 }
-async fn central_agents(State(state): State<MockState>, headers: HeaderMap) -> Response {
+async fn central_agents(
+    Path(team_id): Path<u64>,
+    State(state): State<MockState>,
+    headers: HeaderMap,
+) -> Response {
+    assert_eq!(team_id, 1, "Agent list must use the verified team");
     assert_eq!(headers["authorization"], format!("Bearer {AGENT}"));
     state.agent_calls.fetch_add(1, Ordering::SeqCst);
     let mut agent = public_agent(i64::MAX as u64);
@@ -207,7 +212,7 @@ impl Central {
         let app = Router::new()
             .route("/api/v1/tasks/{team_id}", post(central_create))
             .route("/api/v1/agents/me", get(central_agent))
-            .route("/api/v1/agents/teams/{teamId}", get(central_agents))
+            .route("/api/v1/agents/teams/{team_id}", get(central_agents))
             .with_state(state.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -382,6 +387,22 @@ async fn changed_central_team_blocks_creation_before_any_task_post() {
     assert_eq!(remote.state.agent_calls.load(Ordering::SeqCst), 1);
     assert!(remote.state.calls.lock().await.is_empty());
     assert!(remote.state.saved.lock().await.is_empty());
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn creation_preserves_versions_above_javascript_safe_integer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let remote = Central::start(&path).await;
+    let broker = Broker::start(&path, &remote, Duration::from_secs(1)).await;
+    let session = broker.claim("host", true).await;
+    remote.state.mode.store(18, Ordering::SeqCst);
+    let (status, response) = broker
+        .post("/v1/tasks/create", &request(&session, "long-version"))
+        .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["data"]["version"], "9007199254740993");
     broker.stop().await;
 }
 

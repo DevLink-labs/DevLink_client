@@ -21,8 +21,8 @@ const samples = {
   register_agent: { name: 'worker', toolType: 'codex', role: 'MCP implementation' },
   list_agents: {},
   create_task: { recipientAgentId: 'agent-b', title: 'Check interface', description: 'Review draft contract' },
-  update_task_status: { taskId: 'task-1', status: 'IN_PROGRESS' },
-  complete_task: { taskId: 'task-1', result: { summary: 'Done', changedFiles: ['src/example.ts'], verification: 'npm test passed' } },
+  update_task_status: { taskId: 'task-1', version: '0', status: 'IN_PROGRESS' },
+  complete_task: { taskId: 'task-1', version: '1', resultText: 'Done\nVerification: npm test passed', taskFiles: [{ relativePath: 'src/example.ts', changeType: 'MODIFIED', diffText: '- old\n+ new' }] },
   get_tasks: {}, get_task_result: { taskId: 'task-1' },
 };
 async function connected(t, { brokerClient, extensions } = {}) {

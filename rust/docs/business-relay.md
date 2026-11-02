@@ -12,11 +12,11 @@
 
 ## 실제 공급 경로
 
-| 로컬 POST             | 중앙 Agent Bearer provider                                   | 동작                                                         |
-| --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| `/v1/agents/register` | GET `/api/v1/agents/me`                                      | 현재 자격의 기존 Agent만 확인. 생성·수정·토큰 발급 호출 없음 |
-| `/v1/agents/list`     | GET `/api/v1/agents/me`, GET `/api/v1/agents/teams/{teamId}` | 현재 user/team/Agent를 대조한 뒤 같은 팀 목록 제공           |
-| `/v1/tasks/create`    | GET `/api/v1/agents/me`, POST `/api/v1/tasks/{teamId}`       | 로컬 actor 확인 후 중앙이 Bearer에서 requester/team을 결정   |
+| 로컬 POST | 중앙 Agent Bearer provider | 동작 |
+| --- | --- | --- |
+| `/v1/agents/register` | GET `/api/v1/agents/me` | 현재 자격의 기존 Agent만 확인. 생성·수정·토큰 발급 호출 없음 |
+| `/v1/agents/list` | GET `/api/v1/agents/me`, GET `/api/v1/agents/teams/{teamId}` | 현재 user/team/Agent를 대조한 뒤 같은 팀 목록 제공 |
+| `/v1/tasks/create` | GET `/api/v1/agents/me`, POST `/api/v1/tasks/{teamId}` | 중앙 context와 대조한 로컬 actor의 팀을 경로에 사용하고 요청자는 Bearer로 결정 |
 
 중앙 `a5c7987`의 공식 생성 경로 `/api/v1/tasks/{teamId}`는 Agent Bearer API다. 이전 `/api/v1/agent/tasks`로의 호출·자동 fallback과 임시 `agentId` 파라미터는 사용하지 않는다. teamId는 검증된 세션에서 가져오며 MCP arguments/body에 actor ID를 추가하지 않는다. 사용자 cookie·CSRF를 업무 provider에 전달하지 않는다. 모든 로컬 경로는 MCP localToken만 사용하며 CLI controlToken이나 중앙 Agent 토큰으로 인증할 수 없다.
 

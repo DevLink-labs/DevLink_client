@@ -43,10 +43,11 @@ test('every workflow example is accepted by the actual registered MCP tool schem
 });
 
 test('workflow result examples carry all MVP reporting information even when DTO fields are optional', () => {
-  const done = examples.calls.complete.arguments.result;
-  assert.ok(done.summary.trim()); assert.ok(done.verification.trim());
-  assert.ok(Array.isArray(done.changedFiles) && done.changedFiles.length > 0);
+  const done = examples.calls.complete.arguments;
+  assert.ok(done.resultText.includes('검증:')); assert.equal(typeof done.version, 'string');
+  assert.ok(Array.isArray(done.taskFiles) && done.taskFiles.length > 0);
+  assert.ok(done.taskFiles.every(file => file.relativePath && file.changeType));
   const failed = examples.calls.fail.arguments;
-  assert.equal(failed.status, 'FAILED'); assert.ok(failed.reason.trim()); assert.equal(typeof failed.partiallyModified, 'boolean');
+  assert.equal(failed.status, 'FAILED'); assert.ok(failed.failureReason.trim()); assert.equal(typeof failed.partiallyModified, 'boolean');
   assert.equal(examples.calls.accept.arguments.status, 'IN_PROGRESS');
 });
