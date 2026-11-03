@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust 브로커·CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      # 인자 없이 실행하면 rust-toolchain.toml의 stable + rustfmt·clippy를 설치한다.
+      - name: Rust toolchain 설치
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: 형식 검사
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # 기존 로컬 검증과 같이 테스트를 직렬로 실행한다.
+      - name: 테스트
+        run: cargo test --workspace --all-targets --locked -- --test-threads=1
+
+  mcp-server:
+    name: MCP 서버 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: packages/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/mcp-server/package-lock.json
+      - name: 의존성 설치
+        run: npm ci
+      # 빌드, contracts/ 계약 대조, node --test 회귀를 함께 실행한다.
+      - name: 빌드·계약 대조·테스트
+        run: npm test
