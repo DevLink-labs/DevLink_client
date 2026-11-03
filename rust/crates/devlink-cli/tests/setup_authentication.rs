@@ -95,7 +95,11 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
             "team_members",
             "me",
             "team_detail",
-            "team_members"
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
         ]
     );
 }
@@ -120,7 +124,11 @@ async fn missing_session_logs_in_with_csrf_verifies_me_and_stores_only_the_sessi
             "team_members",
             "me",
             "team_detail",
-            "team_members"
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
         ]
     );
     let saved: Value = private_file::read(&user_auth::session_path(&f.path), 16_384)
@@ -157,7 +165,11 @@ async fn confirmed_expiry_allows_explicit_login_without_retrying_the_expired_coo
             "team_members",
             "me",
             "team_detail",
-            "team_members"
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
         ]
     );
 }

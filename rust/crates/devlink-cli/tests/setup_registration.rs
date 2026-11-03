@@ -70,6 +70,299 @@ fn counts(f: &Fixture) -> (usize, usize) {
     )
 }
 
+fn seed_pr37_agent(f: &Fixture, expected: &RegistrationContext, id: u64, owner: u64, tool: &str) {
+    f.state.agents.lock().unwrap().insert(
+        id,
+        json!({
+            "agentId":id,"teamId":expected.team_id,"ownerUserId":owner,
+            "name":expected.project.metadata.agent_name,"roleDescription":"server profile",
+            "toolType":tool,"projectName":"Different project display name",
+            "status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-11-03T00:00:00"
+        }),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr37_duplicate_requires_explicit_owned_id_and_rechecks_owner_and_tool() {
+    let (f, stages, expected) = fixture().await;
+    let id = i64::MAX as u64 - 1;
+    seed_pr37_agent(&f, &expected, id, 51, "CODEX");
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages = stages.with_agent(Some(Selection::Create));
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::AgentAlreadyExists);
+    assert_eq!(error.code.exit_code(), 6);
+    assert_eq!(error.outcome, Outcome::NotApplied);
+    assert_eq!(error.recovery_action(), "rename_agent_or_select_owned_id");
+    assert_eq!(error.known.agent_id, None);
+    assert!(
+        error
+            .agent_choices
+            .iter()
+            .any(|agent| agent.id == id.to_string())
+    );
+    assert!(error.agent_list_error.is_none());
+    assert_eq!(profile(&f)["state"]["kind"], "vacant");
+    assert_eq!(counts(&f), (1, 0));
+
+    // The list is advisory: ownership and tool are checked again when an ID is selected.
+    f.state.agents.lock().unwrap().get_mut(&id).unwrap()["ownerUserId"] = json!(88);
+    stages = stages.with_agent(Some(Selection::Use(id)));
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::AgentForbidden);
+    assert_eq!(profile(&f)["state"]["kind"], "vacant");
+    {
+        let mut agents = f.state.agents.lock().unwrap();
+        let agent = agents.get_mut(&id).unwrap();
+        agent["ownerUserId"] = json!(51);
+        agent["toolType"] = json!("CLAUDE_CODE");
+    }
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::AgentBindingConflict);
+    assert_eq!(profile(&f)["state"]["kind"], "vacant");
+    f.state.agents.lock().unwrap().get_mut(&id).unwrap()["toolType"] = json!("CODEX");
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::TokenRequired);
+    assert_eq!(
+        error.known.agent_id.as_deref(),
+        Some(id.to_string().as_str())
+    );
+    assert_eq!(profile(&f)["state"]["agent"]["agentId"], id);
+    assert_eq!(
+        profile(&f)["state"]["agent"]["projectName"],
+        "Different project display name"
+    );
+    assert_eq!(counts(&f), (1, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr37_foreign_duplicate_is_safe_in_cli_and_unrelated_409_is_not_relabelled() {
+    let (f, _, expected) = fixture().await;
+    seed_pr37_agent(&f, &expected, 501, 88, "CODEX");
+    let run = || {
+        f.run(
+            &[
+                "setup",
+                "--output",
+                "json",
+                "--project",
+                f._root.path().to_str().unwrap(),
+                "--create-agent",
+            ],
+            None,
+        )
+    };
+    let output = run();
+    assert_eq!(output.status.code(), Some(6), "{}", text(&output));
+    assert_no_secrets(&output);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = &result["error"];
+    assert_eq!(error["code"], "SETUP_AGENT_ALREADY_EXISTS");
+    assert_eq!(error["outcome"], "not_applied");
+    assert_eq!(error["recovery"]["automatic"], false);
+    assert!(error["known"].get("agentId").is_none());
+    let choices = error["agentChoices"].as_array().unwrap();
+    assert_eq!(choices.len(), 1); // Still never bind automatically, even with one owned choice.
+    assert_eq!(choices[0]["id"], "301");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("server profile"));
+    assert_eq!(counts(&f), (1, 0));
+    assert_eq!(profile(&f)["state"]["kind"], "vacant");
+
+    // A failed follow-up list must preserve the known rejection and not expose a partial list.
+    f.state.agent_list_mode.store(1, Ordering::SeqCst);
+    let output = run();
+    assert_no_secrets(&output);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "SETUP_AGENT_ALREADY_EXISTS");
+    assert_eq!(
+        result["error"]["agentListError"],
+        "SETUP_CENTRAL_UNAVAILABLE"
+    );
+    assert!(result["error"].get("agentChoices").is_none());
+
+    f.state.create_mode.store(4, Ordering::SeqCst);
+    let output = run();
+    assert_eq!(output.status.code(), Some(4), "{}", text(&output));
+    assert_no_secrets(&output);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "SETUP_AGENT_REJECTED");
+    assert_eq!(counts(&f), (3, 0));
+
+    // Renaming is an explicit new request, not a replay of the duplicate.
+    f.state.create_mode.store(0, Ordering::SeqCst);
+    let mut renamed = expected.clone();
+    renamed.project.metadata.agent_name.push_str(" renamed");
+    assert!(
+        registration::ensure(&f.path, &renamed, Some(Selection::Create))
+            .await
+            .unwrap()
+            .created
+    );
+    assert!(
+        registration::ensure(&f.path, &renamed, Some(Selection::Create))
+            .await
+            .unwrap()
+            .reused
+    );
+    assert_eq!(counts(&f), (4, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr37_unknown_creation_preserves_pending_when_list_fails_then_recovers_by_id() {
+    let (f, stages, _) = fixture().await;
+    f.state.create_mode.store(1, Ordering::SeqCst);
+    f.state.agent_list_mode.store(1, Ordering::SeqCst);
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages = stages.with_agent(Some(Selection::Create));
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::RegistrationUnknown);
+    assert_eq!(error.outcome, Outcome::Unknown);
+    assert_eq!(
+        error.agent_list_error,
+        Some(setup::ErrorCode::CentralUnavailable)
+    );
+    let pending = fs::read(agent_profile::path(&f.path)).unwrap();
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::RegistrationUnknown);
+    assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), pending);
+    assert_eq!(counts(&f), (1, 0));
+    f.state.create_mode.store(0, Ordering::SeqCst);
+    f.state.agent_list_mode.store(0, Ordering::SeqCst);
+    stages = stages.with_agent(None);
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::RegistrationUnknown);
+    assert!(error.agent_choices.iter().any(|agent| agent.id == "201"));
+    assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), pending);
+    stages = stages.with_agent(Some(Selection::Use(201)));
+    let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::TokenRequired);
+    assert_eq!(error.known.agent_id.as_deref(), Some("201"));
+    assert_eq!(counts(&f), (1, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr37_owned_choices_validate_the_filter_and_reach_progress_and_explicit_input() {
+    let (f, mut stages, expected) = fixture().await;
+    seed_pr37_agent(&f, &expected, 501, 51, "CODEX");
+    seed_pr37_agent(&f, &expected, 502, 51, "CLAUDE_CODE");
+    let agents = registration::owned_agents(&f.path, &expected)
+        .await
+        .unwrap();
+    assert_eq!(
+        agents
+            .iter()
+            .map(|agent| agent.agent_id)
+            .collect::<Vec<_>>(),
+        vec![301, 501]
+    );
+    assert!(
+        f.state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "agents_owned")
+    );
+    assert!(!agent_profile::path(&f.path).exists());
+    for mode in [2, 3, 4] {
+        // ignored ownedByMe, duplicate IDs, another team
+        f.state.agent_list_mode.store(mode, Ordering::SeqCst);
+        assert_eq!(
+            registration::owned_agents(&f.path, &expected)
+                .await
+                .unwrap_err()
+                .kind,
+            FailureKind::Protocol
+        );
+    }
+    f.state.agent_list_mode.store(1, Ordering::SeqCst);
+    let StepResult::Failed(error) = stages
+        .execute(
+            Step::RegisterAgent,
+            &SetupContext {
+                config_path: f.path.clone(),
+            },
+        )
+        .await
+    else {
+        panic!("A failed initial list must not become an empty selection")
+    };
+    assert_eq!(error.code, setup::ErrorCode::CentralUnavailable);
+    assert!(!agent_profile::path(&f.path).exists());
+    assert_eq!(counts(&f), (0, 0));
+    f.state.agent_list_mode.store(0, Ordering::SeqCst);
+    struct PickOwned;
+    impl AgentInput for PickOwned {
+        fn available(&self) -> bool {
+            true
+        }
+        fn interactive(&self) -> bool {
+            true
+        }
+        async fn request(
+            &mut self,
+            choices: &[setup::AgentChoice],
+        ) -> Result<Selection, AgentInputError> {
+            assert_eq!(
+                choices
+                    .iter()
+                    .map(|agent| agent.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["301", "501"]
+            );
+            Ok(Selection::Use(501))
+        }
+    }
+    let mut events = Vec::new();
+    let result = setup::run(
+        &SetupContext {
+            config_path: f.path.clone(),
+        },
+        stages.with_agent_input(PickOwned),
+        |event| {
+            events.push(event.clone());
+            Ok(())
+        },
+    )
+    .await;
+    let waiting = events
+        .iter()
+        .find(|event| {
+            event.step == Step::RegisterAgent
+                && event.step_status == setup::StageStatus::WaitingInput
+        })
+        .unwrap();
+    assert_eq!(waiting.agent_choices.len(), 2);
+    assert_eq!(waiting.agent_choices[1].id, "501");
+    let setup::Completion::Failure { error } = result.completion else {
+        panic!()
+    };
+    assert_eq!(error.code, setup::ErrorCode::TokenRequired);
+    assert_eq!(error.known.agent_id.as_deref(), Some("501"));
+    assert_eq!(profile(&f)["state"]["agent"]["agentId"], 501);
+    assert_eq!(counts(&f), (0, 0));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creation_is_explicit_durable_and_never_issues_a_token_or_sends_local_paths() {
     let (f, _, expected) = fixture().await;
@@ -342,7 +635,7 @@ impl AgentInput for ExplicitCreate {
     fn available(&self) -> bool {
         true
     }
-    async fn request(&mut self) -> Result<Selection, AgentInputError> {
+    async fn request(&mut self, _: &[setup::AgentChoice]) -> Result<Selection, AgentInputError> {
         Ok(Selection::Create)
     }
 }
@@ -468,7 +761,10 @@ async fn agent_input_cancellation_preserves_local_state_and_does_not_send_creati
         fn available(&self) -> bool {
             true
         }
-        async fn request(&mut self) -> Result<Selection, AgentInputError> {
+        async fn request(
+            &mut self,
+            _: &[setup::AgentChoice],
+        ) -> Result<Selection, AgentInputError> {
             Err(AgentInputError::Cancelled)
         }
     }

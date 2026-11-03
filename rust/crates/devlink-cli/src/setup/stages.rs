@@ -1,5 +1,5 @@
 use super::{
-    AgentInput, AgentInputError, ErrorCode, ErrorLocation, InputKind, InputSource,
+    AgentChoice, AgentInput, AgentInputError, ErrorCode, ErrorLocation, InputKind, InputSource,
     LoginCredentials, LoginInput, LoginInputError, NoAgentInput, NoLoginInput, NoTeamInput,
     NoToolInput, Outcome, RequiredInput, SetupContext, SetupError, Step, StepExecutor, StepResult,
     TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError,
@@ -409,7 +409,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
 
     async fn resolve_input(&mut self, required: &SetupError) -> Result<(), SetupError> {
         if required.step == Step::RegisterAgent {
-            let code = match self.agent_input.request().await {
+            let code = match self.agent_input.request(&required.agent_choices).await {
                 Ok(selection) => {
                     self.agents.selection = Some(selection);
                     return Ok(());
@@ -421,6 +421,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
             };
             let mut error = SetupError::new(code, Step::RegisterAgent, Outcome::NotApplied);
             error.known = required.known.clone();
+            error.agent_choices = required.agent_choices.clone();
+            error.agent_list_error = required.agent_list_error;
             return Err(error);
         }
         if required.step == Step::SelectTool {
@@ -1144,6 +1146,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
                         error.known.user_id = Some(user.user_id.to_string());
                         error.known.team_id = Some(team.team_id.to_string());
                         error.known.tool_type = Some(tool.tool_type);
+                        add_agent_choices(&mut error, &context.config_path, &expected).await;
+                        if let Some(code) = error.agent_list_error {
+                            self.agents.waiting = false;
+                            let mut unavailable =
+                                SetupError::new(code, Step::RegisterAgent, outcome);
+                            unavailable.known = error.known;
+                            unavailable.agent_list_error = Some(code);
+                            return StepResult::Failed(unavailable);
+                        }
                         return StepResult::InputRequired(error);
                     }
                     RegistrationState::CreationUnknown => {
@@ -1174,19 +1185,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
                 }
             }
             Err(failure) => {
-                let code = match failure.kind {
-                    registration::FailureKind::Storage => ErrorCode::AgentStorageFailed,
-                    registration::FailureKind::Busy => ErrorCode::AuthBusy,
-                    registration::FailureKind::ConfigBusy => ErrorCode::ConfigBusy,
-                    registration::FailureKind::BrokerBusy => ErrorCode::BrokerBusy,
-                    registration::FailureKind::BindingConflict => ErrorCode::AgentBindingConflict,
-                    registration::FailureKind::Forbidden => ErrorCode::AgentForbidden,
-                    registration::FailureKind::SessionConflict => ErrorCode::AuthSessionConflict,
-                    registration::FailureKind::Rejected => ErrorCode::AgentRejected,
-                    registration::FailureKind::AuthRejected => ErrorCode::AuthRequired,
-                    registration::FailureKind::Unavailable => ErrorCode::CentralUnavailable,
-                    registration::FailureKind::Protocol => ErrorCode::ProtocolError,
-                };
+                let code = registration_error_code(failure.kind);
                 let mut error = SetupError::new(
                     code,
                     Step::RegisterAgent,
@@ -1199,6 +1198,14 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
                         kind: InputKind::Selection,
                         secret: false,
                         source: InputSource::OwnedAgentList,
+                    });
+                }
+                if code == ErrorCode::AgentAlreadyExists {
+                    error.required_inputs.push(RequiredInput {
+                        field: "agent.action",
+                        kind: InputKind::Selection,
+                        secret: false,
+                        source: InputSource::Input,
                     });
                 }
                 if code == ErrorCode::AgentStorageFailed {
@@ -1221,7 +1228,54 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
                 .and_then(|r| r.agent_id)
                 .map(|id| id.to_string());
         }
+        if matches!(
+            error.code,
+            ErrorCode::RegistrationUnknown
+                | ErrorCode::AgentAlreadyExists
+                | ErrorCode::AgentForbidden
+        ) {
+            add_agent_choices(&mut error, &context.config_path, &expected).await;
+        }
         StepResult::Failed(error)
+    }
+}
+
+fn registration_error_code(kind: registration::FailureKind) -> ErrorCode {
+    match kind {
+        registration::FailureKind::Storage => ErrorCode::AgentStorageFailed,
+        registration::FailureKind::Busy => ErrorCode::AuthBusy,
+        registration::FailureKind::ConfigBusy => ErrorCode::ConfigBusy,
+        registration::FailureKind::BrokerBusy => ErrorCode::BrokerBusy,
+        registration::FailureKind::BindingConflict => ErrorCode::AgentBindingConflict,
+        registration::FailureKind::Forbidden => ErrorCode::AgentForbidden,
+        registration::FailureKind::SessionConflict => ErrorCode::AuthSessionConflict,
+        registration::FailureKind::Rejected => ErrorCode::AgentRejected,
+        registration::FailureKind::AlreadyExists => ErrorCode::AgentAlreadyExists,
+        registration::FailureKind::AuthRejected => ErrorCode::AuthRequired,
+        registration::FailureKind::Unavailable => ErrorCode::CentralUnavailable,
+        registration::FailureKind::Protocol => ErrorCode::ProtocolError,
+    }
+}
+
+async fn add_agent_choices(
+    error: &mut SetupError,
+    path: &std::path::Path,
+    expected: &RegistrationContext,
+) {
+    match registration::owned_agents(path, expected).await {
+        Ok(agents) => {
+            error.agent_choices = agents
+                .into_iter()
+                .map(|agent| AgentChoice {
+                    id: agent.agent_id.to_string(),
+                    name: agent.name,
+                    project_name: agent.project_name,
+                    tool_type: expected.tool,
+                })
+                .collect();
+        }
+        // The failed read must not replace a known duplicate or an unknown creation outcome.
+        Err(failure) => error.agent_list_error = Some(registration_error_code(failure.kind)),
     }
 }
 fn combine_registration_outcome(

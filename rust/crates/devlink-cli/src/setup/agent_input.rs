@@ -1,3 +1,4 @@
+use super::AgentChoice;
 use devlink_broker::agent_profile::registration::Selection;
 use std::future::Future;
 
@@ -13,14 +14,17 @@ pub trait AgentInput: Send {
     fn interactive(&self) -> bool {
         false
     }
-    fn request(&mut self) -> impl Future<Output = Result<Selection, AgentInputError>> + Send;
+    fn request(
+        &mut self,
+        choices: &[AgentChoice],
+    ) -> impl Future<Output = Result<Selection, AgentInputError>> + Send;
 }
 pub struct NoAgentInput;
 impl AgentInput for NoAgentInput {
     fn available(&self) -> bool {
         false
     }
-    async fn request(&mut self) -> Result<Selection, AgentInputError> {
+    async fn request(&mut self, _: &[AgentChoice]) -> Result<Selection, AgentInputError> {
         Err(AgentInputError::Unavailable)
     }
 }

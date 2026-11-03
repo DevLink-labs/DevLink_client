@@ -64,6 +64,7 @@ pub enum FailureKind {
     Forbidden,
     SessionConflict,
     Rejected,
+    AlreadyExists,
     AuthRejected,
     Unavailable,
     Protocol,
@@ -105,6 +106,14 @@ pub(super) fn central(error: anyhow::Error) -> Failure {
             _ => FailureKind::Storage,
         }
     } else {
+        if error
+            .downcast_ref::<user_auth::ApiRejection>()
+            .is_some_and(|rejection| {
+                rejection.status == 409 && rejection.code == "AGENT_ALREADY_EXISTS"
+            })
+        {
+            return failure(FailureKind::AlreadyExists);
+        }
         match user_auth::rejection_status(&error) {
             Some(401) => FailureKind::AuthRejected,
             Some(403) => FailureKind::Forbidden,
@@ -174,6 +183,14 @@ fn matches_metadata(agent: &Agent, expected: &RegistrationContext) -> bool {
         && agent.tool_type == tool(expected)
 }
 pub(super) fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), Failure> {
+    validate_owned_agent(agent, expected)?;
+    if agent.tool_type != tool(expected) {
+        return Err(failure(FailureKind::BindingConflict));
+    }
+    Ok(())
+}
+
+fn validate_owned_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), Failure> {
     if !valid_id(agent.agent_id) || !valid_id(agent.owner_user_id) || !valid_id(agent.team_id) {
         return Err(failure(FailureKind::Protocol));
     }
@@ -190,9 +207,6 @@ pub(super) fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> R
             .is_some_and(|s| s.encode_utf16().count() > 255)
     {
         return Err(failure(FailureKind::Protocol));
-    }
-    if agent.tool_type != tool(expected) {
-        return Err(failure(FailureKind::BindingConflict));
     }
     Ok(())
 }
@@ -223,6 +237,45 @@ pub(super) fn summary(profile: &Profile, reused: bool) -> Registration {
 /// Inspect existing ownership and metadata. Never creates, binds or issues credentials.
 pub async fn inspect(path: &Path, expected: &RegistrationContext) -> Result<Registration, Failure> {
     ensure(path, expected, None).await
+}
+
+/// Read-only recovery choices. A name match never authorizes binding or issuance.
+pub async fn owned_agents(
+    path: &Path,
+    expected: &RegistrationContext,
+) -> Result<Vec<Agent>, Failure> {
+    let mut client = UserClient::authenticated_for_setup(path, &expected.origin, expected.user_id)
+        .await
+        .map_err(central)?;
+    let lock = config::state_directory(path).join("control.lock");
+    let _control = config::try_lock(&lock)
+        .map_err(|_| failure(FailureKind::Storage))?
+        .ok_or_else(|| failure(FailureKind::ConfigBusy))?;
+    check_binding(path, expected)?;
+    let team = teams::require_selected(path, &mut client)
+        .await
+        .map_err(central)?;
+    if team.team_id != expected.team_id {
+        return Err(failure(FailureKind::SessionConflict));
+    }
+    let mut agents: Vec<Agent> = client
+        .get_with_query(
+            &format!("/api/v1/agents/teams/{}", expected.team_id),
+            &[("ownedByMe", "true")],
+        )
+        .await
+        .map_err(central)?;
+    let mut ids = std::collections::HashSet::new();
+    for agent in &agents {
+        validate_owned_agent(agent, expected).map_err(|_| failure(FailureKind::Protocol))?;
+        if !ids.insert(agent.agent_id) {
+            return Err(failure(FailureKind::Protocol));
+        }
+    }
+    check_binding(path, expected)?;
+    agents.retain(|agent| agent.tool_type == tool(expected));
+    agents.sort_by_key(|agent| agent.agent_id);
+    Ok(agents)
 }
 
 /// Explicit create/use, or validation/reuse of an existing profile when selection is absent.

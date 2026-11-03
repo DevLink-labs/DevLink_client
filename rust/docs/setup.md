@@ -555,3 +555,37 @@ Agent 소유권/팀 불일치와 HTTP 403은 계약의 SETUP_AGENT_FORBIDDEN(4),
 실제 CLI 통합은 신규 생성 → 최초 토큰 발급/검증 → 브로커 시작 → configure_mcp 미연결 안내까지 통과했다. 같은 프로필 재실행 및 정상 토큰에 --issue-token을 추가한 실행에서 생성/발급 횟수가 각각 1회를 유지하고 기존 브로커를 재사용했으며, 소유 브로커를 정상 중지했다. 이 검증은 Host가 실제 MCP 설정을 소비했다는 증거는 아니다.
 
 로그: `rust/target/setup09-regression.log`, `setup09-permission.log`, `setup09-adapters.log`, `setup09-clippy-final.log`. 전체 workspace 테스트·실제 운영 중앙/DB·Unix·배포본·실제 Host 전체 설정은 이번에 실행하지 않았다.
+
+## 08 보완: 서버 PR #37의 중복 등록·본인 목록 계약
+
+[서버 PR #37](https://github.com/SSAFY-URAYAHA/DevLink_server/pull/37)의 생성·목록 계약을 CLI 등록 단계에 반영한다. 서버의 중복 기준은 `(teamId, name, toolType)`이며 소유자나 프로젝트명이 달라도 충돌한다. 생성 요청에 등록키를 추가하거나 이름으로 기존 Agent를 자동 선택하지 않는다.
+
+| 상황 | setup 결과 | 다음 동작 |
+| --- | --- | --- |
+| HTTP 409 `AGENT_ALREADY_EXISTS` | `SETUP_AGENT_ALREADY_EXISTS`, 종료 6, `outcome=not_applied` | `rename_agent_or_select_owned_id`: 이름을 바꿔 명시적으로 생성하거나 본인 ID 선택 |
+| 생성 응답 유실·5xx·기존 pending | 기존 `SETUP_REGISTRATION_UNKNOWN`, 종료 3, `outcome=unknown` | pending 유지, 본인 목록 확인 후 `--agent-id`로 복구 |
+| 본인 목록 조회 실패 | 원래 오류·outcome 유지, 별도 `agentListError` | 조회 실패를 빈 목록 또는 생성 실패로 단정하지 않고 원인을 확인 |
+| 선택·복구할 Agent ID가 확인됨 | 기존 소유자·팀·도구 재검증 후 같은 ID 준비 | 토큰이 필요하면 09의 명시적 발급 규칙 적용 |
+
+입력이 필요한 최초 등록과 중복·결과 불명·타인 ID 거절 결과에는 사용자 세션으로 `GET /api/v1/agents/teams/{teamId}?ownedByMe=true`를 조회한다. 경로 검증은 유지하고 쿼리를 별도 인자로 인코딩한다. 반환된 모든 행의 사용자·팀·ID·메타데이터와 중복 ID를 확인한 뒤 현재 선택 도구에 맞는 후보만 Agent ID 오름차순으로 제공한다. 서버가 필터를 무시하거나 다른 팀 데이터를 반환하면 전체 목록을 거절하며 부분 후보를 노출하지 않는다.
+
+오류와 입력 대기 progress의 선택 목록은 `agentChoices: [{id, name, projectName, toolType}]`다. ID는 Java Long을 보존하는 십진 문자열이며 토큰·역할 설명은 포함하지 않는다. 비어 있는 목록은 생략한다. 추가 조회 실패는 오류에 `agentListError`로 구분한다. human 출력과 대화형 입력에서도 같은 검증 목록을 표시하고 제어·bidi 문자를 이스케이프한다. 후보가 하나이거나 이름이 같아도 자동 선택하지 않으며, 사용자가 고른 ID는 상세 API로 다시 검증한다.
+
+최초 선택 전에 목록 조회가 실패하면 해당 조회 오류로 중단하고 대화형 입력을 시작하지 않는다. 이를 빈 후보 목록으로 표시하지 않으며, Agent 생성이나 토큰 발급도 수행하지 않는다.
+
+```powershell
+# 같은 팀·이름·도구가 이미 있으면 종료 6과 본인 선택 목록 반환
+devlink setup --tool codex --create-agent --agent-name "Reviewer"
+# 목록에서 본인이 확인한 ID를 명시적으로 선택. 이름·표시명은 서버 값을 유지
+devlink setup --tool codex --agent-id 34
+# 토큰 준비가 필요할 때만 명시적으로 허용
+devlink setup --tool codex --agent-id 34 --issue-token
+```
+
+중복 거절은 토큰 발급·기존 Agent 바인딩으로 이어지지 않고 `vacant`로 남는다. 목록 조회는 pending을 지우거나 생성을 재시도하지 않는다. 등록키로 생성 결과를 확정하는 API는 PR #37에도 없으므로 자동 복구는 후속 계약 범위다. 프로필 수정 PATCH와 MCP 설정 연결은 이번 08 보완에 포함하지 않는다.
+
+검증은 `setup_registration.rs`의 `pr37_` 회귀와 공통 setup 흐름·출력·CLI 회귀로 수행한다. 합성 서버에는 소유자와 무관한 복합 중복 판정, `ownedByMe`, 목록 장애·필터 위반 응답을 추가했다. 실제 배포 서버·DB와의 연동 검증은 별도다.
+
+검증 결과: 새 PR #37 회귀 4건과 기존 setup CLI 6건·실행 흐름 10건·출력 5건, 총 25건이 통과했다. 최초 목록 실패 처리 보완 후 해당 본인 목록 회귀 1건도 재실행해 통과했으며 합계에 중복 계산하지 않는다. workspace/all-targets Clippy `-D warnings`, 전체 타깃 컴파일·포맷·변경 공백 검사도 통과했다. 이번 보완에서 전체 workspace 테스트나 실제 서버·Host 검증을 추가 실행한 것은 아니다.
+
+로그: `rust/target/registration37-new-tests.log`, `registration37-owned-final.log`, `registration37-setup-tests.log`, `registration37-clippy.log`.

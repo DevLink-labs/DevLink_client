@@ -1,8 +1,8 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
 use super::{
-    AgentInput, AgentInputError, Completion, LoginCredentials, LoginInput, LoginInputError,
-    ProgressEvent, ProgressUnavailable, RunResult, SetupContext, SetupStages, TeamChoice,
-    TeamInput, TeamInputError, ToolInput, ToolInputError, parse_team_id,
+    AgentChoice, AgentInput, AgentInputError, Completion, LoginCredentials, LoginInput,
+    LoginInputError, ProgressEvent, ProgressUnavailable, RunResult, SetupContext, SetupStages,
+    TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError, parse_team_id,
 };
 use clap::{Args, ValueEnum};
 use serde::Serialize;
@@ -333,6 +333,16 @@ impl<W: Write> Renderer<W> {
                         write!(self.writer, "Tools: ").map_err(|_| ProgressUnavailable)?;
                         self.json(&error.tools)?;
                     }
+                    if !error.agent_choices.is_empty() {
+                        write!(self.writer, "Owned Agents for the selected tool: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(&error.agent_choices)?;
+                    }
+                    if let Some(code) = error.agent_list_error {
+                        write!(self.writer, "Owned Agent list unavailable: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(&code)?;
+                    }
                     writeln!(self.writer, "Recovery: {}", error.recovery_action())
                         .map_err(|_| ProgressUnavailable)?;
                 }
@@ -369,11 +379,13 @@ impl AgentInput for TerminalAgentInput {
     }
     async fn request(
         &mut self,
+        choices: &[AgentChoice],
     ) -> Result<devlink_broker::agent_profile::registration::Selection, AgentInputError> {
         if !self.interactive() {
             return Err(AgentInputError::Unavailable);
         }
-        tokio::task::spawn_blocking(|| {
+        let choices = choices.to_vec();
+        tokio::task::spawn_blocking(move || {
             use devlink_broker::agent_profile::registration::Selection;
             use std::io::{BufRead, Read};
             fn read(prompt: &str) -> Result<String, AgentInputError> {
@@ -394,6 +406,15 @@ impl AgentInput for TerminalAgentInput {
                     return Err(AgentInputError::Invalid);
                 }
                 String::from_utf8(bytes).map_err(|_| AgentInputError::Invalid)
+            }
+            if !choices.is_empty() {
+                let stderr = std::io::stderr();
+                let mut renderer = Renderer::new(stderr.lock(), OutputFormat::Json);
+                writeln!(renderer.writer, "Owned Agents for the selected tool:")
+                    .map_err(|_| AgentInputError::ReadFailed)?;
+                renderer
+                    .json(&choices)
+                    .map_err(|_| AgentInputError::ReadFailed)?;
             }
             match read("Agent action (create/use): ")?.trim() {
                 "create" => Ok(Selection::Create),

@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State, WebSocketUpgrade, ws::Message},
+    extract::{Path, Query, State, WebSocketUpgrade, ws::Message},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -52,6 +52,7 @@ pub struct MockState {
     pub token_calls: Arc<AtomicUsize>,
     pub token_requests: Arc<AtomicUsize>,
     pub create_mode: Arc<AtomicU8>,
+    pub agent_list_mode: Arc<AtomicU8>,
     pub pause_create: Arc<AtomicBool>,
     pub create_entered: Arc<tokio::sync::Notify>,
     pub create_resume: Arc<tokio::sync::Notify>,
@@ -213,6 +214,9 @@ async fn agent_create(
     if state.create_mode.load(Ordering::SeqCst) == 3 {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
     }
+    if state.create_mode.load(Ordering::SeqCst) == 4 {
+        return failure(StatusCode::CONFLICT, "DUPLICATE_REQUEST");
+    }
     assert!(body.get("ownerUserId").is_none() && body.get("agentId").is_none());
     assert_eq!(
         body.as_object()
@@ -222,19 +226,34 @@ async fn agent_create(
             .collect::<Vec<_>>(),
         ["name", "projectName", "roleDescription", "toolType"]
     );
-    let count = state.agents.lock().unwrap().len();
-    let id = 201 + count as u64;
-    let user = user(&state)["userId"].as_u64().unwrap();
-    let mut agent = agent_value(
-        id,
-        user,
-        team,
-        body["name"].as_str().unwrap(),
-        body["toolType"].clone(),
-        body["projectName"].clone(),
-    );
-    agent["roleDescription"] = body["roleDescription"].clone();
-    state.agents.lock().unwrap().insert(id, agent.clone());
+    let fixed = [
+        agent_for(&state, 301).unwrap(),
+        agent_for(&state, 302).unwrap(),
+    ];
+    let agent = {
+        let mut stored = state.agents.lock().unwrap();
+        if stored.values().chain(fixed.iter()).any(|agent| {
+            agent["teamId"] == team
+                && agent["name"] == body["name"]
+                && agent["toolType"] == body["toolType"]
+        }) {
+            return failure(StatusCode::CONFLICT, "AGENT_ALREADY_EXISTS");
+        }
+        let count = stored.len();
+        let id = 201 + count as u64;
+        let user = user(&state)["userId"].as_u64().unwrap();
+        let mut agent = agent_value(
+            id,
+            user,
+            team,
+            body["name"].as_str().unwrap(),
+            body["toolType"].clone(),
+            body["projectName"].clone(),
+        );
+        agent["roleDescription"] = body["roleDescription"].clone();
+        stored.insert(id, agent.clone());
+        agent
+    };
     if state.pause_create.load(Ordering::SeqCst) {
         state.create_entered.notify_one();
         state.create_resume.notified().await;
@@ -244,13 +263,31 @@ async fn agent_create(
     }
     success(agent)
 }
+#[derive(serde::Deserialize)]
+struct AgentListQuery {
+    #[serde(rename = "ownedByMe", default)]
+    owned_by_me: bool,
+}
 async fn agent_list(
     Path(team): Path<u64>,
     State(state): State<MockState>,
+    Query(query): Query<AgentListQuery>,
     headers: HeaderMap,
 ) -> Response {
     assert!(authorized(&state, &headers, false));
     assert_eq!(team, 71);
+    state.calls.lock().unwrap().push(
+        if query.owned_by_me {
+            "agents_owned"
+        } else {
+            "agents_all"
+        }
+        .into(),
+    );
+    let mode = state.agent_list_mode.load(Ordering::SeqCst);
+    if mode == 1 {
+        return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
+    }
     let mut agents = state
         .agents
         .lock()
@@ -260,6 +297,18 @@ async fn agent_list(
         .collect::<Vec<_>>();
     agents.push(agent_for(&state, 301).unwrap());
     agents.push(agent_for(&state, 302).unwrap());
+    if query.owned_by_me && mode != 2 {
+        agents.retain(|agent| {
+            agent["ownerUserId"] == user(&state)["userId"] && agent["teamId"] == team
+        });
+    }
+    if mode == 3 {
+        agents.push(agents[0].clone());
+    }
+    if mode == 4 {
+        agents.push(agent_for(&state, 303).unwrap());
+    }
+    agents.sort_by_key(|agent| agent["agentId"].as_u64().unwrap());
     success(json!(agents))
 }
 async fn agent_get(
