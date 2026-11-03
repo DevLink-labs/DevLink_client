@@ -308,46 +308,43 @@ pub fn set_private_permissions(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 pub fn verify_private_permissions(path: &Path) -> Result<()> {
-    verify_permissions(path, false, false, WindowsOwnerPolicy::CurrentUser)
+    verify_permissions(path, false, false, false, false)
 }
-#[cfg(windows)]
-pub fn verify_directory_permissions(path: &Path) -> Result<()> {
-    verify_parent_safety(path)?;
-    verify_permissions(path, true, true, WindowsOwnerPolicy::CurrentUser)
-}
+
 /// Non-secret files that still steer authentication (config.json): others may read,
 /// but only the current user and trusted principals may write, delete or re-ACL them.
 /// On Windows, the owner may also be BUILTIN\Administrators for elevated init.
-/// SYSTEM/TrustedInstaller ownership is reserved for source and state ancestors.
-#[cfg(windows)]
 pub fn verify_trusted_writer_permissions(path: &Path) -> Result<()> {
-    verify_permissions(path, false, true, WindowsOwnerPolicy::Config)
-}
-#[cfg(windows)]
-enum WindowsOwnerPolicy {
-    CurrentUser,
-    Config,
-    System,
+    #[cfg(windows)]
+    {
+        verify_permissions(path, false, true, false, true)
+    }
+    #[cfg(unix)]
+    {
+        verify_permissions(path, true)
+    }
 }
 
-// Shared by the filesystem verifier and tests using in-memory Windows ACLs.
+// Shared with the Windows regression tests so owner cases can be exercised with
+// real .NET ACL objects without requiring an elevated token to chown files.
 #[cfg(windows)]
 const WINDOWS_ACL_POLICY: &str = r#"
-function Get-DevLinkAclFailure($acl, [string]$sid, [bool]$isTarget, [bool]$directory, [bool]$public, [string]$ownerPolicy) {
+function Get-DevLinkAclFailure($acl, [string]$sid, [bool]$isFile, [bool]$othersMayRead, [bool]$source = $false, [bool]$checkOwner = $isFile, [bool]$configFile = $false) {
   $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544')
   $owners = @($sid)
-  if ($ownerPolicy -eq 'config') {
-    $owners += 'S-1-5-32-544'
-  } elseif ($ownerPolicy -eq 'system') {
+  if ($source) {
     $owners = $trusted
     try { $owners += ([System.Security.Principal.NTAccount]'NT SERVICE\TrustedInstaller').Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
     $trusted = $owners
+  } elseif ($configFile -and $othersMayRead) { $owners += 'S-1-5-32-544' }
+  if ($checkOwner) {
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin $owners) { return 2 }
   }
-  if ($isTarget -and $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $owners) { return 2 }
   foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-    if ($public -and $rule.IdentityReference.Value -in @('S-1-3-0','S-1-3-1') -and (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) { continue }
+    if ($othersMayRead -and $rule.IdentityReference.Value -in @('S-1-3-0','S-1-3-1') -and (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) { continue }
     if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $trusted) {
-      if (($isTarget -and -not $directory -and -not $public) -or (($rule.FileSystemRights -band 852310) -ne 0)) { return 3 }
+      if (($isFile -and -not $othersMayRead) -or (($rule.FileSystemRights -band 852310) -ne 0)) { return 3 }
     }
   }
   return 0
@@ -355,11 +352,17 @@ function Get-DevLinkAclFailure($acl, [string]$sid, [bool]$isTarget, [bool]$direc
 "#;
 
 #[cfg(windows)]
+pub fn verify_directory_permissions(path: &Path) -> Result<()> {
+    verify_parent_safety(path)?;
+    verify_permissions(path, true, true, false, false)
+}
+#[cfg(windows)]
 fn verify_permissions(
     path: &Path,
     directory: bool,
     public_read: bool,
-    owner_policy: WindowsOwnerPolicy,
+    source: bool,
+    config_file: bool,
 ) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -368,12 +371,12 @@ fn verify_permissions(
     let abs_path = std::path::absolute(path)
         .with_context(|| format!("Cannot determine absolute path for {}", path.display()))?;
 
-    // packages/mcp-server/src/broker/settings.ts와 동일한 Windows ACL 검사 기준 적용:
-    // - config 소유자는 현재 사용자/Administrators, 비공개 파일은 현재 사용자 SID
-    // - 실행 파일/상태 상위 디렉터리만 SYSTEM/TrustedInstaller 소유도 허용
+    // 비공개 파일은 packages/mcp-server/src/broker/settings.ts와 동일한 기준 적용:
+    // - 비공개 파일 소유자는 현재 사용자 SID; config는 Administrators도 허용
     // - 파일은 현재 사용자, SYSTEM(S-1-5-18), BUILTIN\Administrators(S-1-5-32-544) 외 Allow 거부
     // - 직계 부모 디렉터리는 위 신뢰 주체 외 금지된 쓰기·삭제·권한 변경(852310 마스크) Allow 거부
-    // - public_read이면 파일에도 부모와 같은 852310 마스크만 적용해 읽기 Allow는 허용
+    // - others_may_read이면 파일에도 부모와 같은 852310 마스크만 적용해 읽기 Allow는 허용
+    // - source/state 모드만 SYSTEM/TrustedInstaller 소유를 허용하며 config 예외와 분리
     // - 검증 성공 시 'private' 출력, 검사 실패 시 exit 2 또는 exit 3
     const SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -381,30 +384,25 @@ $p = $env:DEVLINK_ACL_CHECK_PATH
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $directory = $env:DEVLINK_ACL_DIRECTORY -eq '1'
 $public = $env:DEVLINK_ACL_PUBLIC -eq '1'
-$ownerPolicy = $env:DEVLINK_ACL_OWNER_POLICY
+$source = $env:DEVLINK_ACL_SOURCE -eq '1'
+$config = $env:DEVLINK_ACL_CONFIG -eq '1'
 $targets = if ($directory) { @($p) } else { @($p, [System.IO.Path]::GetDirectoryName($p)) }
 foreach ($target in $targets) {
   $acl = if ($target -eq $p -and -not $directory) { [System.IO.File]::GetAccessControl($target) } else { [System.IO.Directory]::GetAccessControl($target) }
-  $failure = Get-DevLinkAclFailure $acl $sid ($target -eq $p) $directory $public $ownerPolicy
+  $failure = Get-DevLinkAclFailure $acl $sid (($target -eq $p) -and -not $directory) $public $source ($target -eq $p) $config
   if ($failure -ne 0) { exit $failure }
 }
 [Console]::Write('private')
 "#;
 
-    let mut cmd = Command::new("powershell.exe");
     let script = format!("{WINDOWS_ACL_POLICY}\n{SCRIPT}");
+    let mut cmd = Command::new("powershell.exe");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .env("DEVLINK_ACL_CHECK_PATH", &abs_path)
         .env("DEVLINK_ACL_DIRECTORY", if directory { "1" } else { "0" })
         .env("DEVLINK_ACL_PUBLIC", if public_read { "1" } else { "0" })
-        .env(
-            "DEVLINK_ACL_OWNER_POLICY",
-            match owner_policy {
-                WindowsOwnerPolicy::CurrentUser => "user",
-                WindowsOwnerPolicy::Config => "config",
-                WindowsOwnerPolicy::System => "system",
-            },
-        )
+        .env("DEVLINK_ACL_SOURCE", if source { "1" } else { "0" })
+        .env("DEVLINK_ACL_CONFIG", if config_file { "1" } else { "0" })
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -468,6 +466,11 @@ pub fn set_private_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+pub fn verify_private_permissions(path: &Path) -> Result<()> {
+    verify_permissions(path, false)
+}
+
+#[cfg(unix)]
 fn verify_permissions(path: &Path, others_may_read: bool) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let info = fs::symlink_metadata(path)?;
@@ -488,14 +491,6 @@ fn verify_permissions(path: &Path, others_may_read: bool) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn verify_private_permissions(path: &Path) -> Result<()> {
-    verify_permissions(path, false)
-}
-#[cfg(unix)]
-pub fn verify_trusted_writer_permissions(path: &Path) -> Result<()> {
-    verify_permissions(path, true)
-}
-#[cfg(unix)]
 pub fn verify_directory_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     verify_parent_safety(path)?;
@@ -511,7 +506,7 @@ pub fn verify_directory_permissions(path: &Path) -> Result<()> {
 #[cfg(windows)]
 pub(crate) fn verify_state_directory_permissions(path: &Path) -> Result<()> {
     verify_parent_safety(path)?;
-    verify_permissions(path, true, true, WindowsOwnerPolicy::System)
+    verify_permissions(path, true, true, true, false)
 }
 #[cfg(unix)]
 pub(crate) fn verify_state_directory_permissions(path: &Path) -> Result<()> {
@@ -529,16 +524,7 @@ pub(crate) fn verify_state_directory_permissions(path: &Path) -> Result<()> {
 /// Credentials continue to use the stricter private-file verifier.
 #[cfg(windows)]
 pub(crate) fn verify_public_file_permissions(path: &Path, source: bool) -> Result<()> {
-    verify_permissions(
-        path,
-        false,
-        true,
-        if source {
-            WindowsOwnerPolicy::System
-        } else {
-            WindowsOwnerPolicy::CurrentUser
-        },
-    )
+    verify_permissions(path, false, true, source, false)
 }
 #[cfg(unix)]
 pub(crate) fn verify_public_file_permissions(path: &Path, source: bool) -> Result<()> {
@@ -880,7 +866,6 @@ $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $admin = 'S-1-5-32-544'
 $system = 'S-1-5-18'
 $everyone = 'S-1-1-0'
-$installer = ([System.Security.Principal.NTAccount]'NT SERVICE\TrustedInstaller').Translate([System.Security.Principal.SecurityIdentifier]).Value
 function New-TestAcl([string]$owner) {
   $acl = [System.Security.AccessControl.FileSecurity]::new()
   $acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new($owner))
@@ -888,33 +873,32 @@ function New-TestAcl([string]$owner) {
     [System.Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
   return $acl
 }
-foreach ($owner in @($sid, $admin, $system, $installer, $everyone)) {
+foreach ($owner in @($sid, $admin, $system, $everyone)) {
   $acl = New-TestAcl $owner
   $configExpected = if ($owner -in @($sid, $admin)) { 0 } else { 2 }
   $privateExpected = if ($owner -eq $sid) { 0 } else { 2 }
-  $systemExpected = if ($owner -ne $everyone) { 0 } else { 2 }
-  if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'config') -ne $configExpected) { throw "config owner policy: $owner" }
-  if ((Get-DevLinkAclFailure $acl $sid $true $false $false 'user') -ne $privateExpected) { throw "private owner policy: $owner" }
-  if ((Get-DevLinkAclFailure $acl $sid $true $true $true 'user') -ne $privateExpected) { throw "private directory owner policy: $owner" }
-  if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'system') -ne $systemExpected) { throw "source owner policy: $owner" }
-  if ((Get-DevLinkAclFailure $acl $sid $true $true $true 'system') -ne $systemExpected) { throw "state ancestor owner policy: $owner" }
+  if ((Get-DevLinkAclFailure $acl $sid $true $true $false $true $true) -ne $configExpected) { throw 'config owner policy' }
+  if ((Get-DevLinkAclFailure $acl $sid $true $false) -ne $privateExpected) { throw 'private owner policy' }
 }
+# Public Host files and project directories keep the stricter user owner policy;
+# only config enables the explicit Administrators exception. Source/state paths
+# retain their separate system-owned mode from the MCP configuration provider.
+$acl = New-TestAcl $admin
+if ((Get-DevLinkAclFailure $acl $sid $true $true $false $true $false) -ne 2) { throw 'host owner policy' }
+if ((Get-DevLinkAclFailure $acl $sid $false $true $false $true $false) -ne 2) { throw 'project owner policy' }
+$acl = New-TestAcl $system
+if ((Get-DevLinkAclFailure $acl $sid $true $true $true $true $false) -ne 0) { throw 'source owner policy' }
+if ((Get-DevLinkAclFailure $acl $sid $false $true $true $true $false) -ne 0) { throw 'state owner policy' }
 $acl = New-TestAcl $admin
 $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.Principal.SecurityIdentifier]::new($everyone), 'Read', 'Allow'))
-if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'config') -ne 0) { throw 'public config read' }
+if ((Get-DevLinkAclFailure $acl $sid $true $true $false $true $true) -ne 0) { throw 'public config read' }
 $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.Principal.SecurityIdentifier]::new($everyone), 'Modify', 'Allow'))
-if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'config') -ne 3) { throw 'config writer policy' }
+if ((Get-DevLinkAclFailure $acl $sid $true $true $false $true $true) -ne 3) { throw 'config writer policy' }
 foreach ($othersMayRead in @($false, $true)) {
-  if ((Get-DevLinkAclFailure $acl $sid $false $false $othersMayRead 'config') -ne 3) { throw 'parent writer policy' }
+  if ((Get-DevLinkAclFailure $acl $sid $false $othersMayRead) -ne 3) { throw 'parent writer policy' }
 }
-$acl = New-TestAcl $sid
-$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-  [System.Security.Principal.SecurityIdentifier]::new($installer), 'Modify', 'Allow'))
-if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'config') -ne 3) { throw 'config TrustedInstaller writer policy' }
-if ((Get-DevLinkAclFailure $acl $sid $false $false $true 'config') -ne 3) { throw 'parent TrustedInstaller writer policy' }
-if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'system') -ne 0) { throw 'source TrustedInstaller writer policy' }
 "#;
         let script = format!("{WINDOWS_ACL_POLICY}\n{CASES}");
         let output = std::process::Command::new("powershell.exe")
@@ -928,6 +912,28 @@ if ((Get-DevLinkAclFailure $acl $sid $true $false $true 'system') -ne 0) { throw
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+
+        // Exercise the Rust mode mapping as well as the shared PowerShell policy.
+        // A source-only trusted writer must never become trusted for config.
+        let dir = tempfile::tempdir().unwrap();
+        set_private_permissions(dir.path()).unwrap();
+        let config = dir.path().join("config.json");
+        fs::write(&config, b"{}").unwrap();
+        set_private_permissions(&config).unwrap();
+        let grant = std::process::Command::new("icacls.exe")
+            .arg(&config)
+            .arg("/grant")
+            .arg("*S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464:(M)")
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            grant.status.success(),
+            "Cannot prepare the isolated ACL fixture"
+        );
+        assert!(verify_trusted_writer_permissions(&config).is_err());
+        assert!(verify_private_permissions(&config).is_err());
+        assert!(verify_public_file_permissions(&config, true).is_ok());
     }
 
     #[cfg(windows)]

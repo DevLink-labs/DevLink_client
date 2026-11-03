@@ -198,10 +198,10 @@ impl McpConfig {
             },
             restart_required: matches!(change, Change::Create | Change::Merge),
         };
-        if self.order.len() >= 32 {
-            if let Some(expired) = self.order.pop_front() {
-                self.plans.remove(&expired);
-            }
+        if self.order.len() >= 32
+            && let Some(expired) = self.order.pop_front()
+        {
+            self.plans.remove(&expired);
         }
         self.order.push_back(public.plan_id.clone());
         self.plans.insert(
