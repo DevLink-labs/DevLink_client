@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {createServer} from 'node:http';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BrokerClient} from '../dist/broker/client.js';
 import {SettingsFault} from '../dist/broker/settings.js';
@@ -26,7 +28,7 @@ async function fixture(t,options={}) {
  return {client,calls,set(value,code=200){reply=value;status=code;},pause(){paused=true;}};
 }
 test('missing/invalid credentials are safe partial diagnostics without setup or a claim',async()=>{
- for(const [options,state] of [[{},'missing'],[{settingsPath:'C:/devlink-nonexistent-'+crypto.randomUUID()+'/broker.json'},'missing'],
+ for(const [options,state] of [[{},'missing'],[{settingsPath:join(tmpdir(),'devlink-nonexistent-'+crypto.randomUUID(),'broker.json')},'missing'],
   [{settings:{brokerUrl:'https://invalid.example/secret-sentinel'}},'invalid']]) {
   const client=new BrokerClient(options);const result=await client.getConnectionStatus({mcpRequestId:0});
   assert.equal(result.mcpRequestId,0);assert.equal(result.data.credentials,state);assert.equal(result.data.broker,'unknown');

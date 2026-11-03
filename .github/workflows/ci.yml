@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust 브로커·CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      # 인자 없이 실행하면 rust-toolchain.toml의 stable + rustfmt·clippy를 설치한다.
+      - name: Rust toolchain 설치
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: 형식 검사
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # 기존 로컬 검증과 같이 테스트를 직렬로 실행한다. 실패한 바이너리가 있어도
+      # 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
+      # setup은 설정 경로의 상위 심볼릭 링크를 거부하므로, macOS 기본 TMPDIR(/var → /private/var)
+      # 대신 링크가 없는 runner 임시 디렉터리를 쓴다.
+      - name: 테스트
+        if: runner.os != 'Windows'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: cargo test --workspace --all-targets --locked --no-fail-fast -- --test-threads=1
+      # 관리자 runner의 새 파일 소유자를 현재 사용자로 보정해 일반 사용자 환경과 맞춘다.
+      - name: 테스트 (Windows, 소유자 보정)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1 cargo test --workspace --all-targets --locked --no-fail-fast '--' --test-threads=1
+
+  mcp-server:
+    name: MCP 서버 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: packages/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/mcp-server/package-lock.json
+      - name: 의존성 설치
+        run: npm ci
+      # 빌드, contracts/ 계약 대조, node --test 회귀를 함께 실행한다.
+      - name: 빌드·계약 대조·테스트
+        if: runner.os != 'Windows'
+        run: npm test
+      - name: 빌드·계약 대조·테스트 (Windows, 소유자 보정)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1 npm test

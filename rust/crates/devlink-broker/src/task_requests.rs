@@ -438,6 +438,9 @@ mod tests {
         );
         std::fs::remove_dir(TaskRequests::path(&path)).unwrap();
         std::fs::write(TaskRequests::path(&path), saved).unwrap();
+        // Unix umask can leave a recreated file group/other-readable; restore the
+        // private mode so the corruption check below is not a permission failure.
+        credentials::set_private_permissions(&TaskRequests::path(&path)).unwrap();
         credentials::verify_private_permissions(&TaskRequests::path(&path)).unwrap();
         std::fs::write(TaskRequests::path(&path), b"partial-json").unwrap();
         assert!(TaskRequests::open(&path).is_err());
