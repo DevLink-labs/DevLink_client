@@ -559,28 +559,27 @@ impl SessionManager {
                     .instances
                     .get(instance)
                     .and_then(|id| registry.sessions.get(id))
+                    && entry.expires_at > now
                 {
-                    if entry.expires_at > now {
-                        if entry.replaced {
-                            return Ok("conflict");
-                        }
-                        let p = &entry.view.principal;
-                        if p.user_id.as_str() != context.owner_user_id.to_string()
-                            || p.team_id.as_str() != context.team_id.to_string()
-                            || p.agent_id
-                                .as_ref()
-                                .is_some_and(|id| id.as_str() != context.agent_id.to_string())
-                        {
-                            return Err(IdentityError::Forbidden);
-                        }
-                        return Ok(if p.agent_id.is_some() {
-                            "bound"
-                        } else if owned {
-                            "conflict"
-                        } else {
-                            "unbound"
-                        });
+                    if entry.replaced {
+                        return Ok("conflict");
                     }
+                    let p = &entry.view.principal;
+                    if p.user_id.as_str() != context.owner_user_id.to_string()
+                        || p.team_id.as_str() != context.team_id.to_string()
+                        || p.agent_id
+                            .as_ref()
+                            .is_some_and(|id| id.as_str() != context.agent_id.to_string())
+                    {
+                        return Err(IdentityError::Forbidden);
+                    }
+                    return Ok(if p.agent_id.is_some() {
+                        "bound"
+                    } else if owned {
+                        "conflict"
+                    } else {
+                        "unbound"
+                    });
                 }
                 Ok(if owned { "conflict" } else { "unbound" })
             })
