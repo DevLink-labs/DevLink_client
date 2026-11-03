@@ -23,12 +23,14 @@ struct Api {
     sessions: SessionManager,
     central: TaskClient,
     cancel: CancellationToken,
+    context: crate::context_api::ContextReader,
 }
 pub fn router(
     token: Arc<String>,
     sessions: SessionManager,
     central: TaskClient,
     cancel: CancellationToken,
+    context: crate::context_api::ContextReader,
 ) -> Router {
     Router::new()
         .route("/v1/agents/register", post(register))
@@ -38,6 +40,7 @@ pub fn router(
             sessions,
             central,
             cancel,
+            context,
         })
 }
 #[derive(Deserialize)]
@@ -69,6 +72,7 @@ async fn register(State(api): State<Api>, request: Request) -> Response {
 }
 async fn confirm(api: &Api, body: &BusinessRequest<ConfirmArguments>) -> Result<Value, TaskError> {
     body.validate("register_agent")?;
+    guard_profile(api).await?;
     let args = &body.arguments;
     if args
         .tool_type
@@ -89,6 +93,10 @@ async fn confirm(api: &Api, body: &BusinessRequest<ConfirmArguments>) -> Result<
         .verify_registration_agent(&body.context.session_id, &actor, &agent)
         .await
         .map_err(session_error)?;
+    api.context
+        .verify_registered_agent(&actor, &agent)
+        .map_err(context_error)?;
+    guard_profile(api).await?;
     if args
         .name
         .as_ref()
@@ -106,6 +114,23 @@ async fn confirm(api: &Api, body: &BusinessRequest<ConfirmArguments>) -> Result<
         return Err(TaskError::rejected("VALIDATION_FAILED", 400));
     }
     Ok(data)
+}
+async fn guard_profile(api: &Api) -> Result<(), TaskError> {
+    api.context.validate_binding().await.map_err(context_error)
+}
+fn context_error(error: crate::context_api::ContextFailure) -> TaskError {
+    match error {
+        crate::context_api::ContextFailure::Identity(error) => {
+            session_error(crate::sessions::SessionError::Identity(error))
+        }
+        crate::context_api::ContextFailure::LocalUnavailable => TaskError {
+            code: "BROKER_CONTEXT_UNAVAILABLE",
+            status: 503,
+            scope: "domain",
+            outcome: "unknown",
+            task_id: None,
+        },
+    }
 }
 async fn list(State(api): State<Api>, request: Request) -> Response {
     let deadline = Instant::now() + LOCAL_BUDGET;

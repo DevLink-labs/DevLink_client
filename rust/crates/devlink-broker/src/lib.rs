@@ -7,9 +7,12 @@ pub mod central;
 #[cfg(test)]
 mod central_auth_tests;
 pub mod config;
+pub mod connection_api;
+pub mod context_api;
 pub mod credentials;
 pub mod inbox;
 pub mod local;
+pub mod mcp_config;
 pub mod notifications;
 pub mod private_file;
 pub mod protocol;

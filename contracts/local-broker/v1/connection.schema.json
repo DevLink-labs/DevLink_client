@@ -1,0 +1,245 @@
+{
+  "$id": "urn:devlink:local-broker:v1:connection",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "observedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "broker": {
+      "type": "string",
+      "enum": [
+        "running",
+        "stopped",
+        "unhealthy",
+        "unknown"
+      ]
+    },
+    "central": {
+      "type": "string",
+      "enum": [
+        "Connecting",
+        "Authenticating",
+        "Connected",
+        "Reconnecting",
+        "AuthFailed",
+        "Replaced",
+        "ProtocolViolation",
+        "InboxFailed",
+        "Disconnected",
+        "unknown"
+      ]
+    },
+    "identity": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "unauthenticated",
+        "mismatch",
+        "unknown"
+      ]
+    },
+    "credentials": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "missing",
+        "invalid",
+        "unknown"
+      ]
+    },
+    "mcpConfig": {
+      "type": "string",
+      "enum": [
+        "applied",
+        "missing",
+        "conflict",
+        "unknown"
+      ]
+    },
+    "hostSession": {
+      "type": "string",
+      "enum": [
+        "bound",
+        "unbound",
+        "conflict",
+        "not_checked",
+        "unknown"
+      ]
+    },
+    "setupReady": {
+      "type": "boolean"
+    },
+    "collaborationReady": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "nextActions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "prepare_cli_profile",
+          "repair_private_file",
+          "inspect_local_broker",
+          "check_network_then_retry",
+          "stop_then_reauthenticate_agent",
+          "inspect_profile_then_rebind",
+          "inspect_connection_owner",
+          "check_provider_contract",
+          "repair_inbox_then_restart",
+          "register_agent",
+          "review_mcp_config",
+          "open_or_restart_host",
+          "inspect_owned_agents_then_use",
+          "retry_diagnosis"
+        ]
+      }
+    },
+    "issue": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "BROKER_CONTEXT_UNAVAILABLE",
+            "BROKER_UNAVAILABLE",
+            "BROKER_CONNECTION_CLOSED",
+            "BROKER_TIMEOUT",
+            "BROKER_PROTOCOL_ERROR",
+            "BROKER_UNAUTHORIZED",
+            "LOCAL_AUTH_FORBIDDEN",
+            "BROKER_FORBIDDEN",
+            "BROKER_REJECTED",
+            "BROKER_SERVER_ERROR",
+            "SESSION_REPLACED",
+            "SESSION_CONFLICT",
+            "SESSION_EXPIRED",
+            "AGENT_UNREGISTERED",
+            "CREDENTIAL_FILE_INVALID",
+            "CLIENT_CLOSED",
+            "REQUEST_ABORTED",
+            "BROKER_CONTEXT_INVALID",
+            "SESSION_CONTEXT_CHANGED",
+            "CALLER_CONTEXT_OVERRIDE",
+            "CENTRAL_UNAUTHENTICATED",
+            "VALIDATION_FAILED",
+            "RECEIVER_NOT_FOUND",
+            "RECEIVER_OFFLINE",
+            "TASK_NOT_FOUND",
+            "TASK_STATE_CONFLICT",
+            "TASK_VERSION_CONFLICT",
+            "TASK_SAVE_FAILED",
+            "RESOURCE_NOT_FOUND",
+            "REQUEST_KEY_CONFLICT",
+            "BROKER_STORAGE_FAILED",
+            "CENTRAL_UNAVAILABLE",
+            "CENTRAL_TIMEOUT",
+            "CENTRAL_PROTOCOL_ERROR",
+            "CENTRAL_RESULT_UNKNOWN",
+            "TOOL_EXECUTION_FAILED"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "credentials",
+            "local_auth",
+            "session",
+            "transport",
+            "domain",
+            "protocol"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "rejected"
+          ]
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "code",
+        "scope",
+        "outcome",
+        "requestId"
+      ],
+      "additionalProperties": false
+    },
+    "mcp": {
+      "type": "string",
+      "const": "running"
+    },
+    "clientIssue": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "SESSION_REPLACED",
+            "SESSION_CONFLICT",
+            "BROKER_UNAUTHORIZED",
+            "LOCAL_AUTH_FORBIDDEN",
+            "CREDENTIAL_FILE_INVALID",
+            "BROKER_CONTEXT_INVALID"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "credentials",
+            "local_auth",
+            "session",
+            "transport",
+            "domain",
+            "protocol"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "rejected"
+          ]
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "code",
+        "scope",
+        "outcome",
+        "requestId"
+      ],
+      "additionalProperties": false,
+      "description": "Persistent block in this MCP process. Provider stages and issue remain separate; reopen the Host after the advised repair."
+    }
+  },
+  "required": [
+    "observedAt",
+    "broker",
+    "central",
+    "identity",
+    "credentials",
+    "mcpConfig",
+    "hostSession",
+    "setupReady",
+    "collaborationReady",
+    "nextActions",
+    "mcp"
+  ],
+  "additionalProperties": false
+}

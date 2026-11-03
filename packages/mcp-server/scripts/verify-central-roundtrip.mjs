@@ -75,9 +75,30 @@ async function start(p) {
  p.stderr='';p.stderrOverflow=false;
  transport.stderr.on('data',chunk=>{if(p.stderr.length+chunk.length<=2_000_000)p.stderr+=chunk.toString();else p.stderrOverflow=true;});
  await client.connect(transport);p.client=client;
- const names=(await client.listTools()).tools.map(t=>t.name);assert.equal(names.length,8);
- const registered=await call(p,'register_agent',{name:p.name,toolType:p.tool});
+ const names=(await client.listTools()).tools.map(t=>t.name);assert.equal(names.length,10);
+ const diagnostic=await call(p,'get_connection_status',{});
+ assert.equal(diagnostic.data.broker,'running');assert.equal(diagnostic.data.central,'Connected');
+ assert.equal(diagnostic.data.identity,'verified');assert.equal(diagnostic.data.credentials,'valid');
+ assert.equal(diagnostic.data.hostSession,'unbound');assert.equal(diagnostic.data.mcpConfig,'unknown');assert.equal(diagnostic.data.setupReady,false);
+ const context=await call(p,'get_my_context',{});
+ assert.equal(context.data.identity,'verified');assert.equal(context.data.principal.userId,String(p.user.userId));
+ assert.equal(context.data.principal.teamId,String(p.agent.teamId));assert.equal(context.data.principal.agentId,String(p.agent.agentId));
+ assert.equal(context.data.principal.toolType,p.tool);assert.equal(context.data.hostSession,'unbound');
+ assert.equal(context.data.project.source,'bound_profile');
+ assert.equal(context.data.project.path,(await saved(p,'agent-profile.json')).projectRoot);
+ const tokenBefore=(await saved(p,'agent-profile.json')).state.token;
+ const registered=await call(p,'register_agent',{});
  assert.equal(registered.data.agentId,String(p.agent.agentId));
+ const repeats=await Promise.all([call(p,'register_agent',{}),call(p,'register_agent',{})]);
+ assert(repeats.every(r=>r.data.agentId===String(p.agent.agentId)));
+ assert.equal((await call(p,'register_agent',{name:p.name,toolType:p.tool})).data.agentId,String(p.agent.agentId));
+ for(const args of [{name:'wrong-name'},{toolType:p.tool==='codex'?'claude_code':'codex'},{role:'wrong-role'}]) {
+  const denied=await p.client.callTool({name:'register_agent',arguments:args});assert.equal(denied.isError,true);
+  assert.equal(denied.structuredContent.error.code,'VALIDATION_FAILED');assert.equal(denied.structuredContent.error.scope,'domain');
+ }
+ assert.equal((await saved(p,'agent-profile.json')).state.token,tokenBefore,'Registration cannot rotate the CLI credential');
+ assert.equal((await call(p,'get_my_context',{})).data.hostSession,'bound');
+ assert.equal((await call(p,'get_connection_status',{})).data.hostSession,'bound');
  await until(()=>central(p,'/api/v1/agents/me'),a=>a.status==='ONLINE','ONLINE presence '+p.label);
 }
 async function call(p,name,args,expectedCode) {

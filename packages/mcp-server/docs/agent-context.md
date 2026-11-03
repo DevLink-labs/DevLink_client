@@ -36,7 +36,7 @@ MCP는 `DEVLINK_BROKER_FILE`의 절대 경로에 있는 프로필 전용 자격 
 
 각 요청은 당시의 불변 세션 snapshot을 사용한다. 오래된 heartbeat나 업무 오류는 새 bind 결과를 무효화할 수 없다. bind 중 lease가 없어지거나 종료되면 늦게 도착한 응답을 게시하지 않는다. 복구 응답이 기존 user/team/Agent와 다르면 `BROKER_CONTEXT_INVALID`로 중단한다.
 
-기존 정책인 fresh 교체와 재시작 후 먼저 복구한 인스턴스의 소유권을 유지한다. recover는 다른 활성 소유자를 빼앗지 않는다. 업무 요청은 재시도하지 않고 세션 복구만 제한적으로 재시도한다.
+-142부터 모든 자동 MCP claim은 첫 시도부터 recover다. 재시작 후 먼저 복구한 인스턴스가 소유하며 다른 활성 소유자를 빼앗지 않는다. fresh 교체는 Rust의 명시적 API에만 남긴다. 업무 요청은 재시도하지 않고 세션 복구만 제한적으로 재시도한다.
 
 Rust는 `/v1/sessions`의 `agentId`를 신원 증거로 취급하면 안 된다. 중앙에서 해당 Agent의 user/team 소유를 확인한 뒤 bound principal을 발행해야 한다. configured/검증된 Agent ID가 있는 recover는 같은 Agent에 bound인 응답 또는 명시적 오류를 반환해야 한다. pending ID만 있는 recover는 아직 unbound일 수 있다. 이 재검증은 테스트 대역의 편의 동작으로 대체되지 않는다.
 

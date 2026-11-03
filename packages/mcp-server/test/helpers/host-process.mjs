@@ -5,8 +5,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 const execute = promisify(execFile);
 
 /** Bounded capture, including when descendants keep inherited stdio open. */
-export async function captureHost(command, args, { cwd, timeoutMs, maxBytes = 8 * 1024 * 1024, signal }) {
-  const child = spawn(command, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+export async function captureHost(command, args, { cwd, timeoutMs, maxBytes = 8 * 1024 * 1024, signal, env }) {
+  const child = spawn(command, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   let stdout = ''; let stderr = ''; let bytes = 0; let stop;
   const stopped = new Promise((resolve) => { stop = resolve; });
