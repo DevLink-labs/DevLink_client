@@ -121,6 +121,15 @@ pub async fn run(path: &Path) -> Result<()> {
         path.to_path_buf(),
     )?;
 
+    // 로컬 업데이트 조회 API (/v1/updates): 저장된 수신 작업·요청자 알림만 읽음
+    let updates = crate::updates::router(
+        mcp_token.clone(),
+        sessions.clone(),
+        path.to_path_buf(),
+        &config.server_url,
+        cancel.clone(),
+    )?;
+
     // 중앙 서버와 통신하는 비동기 태스크 시작
     let central = tokio::spawn(central::run_with_state(
         config,
@@ -174,7 +183,8 @@ pub async fn run(path: &Path) -> Result<()> {
             sessions,
             task_client,
             cancel.clone(),
-        ));
+        ))
+        .merge(updates);
 
     // Graceful Shutdown 처리 (취소 토큰 수신 또는 OS 종료 시그널 감지 시)
     let shutdown_token = cancel.clone();

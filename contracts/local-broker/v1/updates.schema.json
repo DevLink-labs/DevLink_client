@@ -1,0 +1,153 @@
+{
+  "$id": "urn:devlink:local-broker:v1:updates",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "updates": {
+      "maxItems": 50,
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "eventId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "kind": {
+                "type": "string",
+                "const": "TASK_CREATED"
+              },
+              "direction": {
+                "type": "string",
+                "const": "received"
+              },
+              "taskId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "requesterAgentId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              }
+            },
+            "required": [
+              "eventId",
+              "kind",
+              "direction",
+              "taskId",
+              "requesterAgentId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "eventId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "kind": {
+                "type": "string",
+                "const": "TASK_STATUS_CHANGED"
+              },
+              "direction": {
+                "type": "string",
+                "const": "sent"
+              },
+              "taskId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "taskVersion": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,18})$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "IN_PROGRESS",
+                  "FAILED",
+                  "REJECTED"
+                ]
+              }
+            },
+            "required": [
+              "eventId",
+              "kind",
+              "direction",
+              "taskId",
+              "taskVersion",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "eventId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "kind": {
+                "type": "string",
+                "const": "TASK_COMPLETED"
+              },
+              "direction": {
+                "type": "string",
+                "const": "sent"
+              },
+              "taskId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "taskVersion": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,18})$"
+              },
+              "status": {
+                "type": "string",
+                "const": "COMPLETED"
+              }
+            },
+            "required": [
+              "eventId",
+              "kind",
+              "direction",
+              "taskId",
+              "taskVersion",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "nextCursor": {
+      "type": "string",
+      "pattern": "^v1\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})\\.[0-9a-f]{32}$"
+    },
+    "hasMore": {
+      "type": "boolean"
+    },
+    "cursorReset": {
+      "type": "boolean"
+    },
+    "coverage": {
+      "type": "string",
+      "const": "local"
+    }
+  },
+  "required": [
+    "updates",
+    "nextCursor",
+    "hasMore",
+    "cursorReset",
+    "coverage"
+  ],
+  "additionalProperties": false
+}

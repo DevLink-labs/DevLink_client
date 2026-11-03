@@ -137,6 +137,7 @@
             "RESOURCE_NOT_FOUND",
             "REQUEST_KEY_CONFLICT",
             "BROKER_STORAGE_FAILED",
+            "LOCAL_UPDATES_UNAVAILABLE",
             "CENTRAL_UNAVAILABLE",
             "CENTRAL_TIMEOUT",
             "CENTRAL_PROTOCOL_ERROR",

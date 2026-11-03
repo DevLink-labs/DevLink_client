@@ -9,7 +9,7 @@ export type FaultCode =
   | 'BROKER_CONTEXT_UNAVAILABLE'
   | 'CENTRAL_UNAUTHENTICATED' | 'VALIDATION_FAILED' | 'RECEIVER_NOT_FOUND' | 'RECEIVER_OFFLINE'
   | 'TASK_NOT_FOUND' | 'TASK_STATE_CONFLICT' | 'TASK_VERSION_CONFLICT' | 'TASK_SAVE_FAILED'
-  | 'RESOURCE_NOT_FOUND' | 'REQUEST_KEY_CONFLICT' | 'BROKER_STORAGE_FAILED'
+  | 'RESOURCE_NOT_FOUND' | 'REQUEST_KEY_CONFLICT' | 'BROKER_STORAGE_FAILED' | 'LOCAL_UPDATES_UNAVAILABLE'
   | 'CENTRAL_UNAVAILABLE' | 'CENTRAL_TIMEOUT' | 'CENTRAL_PROTOCOL_ERROR' | 'CENTRAL_RESULT_UNKNOWN' | 'TOOL_EXECUTION_FAILED';
 export type FaultCategory = 'input' | 'authentication' | 'session' | 'transport' | 'protocol' | 'domain' | 'internal';
 export type Outcome = 'unknown' | 'rejected';
@@ -48,6 +48,7 @@ const definitions: Record<FaultCode, readonly [FaultCategory, Outcome, string]> 
   RESOURCE_NOT_FOUND: ['domain', 'rejected', 'The requested resource does not exist or is not visible.'],
   REQUEST_KEY_CONFLICT: ['domain', 'rejected', 'The request key conflicts with another request. Preserve the known key and check the reported outcome.'],
   BROKER_STORAGE_FAILED: ['domain', 'rejected', 'The broker could not save the request before sending it. Check local storage before deciding on another request.'],
+  LOCAL_UPDATES_UNAVAILABLE: ['domain', 'rejected', 'Locally stored updates could not be read. Use get_tasks or get_task_result for central state and inspect the broker storage.'],
   CENTRAL_UNAVAILABLE: ['transport', 'unknown', 'The central server is unavailable; the business outcome is unknown.'],
   CENTRAL_TIMEOUT: ['transport', 'unknown', 'The central server response timed out; the business outcome is unknown.'],
   CENTRAL_PROTOCOL_ERROR: ['protocol', 'unknown', 'The central server response does not match the contract; the business outcome is unknown.'],
