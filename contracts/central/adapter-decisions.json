@@ -1,0 +1,108 @@
+{
+  "kind": "decision-record",
+  "runtimeConfiguration": false,
+  "story": "S15P31D108-88",
+  "asOf": "2026-10-29",
+  "timezone": "Asia/Seoul",
+  "source": {
+    "clientDevelop": "b8bd142f148b87693e4639bac507b7f5f6b914f4",
+    "serverDevelop": "5891ef2a6adb4a3d3a7c7e89a5c064386a9c1bb9"
+  },
+  "operationsBasis": {
+    "productionPathAndState": "server-source@5891ef2",
+    "clientStoriesAndProviderStories": "registered-backlog@2026-10-29",
+    "registerCreationProhibition": "client-decision-88"
+  },
+  "operations": [
+    { "operation": "register_agent", "productionPath": null, "state": "provider-missing", "mayCreateAgent": false, "creationViaClientStory": 91, "clientStories": [93, 97], "providerStories": [49, 85, 86], "indirectCreationProviderStory": 84 },
+    { "operation": "list_agents", "productionPath": null, "state": "provider-missing", "clientStories": [93], "providerStories": [85] },
+    { "operation": "create_task", "productionPath": "/api/v1/tasks/{teamId}", "method": "POST", "state": "blocked-auth-domain-gates", "clientStories": [93], "providerStories": [67, 68, 71, 80, 86] },
+    { "operation": "update_task_status", "productionPath": null, "state": "provider-missing", "clientStories": [94], "providerStories": [69] },
+    { "operation": "complete_task", "productionPath": null, "state": "provider-missing", "clientStories": [94, 97], "providerStories": [75, 77] },
+    { "operation": "get_tasks", "productionPath": null, "state": "provider-missing", "clientStories": [94, 97], "providerStories": [76] },
+    { "operation": "get_task_result", "productionPath": null, "state": "provider-missing", "clientStories": [94, 97], "providerStories": [76] }
+  ],
+  "observedServer": {
+    "basis": "server-source@5891ef2",
+    "userSessionIssuingController": "missing",
+    "agentWebSocket": { "path": "/ws/broker", "productionTokenVerifier": "missing", "readyFields": ["connection_id", "agent_id"] },
+    "businessRestSupportsAgentBearer": false,
+    "createTaskRequiresUserSession": true,
+    "centralWireIdType": "positive-long-json-number",
+    "requestKeyScope": ["requesterUserId", "requestKey"],
+    "requestKeyUniqueConstraintScope": ["requester_user_id", "request_key"],
+    "offlineBeforeSave": "missing",
+    "requesterOwnershipValidation": "missing",
+    "concurrentIdenticalKeyReplay": "missing",
+    "lookupByRequestKeyReadEndpoint": "missing",
+    "deliveryMayBeNull": true,
+    "deliveryStatuses": ["ACK_PENDING", "ACK_RECEIVED", "DELIVERY_NOT_SENT", "DELIVERY_UNKNOWN"],
+    "ackUpdatesDeliveredAt": true,
+    "httpWaitsForAck": false,
+    "postCommitHistoryFailurePreservesTaskId": true,
+    "centralAckDefaultMs": 5000
+  },
+  "observedClient": {
+    "basis": "client-source@b8bd142",
+    "agentTokenInput": "DEVLINK_TOKEN",
+    "agentsPerBrokerConnection": 1,
+    "mcpLocalToken": "published-health-only",
+    "cliControlToken": "implemented-health-and-shutdown",
+    "mcpMayShutdown": false,
+    "readyProvidesUserTeamIdentity": false,
+    "mcpBrokerFileHasAgentId": false,
+    "mcpHttpDefaultMs": 10000,
+    "mcpWholeCallDefaultMs": 30000,
+    "mcpHeartbeatDefaultMs": 30000,
+    "mcpShutdownReleaseDefaultMs": 1000
+  },
+  "localContract": {
+    "basis": "existing-local-contract@b8bd142-not-rust-implementation",
+    "rustLocalLeaseMs": 90000,
+    "recoveryOwnership": "first-valid-recover-claims-empty-slot",
+    "recoverMayReplaceOtherOwner": false
+  },
+  "requirements": {
+    "basis": "mvp-spec-and-user-decisions",
+    "activeBrokersPerUser": 1,
+    "businessAutoReplay": false,
+    "timeoutChangesTaskStatus": false,
+    "centralSecretsAllowedInMcp": false
+  },
+  "clientDecisions": {
+    "basis": "client-decision-88-not-implemented",
+    "creationProviderStory": 84,
+    "creationCaller": "cli-bootstrap",
+    "mcpRegisterMeaning": "confirm-same-profile-agent-then-bind-no-create",
+    "mcpMayCreateAgent": false,
+    "mcpStandaloneCreationSupported": false,
+    "identitySource": "current-centrally-verified-principal-not-bootstrap-file-alone",
+    "mcpIdEncoding": "canonical-positive-signed-64-bit-decimal-string",
+    "requestKeyGeneration": "once-per-logical-create",
+    "uncertain409Outcome": "unknown",
+    "localHttp401Meaning": "local-auth-only",
+    "centralDenialOnSessionControlMustAvoidLocal403": true,
+    "agentsPerUserLimit": "client-imposes-none"
+  },
+  "providerDecisions": {
+    "basis": "pending-provider-contract-not-implemented",
+    "cliUserRestCookieCsrfLifecycle": { "owners": [80, 86], "consumers": [89] },
+    "agentCreationIdempotencyOrReissue": { "owners": [84, 86], "consumers": [91], "lostCreationResponse": "blocked-until-idempotency-or-safe-reissue" },
+    "sessionPrincipalAuthorityAndFreshness": { "owners": [49, 51, 85, 86], "consumers": [92], "state": "blocked" },
+    "rustBusinessRestCredential": { "owners": [80, 84, 85, 86, 67, 69, 75, 76], "consumers": [92, 93, 94], "credential": null },
+    "activeBrokerUserEnforcementAndCardinality": { "owners": [49, 51, 84, 86], "consumers": [91, 92], "state": "decision-required" },
+    "promptMapping": { "basis": "client-proposal-pending-provider", "proposal": "title + two newlines + description + optional context section", "lengthPolicyOwners": [67, 86] },
+    "requestKeyPersistenceAndExposure": { "consumers": [93, 97], "state": "client-implementation-pending" },
+    "lookupByRequestKey": { "owners": [68, 76, 86], "consumers": [93, 97], "state": "provider-contract-missing" },
+    "latestDeliveryReadSource": { "owners": [71, 76], "consumers": [94, 97], "state": "provider-missing" },
+    "rustBusinessRestDeadlineMs": null
+  },
+  "verification": {
+    "basis": "production-source-comparison-not-runtime-evidence",
+    "actualCentralDatabaseRoundTrip": "not-run",
+    "actualMcpRustBusinessRoundTrip": "not-implemented",
+    "laterStoriesDone": false,
+    "finalAcceptanceStory": 66,
+    "crossFeatureRustTestStory": 52
+  }
+}

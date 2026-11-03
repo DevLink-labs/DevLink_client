@@ -1,0 +1,19 @@
+[
+  {"name":"unbound authenticated user/team","type":"session","valid":true,"value":{"sessionId":"session-1","principal":{"userId":"user-1","teamId":"team-1"}}},
+  {"name":"bound registered metadata","type":"session","valid":true,"value":{"sessionId":"session-1","principal":{"userId":"user-1","teamId":"team-1","agentId":"agent-1","toolType":"codex"}}},
+  {"name":"legacy bound principal without tool metadata","type":"principal","valid":true,"value":{"userId":"user-1","teamId":"team-1","agentId":"agent-1"}},
+  {"name":"missing authenticated team","type":"principal","valid":false,"value":{"userId":"user-1","agentId":"agent-1"}},
+  {"name":"unknown principal token field","type":"principal","valid":false,"value":{"userId":"user-1","teamId":"team-1","token":"not-an-identity-field"}},
+  {"name":"unsupported tool metadata","type":"principal","valid":false,"value":{"userId":"user-1","teamId":"team-1","toolType":"unverified-tool"}},
+  {"name":"identity must not be silently normalized","type":"principal","valid":false,"value":{"userId":" user-1 ","teamId":"team-1"}},
+  {"name":"opaque unicode identifier","type":"principal","valid":true,"value":{"userId":"사용자-1","teamId":"team-1"}},
+  {"name":"128 Unicode code points","type":"principal","valid":true,"value":{"userId":"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀","teamId":"team-1"}},
+  {"name":"129 Unicode code points","type":"principal","valid":false,"value":{"userId":"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀","teamId":"team-1"}},
+  {"name":"BOM is not an identifier","type":"principal","valid":false,"value":{"userId":"\ufeffuser-1","teamId":"team-1"}},
+  {"name":"profile scoped MCP credential","type":"credentials","valid":true,"value":{"schemaVersion":1,"brokerUrl":"http://127.0.0.1:43127","localToken":"example-profile-token-1234","agentId":"agent-1"}},
+  {"name":"management runtime is not an MCP credential","type":"credentials","valid":false,"value":{"apiVersion":1,"pid":123,"port":43127,"instanceId":"broker-1","controlToken":"example-control-token"}},
+  {"name":"unsupported credential version","type":"credentials","valid":false,"value":{"schemaVersion":2,"brokerUrl":"http://127.0.0.1:43127","localToken":"example-profile-token-1234"}},
+  {"name":"nonliteral loopback rejected","type":"credentials","valid":false,"value":{"schemaVersion":1,"brokerUrl":"http://127.1:43127","localToken":"example-profile-token-1234"}},
+  {"name":"maximum port","type":"credentials","valid":true,"value":{"schemaVersion":1,"brokerUrl":"http://127.0.0.1:65535","localToken":"example-profile-token-1234"}},
+  {"name":"out of range port","type":"credentials","valid":false,"value":{"schemaVersion":1,"brokerUrl":"http://127.0.0.1:65536","localToken":"example-profile-token-1234"}}
+]

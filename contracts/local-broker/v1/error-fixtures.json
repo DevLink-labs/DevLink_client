@@ -1,0 +1,16 @@
+[
+  {"name":"local profile denied","status":403,"error":{"scope":"local_auth","code":"FORBIDDEN"},"expected":{"code":"LOCAL_AUTH_FORBIDDEN","category":"authentication","outcome":"rejected","terminal":true}},
+  {"name":"task permission denied","status":403,"error":{"scope":"domain","code":"FORBIDDEN","requestKey":"denied-key"},"expected":{"code":"BROKER_FORBIDDEN","category":"domain","outcome":"rejected","terminal":false,"requestKey":"denied-key"}},
+  {"name":"central authentication required","status":200,"error":{"scope":"domain","code":"CENTRAL_UNAUTHENTICATED"},"expected":{"code":"CENTRAL_UNAUTHENTICATED","category":"authentication","outcome":"rejected","terminal":false}},
+  {"name":"invalid business input","status":400,"error":{"scope":"domain","code":"VALIDATION_FAILED"},"expected":{"code":"VALIDATION_FAILED","category":"domain","outcome":"rejected","terminal":false}},
+  {"name":"recipient missing before storage","status":404,"error":{"scope":"domain","code":"RECEIVER_NOT_FOUND","taskId":"must-not-imply-storage"},"expected":{"code":"RECEIVER_NOT_FOUND","category":"domain","outcome":"rejected","terminal":false}},
+  {"name":"recipient offline before storage","status":409,"error":{"scope":"domain","code":"RECEIVER_OFFLINE","requestKey":"offline-key","taskId":"must-not-imply-storage"},"expected":{"code":"RECEIVER_OFFLINE","category":"domain","outcome":"rejected","terminal":false,"requestKey":"offline-key"}},
+  {"name":"definite save rejection","status":500,"error":{"scope":"domain","code":"TASK_SAVE_FAILED","outcome":"rejected","requestKey":"save-key"},"expected":{"code":"TASK_SAVE_FAILED","category":"domain","outcome":"rejected","terminal":false,"requestKey":"save-key"}},
+  {"name":"save status not confirmed","status":500,"error":{"scope":"domain","code":"TASK_SAVE_FAILED"},"expected":{"code":"TASK_SAVE_FAILED","category":"domain","outcome":"unknown","terminal":false}},
+  {"name":"existing task state conflict","status":409,"error":{"scope":"domain","code":"TASK_STATE_CONFLICT","taskId":"known-task","requestKey":"existing-key"},"expected":{"code":"TASK_STATE_CONFLICT","category":"domain","outcome":"rejected","terminal":false,"taskId":"known-task","requestKey":"existing-key"}},
+  {"name":"central connection lost","status":503,"error":{"scope":"transport","code":"CENTRAL_UNAVAILABLE"},"expected":{"code":"CENTRAL_UNAVAILABLE","category":"transport","outcome":"unknown","terminal":false}},
+  {"name":"central timeout","status":504,"error":{"scope":"transport","code":"CENTRAL_TIMEOUT","outcome":"rejected","taskId":"known-task"},"expected":{"code":"CENTRAL_TIMEOUT","category":"transport","outcome":"unknown","terminal":false,"taskId":"known-task"}},
+  {"name":"unknown server failure is uncertain","status":500,"error":{"scope":"domain","code":"PRIVATE_DATABASE_DETAIL","outcome":"rejected","message":"secret-password"},"expected":{"code":"BROKER_SERVER_ERROR","category":"domain","outcome":"unknown","terminal":false}},
+  {"name":"legacy session replacement","status":409,"error":{"code":"SESSION_REPLACED"},"expected":{"code":"SESSION_REPLACED","category":"session","outcome":"rejected","terminal":true}},
+  {"name":"unknown legacy denial","status":403,"error":{"code":"LEGACY_DENIED"},"expected":{"code":"BROKER_FORBIDDEN","category":"domain","outcome":"rejected","terminal":false}}
+]

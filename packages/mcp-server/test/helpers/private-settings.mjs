@@ -1,12 +1,11 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-export async function privateSettings(settings) {
+export async function privateDirectory() {
   const dir = await mkdtemp(join(tmpdir(), 'devlink-test-'));
-  const path = join(dir, 'broker.json');
   if (process.platform === 'win32') {
     await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
 $ErrorActionPreference = 'Stop'
@@ -19,8 +18,15 @@ $acl.AddAccessRule($rule)
 [System.IO.Directory]::SetAccessControl($env:DEVLINK_TEST_DIR, $acl)
 `], { env: { ...process.env, DEVLINK_TEST_DIR: dir }, windowsHide: true });
   } else await chmod(dir, 0o700);
+  return { dir, cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) };
+}
+
+export async function privateSettings(settings, profile) {
+  const { dir, cleanup } = await privateDirectory();
+  const path = profile ? join(dir, '.devlink-mcp', profile, 'broker.json') : join(dir, 'broker.json');
+  if (profile) await mkdir(join(dir, '.devlink-mcp', profile), { recursive: true, mode: 0o700 });
   await writeFile(path, JSON.stringify(settings), { mode: 0o600 });
-  return { path, cleanup: () => rm(dir, { recursive: true, force: true }) };
+  return { path, cleanup };
 }
 
 export async function allowOtherUserRead(path) {

@@ -1,4 +1,5 @@
-import { z } from 'zod';
+export { principalSchema, sessionSchema, type BrokerSession } from './schemas.js';
+export { BrokerFault, terminalSessionFaults, type FaultCode, type Correlation } from './faults.js';
 
 /** MCP-side v0.1 contract; verify these routes against the Rust broker before integration. */
 export const operationRoutes = {
@@ -12,55 +13,4 @@ export const operationRoutes = {
 } as const;
 export type BrokerOperation = keyof typeof operationRoutes;
 
-export const principalSchema = z.strictObject({
-  userId: z.string().min(1),
-  teamId: z.string().min(1),
-  agentId: z.string().min(1).optional(),
-});
-export const sessionSchema = z.strictObject({
-  sessionId: z.string().min(1),
-  principal: principalSchema,
-});
-export type BrokerSession = z.infer<typeof sessionSchema>;
-export type BrokerResult = { requestId: string; data: Record<string, unknown> };
-
-export type FaultCode =
-  | 'BROKER_UNAVAILABLE' | 'BROKER_TIMEOUT' | 'BROKER_PROTOCOL_ERROR'
-  | 'BROKER_UNAUTHORIZED' | 'BROKER_FORBIDDEN' | 'BROKER_REJECTED'
-  | 'SESSION_REPLACED' | 'SESSION_CONFLICT' | 'SESSION_EXPIRED'
-  | 'AGENT_UNREGISTERED' | 'CREDENTIAL_FILE_INVALID' | 'CLIENT_CLOSED'
-  | 'REQUEST_ABORTED';
-
-const messages: Record<FaultCode, string> = {
-  BROKER_UNAVAILABLE: 'Local broker is unavailable.',
-  BROKER_TIMEOUT: 'Local broker response timed out; the business outcome is unknown.',
-  BROKER_PROTOCOL_ERROR: 'Local broker response does not match the contract.',
-  BROKER_UNAUTHORIZED: 'Local credentials were rejected. Restart MCP after checking the CLI settings.',
-  BROKER_FORBIDDEN: 'The broker denied this operation.',
-  BROKER_REJECTED: 'The broker rejected the operation.',
-  SESSION_REPLACED: 'This session was replaced. Automatic recovery has stopped.',
-  SESSION_CONFLICT: 'Another instance owns this agent. Recovery cannot replace it.',
-  SESSION_EXPIRED: 'The local session expired.',
-  AGENT_UNREGISTERED: 'Register the agent before calling business tools.',
-  CREDENTIAL_FILE_INVALID: 'The broker settings file is missing, invalid, or not private.',
-  CLIENT_CLOSED: 'The MCP broker client has closed.',
-  REQUEST_ABORTED: 'The local request was aborted; this does not cancel a central task.',
-};
-
-export class BrokerFault extends Error {
-  readonly outcome: 'unknown' | 'rejected';
-  constructor(
-    readonly code: FaultCode,
-    readonly requestId: string,
-    readonly taskId?: string,
-  ) {
-    super(messages[code]);
-    this.name = 'BrokerFault';
-    this.outcome = ['BROKER_TIMEOUT', 'BROKER_UNAVAILABLE', 'BROKER_PROTOCOL_ERROR', 'REQUEST_ABORTED', 'CLIENT_CLOSED'].includes(code)
-      ? 'unknown' : 'rejected';
-  }
-}
-
-export const terminalSessionFaults = new Set<FaultCode>([
-  'SESSION_REPLACED', 'SESSION_CONFLICT', 'BROKER_UNAUTHORIZED', 'BROKER_FORBIDDEN', 'CREDENTIAL_FILE_INVALID',
-]);
+export type BrokerResult = { requestId: string; mcpRequestId?: string | number; requestKey?: string; data: Record<string, unknown> };

@@ -1,0 +1,98 @@
+{
+  "$id": "urn:devlink:local-broker:v1:envelope",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+          "maxLength": 128
+        },
+        "requestKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+          "maxLength": 128
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+          "maxLength": 128
+        },
+        "requestKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+          "maxLength": 128
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "local_auth",
+                "session",
+                "domain",
+                "transport"
+              ]
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "unknown",
+                "rejected"
+              ]
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+              "maxLength": 128
+            },
+            "requestKey": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "code"
+          ]
+        }
+      },
+      "required": [
+        "requestId",
+        "error"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

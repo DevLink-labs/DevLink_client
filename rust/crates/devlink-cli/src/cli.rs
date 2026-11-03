@@ -5,6 +5,7 @@ use devlink_broker::{
     config::{self, Config, state_directory},
     local::{self, Runtime},
 };
+use devlink_cli::setup::terminal::{self as setup_terminal, SetupArgs};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -20,8 +21,40 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 }
+
+pub fn parse() -> Cli {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let setup_requested = {
+        let mut arguments = arguments.iter().skip(1);
+        loop {
+            match arguments.next() {
+                Some(arg) if arg == "--config" => {
+                    // A profile named "setup" is a value, not a subcommand.
+                    arguments.next();
+                }
+                Some(arg) if arg.to_str().is_some_and(|s| s.starts_with("--config=")) => {}
+                Some(arg) => break arg == "setup",
+                None => break false,
+            }
+        }
+    };
+    match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // Invalid-value errors omit command usage, so identify the requested
+            // command before parsing. Never echo setup values; preserve legacy errors.
+            if setup_requested && error.use_stderr() {
+                eprintln!("Invalid setup arguments. Run devlink setup --help for usage.");
+                std::process::exit(2);
+            }
+            error.exit()
+        }
+    }
+}
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Run guided setup (execution foundation; stage integrations follow)
+    Setup(SetupArgs),
     /// Create a configuration file without overwriting existing settings
     Init,
     /// Start an independent background broker
@@ -34,6 +67,39 @@ pub enum Commands {
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
+    },
+    /// MCP integration and credential management
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+    },
+    /// Sign in to the central user API (separate from Agent/MCP credentials)
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    /// Create/join teams and choose a verified team for Agent setup
+    Team {
+        #[command(subcommand)]
+        command: TeamCommand,
+    },
+    /// Bind an owned Agent and keep its central token separate from MCP settings
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Read or clear locally retained requests; never accepts or executes tasks
+    Inbox {
+        #[command(subcommand)]
+        command: Option<InboxCommand>,
+    },
+    /// Show retained requester-side status/result notifications (central details remain authoritative)
+    Notifications {
+        #[arg(long, default_value_t = 20, value_parser=clap::value_parser!(u16).range(1..=1024))]
+        limit: u16,
+        /// Clear only local advisory retention while the broker is stopped
+        #[arg(long)]
+        clear: bool,
     },
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
@@ -53,10 +119,279 @@ pub enum ConfigCommand {
     },
 }
 
+#[derive(Subcommand)]
+pub enum McpCommand {
+    /// Print the absolute path of DEVLINK_BROKER_FILE for MCP Host configuration
+    Path,
+    /// Rotate the MCP local token (only allowed when broker is stopped)
+    Rotate,
+}
+
+#[derive(Subcommand)]
+pub enum InboxCommand {
+    /// Read newest retained tasks for this server and bound Agent (or explicit local filter)
+    List {
+        #[arg(long, default_value_t = 20, value_parser=clap::value_parser!(u16).range(1..=1024))]
+        limit: u16,
+        #[arg(long)]
+        agent_id: Option<u64>,
+    },
+    /// Delete this profile's entire local inbox and dedup history while broker is stopped
+    Clear,
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    /// Sign in; password is never accepted as a command-line argument
+    Login {
+        #[arg(long)]
+        email: String,
+        /// Read one password line from stdin instead of a hidden terminal prompt
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Check the session against the central server
+    Status,
+    /// End the user session without revoking the separate Agent token
+    Logout,
+}
+
+#[derive(Subcommand)]
+pub enum TeamCommand {
+    Create {
+        #[arg(long)]
+        name: String,
+    },
+    List,
+    /// Read the invite code in a hidden prompt or from one stdin line
+    Join {
+        #[arg(long)]
+        code_stdin: bool,
+    },
+    Select {
+        #[arg(long)]
+        id: u64,
+    },
+    Current,
+    Members {
+        #[arg(long)]
+        id: u64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// Explicitly create once; an uncertain creation is never retried automatically
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long,value_parser=["codex","claude-code"])]
+        tool: String,
+        #[arg(long)]
+        project_name: String,
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        role_description: Option<String>,
+    },
+    /// List the selected team's Agents; only your own ID can be bound
+    List,
+    /// Bind a server-verified existing ID; missing credentials require explicit token
+    Use {
+        #[arg(long)]
+        id: u64,
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+    /// Explicitly issue/rotate the current Agent token while its broker is stopped
+    Token,
+    /// Show public profile metadata and verify a stored central token
+    Status,
+    /// Clear only an unknown creation after manual server inspection; never retries
+    ResetPending {
+        #[arg(long)]
+        accept_duplicate_risk: bool,
+    },
+}
+
+fn print_json(value: &serde_json::Value) -> Result<()> {
+    let json = serde_json::to_string(value)?;
+    let safe: String = json
+        .chars()
+        .map(|c| {
+            if matches!(c, '\u{7f}'..='\u{9f}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+            {
+                format!("\\u{:04x}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    println!("{safe}");
+    Ok(())
+}
+
+fn password_input(from_stdin: bool) -> Result<String> {
+    secret_input("Password", 72, from_stdin)
+}
+
+fn secret_input(label: &str, limit: usize, from_stdin: bool) -> Result<String> {
+    devlink_cli::terminal_input::secret_input(label, limit, from_stdin)
+}
+
 /// CLI 진입점: 파싱된 CLI 명령어에 따라 적절한 로직을 라우팅하여 실행합니다.
 pub async fn run(cli: Cli) -> Result<()> {
     let path = config::config_path(cli.config)?;
     match cli.command {
+        Commands::Setup(args) => setup_terminal::run(&path, args).await?,
+        Commands::Notifications { limit, clear } => {
+            let config = Config::load(&path)?;
+            if clear {
+                let directory = state_directory(&path);
+                devlink_broker::credentials::ensure_safe_parent_directory(&directory)?;
+                let _control = config::lock(&directory.join("control.lock"))?;
+                let _broker = config::lock(&directory.join("broker.lock"))
+                    .context("Stop the broker before clearing notifications")?;
+                devlink_broker::notifications::Notifications::clear_config(&path)?;
+                print_json(&serde_json::json!({"cleared":true,"centralTasksChanged":false}))?;
+                return Ok(());
+            }
+            let agent = devlink_broker::agent_profile::bound_agent_id(&path)?
+                .context("Bind an owned Agent before reading notifications; use the bound MCP session to query sent tasks/results")?;
+            match devlink_broker::notifications::Notifications::list_config(
+                &path,
+                &config.server_url,
+                agent,
+                limit as usize,
+            ) {
+                Ok(events) => print_json(
+                    &serde_json::json!({"notifications":events,"authoritative":false,
+                    "nextAction":"Use get_tasks(direction=sent) and get_task_result(taskId) in the bound MCP session to verify central results, including missed notifications."}),
+                )?,
+                Err(_) => print_json(
+                    &serde_json::json!({"notifications":[],"authoritative":false,"error":"NOTIFICATION_STORE_UNAVAILABLE",
+                    "nextAction":"Use get_tasks(direction=sent) and get_task_result(taskId) in the bound MCP session; local retention is unavailable."}),
+                )?,
+            }
+        }
+        Commands::Inbox { command } => {
+            use devlink_broker::inbox::Inbox;
+            match command.unwrap_or(InboxCommand::List {
+                limit: 20,
+                agent_id: None,
+            }) {
+                InboxCommand::List { limit, agent_id } => {
+                    let config = Config::load(&path)?;
+                    let agent = match agent_id {
+                        Some(id) => {
+                            anyhow::ensure!(
+                                id > 0 && id <= i64::MAX as u64,
+                                "Invalid local Agent filter"
+                            );
+                            Some(id)
+                        }
+                        None => devlink_broker::agent_profile::bound_agent_id(&path)?,
+                    };
+                    let tasks =
+                        Inbox::list_config(&path, &config.server_url, agent, limit as usize)?;
+                    print_json(&serde_json::to_value(tasks)?)?;
+                }
+                InboxCommand::Clear => {
+                    let directory = state_directory(&path);
+                    if !directory.try_exists()? {
+                        println!("Inbox already empty");
+                        return Ok(());
+                    }
+                    devlink_broker::credentials::verify_parent_safety(&directory)?;
+                    let _control = config::lock(&directory.join("control.lock"))?;
+                    let _broker = config::lock(&directory.join("broker.lock")).context(
+                        "Stop the broker before clearing inbox retention and dedup history",
+                    )?;
+                    Inbox::clear_config(&path)?;
+                    println!("Inbox data and dedup history cleared; no central task was changed");
+                }
+            }
+        }
+        Commands::Agent { command } => {
+            use devlink_broker::agent_profile::{self, CreateOptions, Tool};
+            let result = match command {
+                AgentCommand::Create {
+                    name,
+                    tool,
+                    project_name,
+                    project,
+                    role_description,
+                } => {
+                    agent_profile::create(
+                        &path,
+                        CreateOptions {
+                            name,
+                            tool: Tool::parse(&tool)?,
+                            project_name,
+                            project,
+                            role_description,
+                        },
+                    )
+                    .await?
+                }
+                AgentCommand::List => serde_json::to_value(agent_profile::list(&path).await?)?,
+                AgentCommand::Use { id, project } => {
+                    agent_profile::use_agent(&path, id, project.as_deref()).await?
+                }
+                AgentCommand::Token => agent_profile::token(&path).await?,
+                AgentCommand::Status => agent_profile::status(&path).await?,
+                AgentCommand::ResetPending {
+                    accept_duplicate_risk,
+                } => agent_profile::reset_pending(&path, accept_duplicate_risk).await?,
+            };
+            print_json(&result)?;
+        }
+        Commands::Team { command } => {
+            use devlink_broker::teams;
+            let value = match command {
+                TeamCommand::Create { name } => {
+                    serde_json::to_value(teams::create(&path, &name).await?)?
+                }
+                TeamCommand::List => serde_json::to_value(teams::list(&path).await?)?,
+                TeamCommand::Join { code_stdin } => {
+                    devlink_broker::user_auth::validate_config(&path)?;
+                    let code = secret_input("Invite code", 256, code_stdin)?;
+                    serde_json::to_value(teams::join(&path, &code).await?)?
+                }
+                TeamCommand::Select { id } => {
+                    serde_json::json!({"selected":true,"team":teams::select(&path,id).await?,"agentBindingChanged":false})
+                }
+                TeamCommand::Current => match teams::current(&path).await? {
+                    Some(team) => serde_json::json!({"selected":true,"team":team}),
+                    None => serde_json::json!({"selected":false}),
+                },
+                TeamCommand::Members { id } => {
+                    serde_json::to_value(teams::members(&path, id).await?)?
+                }
+            };
+            print_json(&value)?;
+        }
+        Commands::Auth { command } => match command {
+            AuthCommand::Login {
+                email,
+                password_stdin,
+            } => {
+                devlink_broker::user_auth::validate_config(&path)?;
+                let password = password_input(password_stdin)?;
+                let user = devlink_broker::user_auth::login(&path, &email, &password).await?;
+                print_json(&serde_json::json!({"state":"authenticated","user":user}))?;
+            }
+            AuthCommand::Status => print_json(&devlink_broker::user_auth::status(&path).await?)?,
+            AuthCommand::Logout => {
+                let confirmed = devlink_broker::user_auth::logout(&path).await?;
+                print_json(&serde_json::json!({"state":"logged_out","authenticated":false}))?;
+                if !confirmed {
+                    eprintln!(
+                        "Local session cleared; no remote session was available to invalidate"
+                    );
+                }
+            }
+        },
         // 설정 파일 초기화 (기존 파일이 없을 때만 기본 생성)
         Commands::Init => {
             println!(
@@ -92,10 +427,24 @@ pub async fn run(cli: Cli) -> Result<()> {
                     "Local Broker  : Running (PID: {})\nCentral Server: {:?}",
                     health.pid, health.central_server
                 );
+                if let Some(inbox) = health.inbox {
+                    println!(
+                        "Inbox rejects : {} (last: {:?})",
+                        inbox.rejected_events, inbox.last_error
+                    );
+                }
+                if let Some(count) = health.notification_rejections {
+                    println!(
+                        "Notification rejects: {count}; verify central details with get_task_result/get_tasks in the bound MCP session"
+                    );
+                }
             }
         }
         // 실행 중인 브로커 정상 종료 (Graceful shutdown)
         Commands::Stop => {
+            if std::fs::symlink_metadata(state_directory(&path)).is_ok() {
+                devlink_broker::credentials::verify_parent_safety(&state_directory(&path))?;
+            }
             if !state_directory(&path).exists() {
                 println!("Broker already stopped");
                 return Ok(());
@@ -117,6 +466,16 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             println!("Broker stopped");
         }
+        // MCP 자격 경로 조회 및 토큰 회전
+        Commands::Mcp { command } => match command.unwrap_or(McpCommand::Path) {
+            McpCommand::Path => {
+                println!("{}", devlink_broker::credentials::path(&path).display());
+            }
+            McpCommand::Rotate => {
+                devlink_broker::credentials::rotate(&path)?;
+                println!("MCP local token rotated; restart any running MCP server to apply");
+            }
+        },
         // 포그라운드에서 직접 브로커 통신 루프 실행 (start 명령어로 생성된 자식 프로세스가 실행)
         Commands::Broker => broker::run(&path).await?,
     }
@@ -132,7 +491,7 @@ async fn start(path: &Path) -> Result<()> {
         println!("Broker already running");
         return Ok(());
     }
-    broker::central_token()?;
+    broker::central_token_for(path)?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("--config")
@@ -155,8 +514,13 @@ async fn start(path: &Path) -> Result<()> {
         command.process_group(0);
     }
     let mut child = command.spawn().context("Cannot spawn broker process")?;
-    let deadline = Instant::now() + Duration::from_secs(8);
-    // 최대 8초 동안 프로세스 조기 종료 여부와 헬스체크 응답을 50ms 주기로 폴링
+    // Credential publication precedes runtime discovery. On Windows its three ACL
+    // checks can each succeed within 5 s and still exceed the former 8 s wait.
+    let startup_timeout = Duration::from_secs(8)
+        + devlink_broker::credentials::startup_validation_allowance()
+        + devlink_broker::agent_profile::startup_allowance(path);
+    let deadline = Instant::now() + startup_timeout;
+    // Poll process exit and authenticated readiness within the combined budget.
     loop {
         if let Some(_exit) = child.try_wait()? {
             bail!(

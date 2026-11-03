@@ -16,7 +16,12 @@ export function startRuntime(
 ): Runtime {
   const logger = options.logger ?? createLogger(process.stderr, config.logLevel);
   // A single process owns this client, including across SDK discovery/server factories.
-  const broker = new BrokerClient({ ...(config.brokerSettingsPath ? { settingsPath: config.brokerSettingsPath } : {}), ...options.brokerOptions });
+  const broker = new BrokerClient({ logger,
+    ...(config.brokerSettingsPath ? { settingsPath: config.brokerSettingsPath } : {}),
+    ...(config.requestTimeoutMs !== undefined ? { requestTimeoutMs: config.requestTimeoutMs } : {}),
+    ...(config.callTimeoutMs !== undefined ? { callTimeoutMs: config.callTimeoutMs } : {}),
+    ...options.brokerOptions,
+  });
   // Validate construction/registration before listening to any protocol messages.
   let unclaimedServer: ReturnType<typeof createServer> | undefined = createServer(logger, broker);
   const transport = new StdioServerTransport(options.input, options.output);

@@ -43,3 +43,15 @@ test('broker credentials are represented only by an optional file path and valid
   assert.ok(!JSON.stringify(config).includes('ignored-secret'));
   assert.equal(loadConfig([], { DEVLINK_MCP_TRANSPORT: 'stdio', DEVLINK_BROKER_FILE: '' }).brokerSettingsPath, '');
 });
+
+test('HTTP and whole-call timeouts are bounded integers with safe diagnostics and argument precedence', () => {
+  const env = { DEVLINK_MCP_TRANSPORT: 'stdio', DEVLINK_MCP_REQUEST_TIMEOUT_MS: '200', DEVLINK_MCP_CALL_TIMEOUT_MS: '400' };
+  assert.deepEqual(loadConfig(['--request-timeout-ms', '300', '--call-timeout-ms', '500'], env), {
+    transport: 'stdio', logLevel: 'info', requestTimeoutMs: 300, callTimeoutMs: 500,
+  });
+  assert.equal(loadConfig([], env).requestTimeoutMs, 200);
+  for (const value of ['0', '-1', '1.5', '1e3', 'Infinity', '', '300001', 'secret-value']) {
+    assert.throws(() => loadConfig([], { ...env, DEVLINK_MCP_CALL_TIMEOUT_MS: value }),
+      (error) => error instanceof ConfigError && error.fields.includes('callTimeoutMs') && !error.message.includes(value || 'secret'));
+  }
+});

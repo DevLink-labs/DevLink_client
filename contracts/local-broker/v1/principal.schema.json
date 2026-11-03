@@ -1,0 +1,37 @@
+{
+  "$id": "urn:devlink:local-broker:v1:principal",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "userId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+      "maxLength": 128
+    },
+    "teamId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+      "maxLength": 128
+    },
+    "agentId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+$",
+      "maxLength": 128
+    },
+    "toolType": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "claude_code"
+      ]
+    }
+  },
+  "required": [
+    "userId",
+    "teamId"
+  ],
+  "additionalProperties": false
+}

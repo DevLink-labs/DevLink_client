@@ -1,34 +1,51 @@
-# 로컬 검증 기록
+# 검증 요약과 재현
 
-## 최종 확인: 2026-10-27
+정리일: 2026-10-30 (Asia/Seoul). 아래는 기존 실행 기록의 요약이다. 이번 문서 정리에서 기능 테스트·중앙 서버·Gemini/Claude를 다시 실행하지 않았다. 날짜가 같아도 다른 코드·서버 조합의 결과를 합산하지 않는다.
 
-검증 환경: Windows x86_64 MSVC, rustc/cargo 1.99.1, Visual Studio 2022 Build Tools 및 Windows SDK. 기능 코드 기준은 `7bfca74`(P2 디렉터리 분리)입니다. P1의 `Cargo.lock` 추적과 `protocol.rs` 포맷 수정도 이 기준에 포함되어 있습니다.
+## 최근 검증
 
-명령 실행 위치는 저장소의 `rust/`입니다. CLI와 브로커를 두 크레이트로 나눈 Cargo workspace 기준이며 빌드 산출물은 저장소의 `rust/target/`에 생성됩니다.
+| 대상 | 코드·중앙 기준 | 확인한 결과와 범위 |
+| --- | --- | --- |
+| 수신함·ACK 후속 보완(-95) | client `0516473` 이후 작업 트리, 검토 HEAD `3ee8fc7`; 중앙 `0e8c2b7` | Rust 전체 168 passed / 0 failed / 2 ignored. 실제 소켓 5건 포함. Clippy `-D warnings`·fmt 통과. 실제 중앙 burst 16건 + 재시작 후 1건 ACK, 기록 실패 ACK 0건. Flyway V1~V6·schema validate 유지 |
+| 상태·완료·목록·결과(-94) | client `8199ba7` 대비 구현; 중앙 `a5c7987` | 당시 전체 Rust 164건 통과·2건 제외, 이후 보강한 중계 7건 통과. 실제 Rust→Spring→PostgreSQL 왕복. 임시 DB ddl-auto=update·Flyway 비활성화로 운영 migration 증거는 아님 |
+| 공식 생성 경로·REJECTED 호환(-93/#26) | client `8199ba7`→`4188973`; 중앙 `a5c7987` | 당시 Rust 159건·HTTP 회귀 20건·MCP 100건 통과. 실제 거절 후 같은 키 재접수·taskId 유지·수신함 ACK 검증. Flyway V1~V4·schema validate 유지. 이후 충돌 통합본에 이전 실행 결과를 재귀속하지 않음 |
+| 중앙 READY·로컬 세션 | client `d4c3754`; 중앙 `02de434` | 실제 READY 신원·SDK 세션·소유권·재시작·90초 lease·SQL presence·토큰 교체 거부 확인. 실제 Host 전체 업무 왕복과 구분 |
 
-| 검사 | 결과 |
-| --- | --- |
-| `cargo build --offline --locked --workspace` | 통과 |
-| `cargo test --offline --locked --workspace --all-targets` | 단위 테스트 1개, 통합 테스트 15개 통과, 실패 0 |
-| `cargo fmt --all -- --check` | 통과 |
-| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | 통과 |
-| `cargo build --release --offline --locked --workspace` | 통과, `target/release/devlink.exe` 생성 |
-| `target/release/devlink.exe --help` | 기본 CLI 명령 도움말 확인 |
+세부 동작·교차검토·남은 조건은 [수신함](task-inbox.md), [업무 조회·변경](task-operations.md), [작업 생성](business-relay.md), [세션 검증 이력](archive/session-verification-2026-10-29-30.md)을 따른다. 과거 단위·SDK·MCP·CLI 실행 이력은 [초기 검증 기록](archive/verification-2026-10-27-30.md)에 보존한다.
 
-의존성 캐시가 있는 환경에서 `--offline`을 추가해 실행했습니다. 로컬 통신이 필요한 테스트는 승인된 샌드박스 외부 실행으로 검증했으며, `TEMP`와 `TMP`는 기본 Windows 임시 경로를 사용했습니다.
+## 로컬 회귀 명령
 
-통합 테스트는 실제 실행 파일의 init/config/start/status/stop, CLI 종료 후 브로커 유지, 동시·중복 실행, 로컬 API 인증·Origin 거부, 강제 종료 후 stale metadata 복구, 포트 충돌, 살아 있지만 Health 인증이 실패한 인스턴스의 오류 처리, 인증 정보 비노출을 확인합니다. Mock 중앙 서버로 인증 성공/거부/4001, 인증 대기 시간 초과·잘못된 JSON, 연결 종료·서버 재시작 후 재연결, 재시도 대기 중 종료를 확인합니다.
+Windows 검증은 stable MSVC를 사용했다. 의존성 캐시가 없으면 `--offline`을 제외한다. 로컬 TCP·파일 ACL·자식 프로세스가 필요한 테스트는 실행 환경의 권한을 확인한다.
 
-P2 회귀 검증은 `runtime.json`, `broker.lock`, `control.lock` 및 대소문자 변형을 설정 파일명으로 사용할 때 설정을 보존하는지 확인합니다. `init`·설정 수정, stale metadata 정리, 토큰 누락으로 실패한 `start`, 실제 브로커 시작·상태 조회·정상 종료를 검사합니다. 단위 테스트는 런타임 게시 후 `RuntimeGuard`가 내부 메타데이터만 삭제하고 설정과 잠금 파일은 유지하는지 확인합니다. 내부 파일은 설정 디렉터리 아래의 `.devlink-runtime/`에 저장됩니다.
+```powershell
+# 저장소의 rust 디렉터리
+cargo test --locked --offline --workspace --all-targets -- --test-threads=1
+cargo clippy --locked --offline --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
 
-## 샌드박스에서 발생했던 실패와 원인
+기본 전체 실행에는 실제 45초 heartbeat 유지 등 시간 기반 테스트가 포함된다. ignored 2건은 Node·MCP 빌드와 실제 lease 대기가 필요한 opt-in 시험이며 기본 회귀 통과 수에 포함하지 않는다. 실행법은 [Rust README](../README.md)를 참고한다.
 
-샌드박스 내부에서 작업 폴더의 임시 경로를 사용한 실행은 단위 테스트 1개 통과, 통합 테스트 5개 통과·10개 실패였습니다. 직접 진단한 결과 브로커 프로세스와 런타임 파일은 정상 생성됐지만 `127.0.0.1` TCP 연결이 Windows 오류 `10013`(소켓 접근 거부)으로 차단됐습니다. 이로 인해 8개 테스트는 시작 확인에서, 강제 종료 복구 테스트는 준비 대기에서, 동시 시작 테스트는 성공 여부 검사에서 실패했습니다.
+```powershell
+# 저장소의 packages/mcp-server 디렉터리
+npm.cmd test
 
-같은 코드를 샌드박스 밖에서 재실행하자 16개 테스트가 모두 통과했습니다. 작업 폴더의 임시 경로와 기본 Windows 임시 경로에서 각각 통과를 확인했습니다. 앞서 샌드박스의 기본 임시 경로에서 발생했던 `Cannot replace JSON file` 오류도 최종 샌드박스 외부 실행에서는 재현되지 않았습니다. 정확한 파일 저장 실패의 하위 OS 오류는 별도로 확정하지 않았습니다.
+# 저장소 루트: 실제 중앙을 쓰는 스크립트의 문법만 확인
+node --check rust/scripts/verify-business-relay.mjs
+node --check rust/scripts/verify-task-operations.mjs
+node --check rust/scripts/verify-task-inbox.mjs
+```
 
-## 이전 기록과 미검증 범위
+## 실제 중앙·DB 재현
 
-2026-10-26 문서에는 통합 테스트 13개와 빌드·릴리스·포맷·Clippy 통과가 기록되어 있었습니다. 위 표는 그 기록을 재사용한 것이 아니라 P1·P2 수정 이후의 최종 실행 결과입니다.
+기능별 스크립트와 환경변수는 각 기준 문서에 둔다. `DEVLINK_TEST_CENTRAL_URL`은 격리 loopback 서버, `DEVLINK_TEST_CLI`는 현재 빌드의 절대 경로다. SQL 검사가 필요한 중계 스크립트는 전용 DB/role과 `DEVLINK_TEST_PSQL`·`DEVLINK_TEST_DB_PORT`도 사용한다.
 
-현재 저장소에는 `.github/workflows/`가 없으므로 Windows/Ubuntu CI 구성 및 실행 완료로 표기하지 않습니다. Ubuntu, 실제 중앙 서버 운영 환경, WSS 서버와의 end-to-end 연결, 실제 Agent/MCP 서버 Tool 호출은 이번 검증에 포함하지 않았습니다. MCP 담당자 합의 상태는 [MCP 인터페이스 문서](mcp-interface.md)에 별도로 표시했습니다.
+전용 합성 계정·프로필·DB로 시험하고, 자신이 시작한 프로세스만 종료한다. 운영 DB·사용자 Host 설정을 시험 대상으로 쓰지 않는다. 토큰·쿠키·비밀번호와 private DB/로그는 검토 자료에 포함하지 않는다.
+
+## 결과를 읽는 기준
+
+- 합성 중앙 fixture, 실제 Rust 소켓/CLI, 실제 중앙·DB, 실제 Host 시험을 구분한다.
+- 동일 requestKey 재조회는 서버가 메시지를 재전송했다는 증거가 아니다. wire 중복·재전달은 소켓 fixture에서 확인한다.
+- ACK는 로컬 저장 확인이다. 수락·편집·완료 및 업무 exactly-once 실행의 증거가 아니다.
+- Windows 통과로 Ubuntu·CI·운영 배포·전체 Host 왕복까지 완료 처리하지 않는다.
+- 이 문서의 테스트 수는 각 실행 당시 기록이다. 이후 문서 정리나 다른 브랜치 병합만으로 새 실행 결과가 되지 않는다.

@@ -1,5 +1,28 @@
+pub mod agent_api;
+pub mod agent_context;
+pub mod agent_profile;
 pub mod broker;
+pub mod business_api;
 pub mod central;
+#[cfg(test)]
+mod central_auth_tests;
 pub mod config;
+pub mod connection_api;
+pub mod context_api;
+pub mod credentials;
+pub mod inbox;
 pub mod local;
+pub mod mcp_config;
+pub mod notifications;
+pub mod private_file;
 pub mod protocol;
+pub mod session_api;
+pub mod sessions;
+pub mod setup_config;
+pub mod task_api;
+pub mod task_client;
+pub mod task_operations;
+pub mod task_requests;
+pub mod task_routes;
+pub mod teams;
+pub mod user_auth;

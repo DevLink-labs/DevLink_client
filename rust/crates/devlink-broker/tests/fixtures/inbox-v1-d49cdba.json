@@ -1,0 +1,1 @@
+{"schema_version":1,"tasks":[{"server_url":"ws://localhost:8080/ws/broker","message":{"event_id":"legacy","payload":{"task_id":101,"team_id":1,"requester_agent_id":10,"receiver_agent_id":12,"prompt":"테스트 작업","created_at":"2026-10-29T09:00:00"}}}]}

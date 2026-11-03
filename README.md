@@ -1,8 +1,16 @@
 # DevLink
 
+## 간편설정 규격
+
+[간편설정 호출·단계·오류 규격 v1](contracts/setup/v1/README.md)은 대화형/비대화형 입력, 진행·결과·오류 응답, 복구·종료 코드와 등록 API·MCP 설정·연결 상태의 연동 경계를 정의합니다. `setup` 명령은 후속 구현 대상입니다.
+
 ## MCP 서버
 
 S15P31D108-59 실행 기반, -60 브로커 호출·세션 복구, -61 공통 도구 등록과 7개 업무 도구의 실행 방법 및 검증 절차는 [MCP 서버 문서](packages/mcp-server/README.md)를 참고합니다. 로컬 HTTP·도구 JSON은 MCP 측 v0.1 초안이며 실제 Rust 브로커와의 상호 검증은 남아 있습니다.
+
+사용자는 [Agent 요청·수락·결과 등록 지침](packages/mcp-server/docs/agent-workflow.md)에서 수신자 지정부터 사용자 수락, Host의 로컬 수정·검증, 완료·실패 조회까지 확인할 수 있습니다.
+
+실제 중앙 연동의 인증·Agent bootstrap·DTO 차이와 후속 구현 조건은 [중앙 연동 결정표](contracts/central/README.md)에 정리했습니다. 확인한 develop SHA와 미제공 API를 구분하며, 기존 로컬 계약의 실제 연동 완료를 뜻하지 않습니다.
 
 ## Git Flow
 

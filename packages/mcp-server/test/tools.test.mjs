@@ -21,8 +21,8 @@ const samples = {
   register_agent: { name: 'worker', toolType: 'codex', role: 'MCP implementation' },
   list_agents: {},
   create_task: { recipientAgentId: 'agent-b', title: 'Check interface', description: 'Review draft contract' },
-  update_task_status: { taskId: 'task-1', status: 'IN_PROGRESS' },
-  complete_task: { taskId: 'task-1', result: { summary: 'Done', changedFiles: ['src/example.ts'], verification: 'npm test passed' } },
+  update_task_status: { taskId: 'task-1', version: '0', status: 'IN_PROGRESS' },
+  complete_task: { taskId: 'task-1', version: '1', resultText: 'Done\nVerification: npm test passed', taskFiles: [{ relativePath: 'src/example.ts', changeType: 'MODIFIED', diffText: '- old\n+ new' }] },
   get_tasks: {}, get_task_result: { taskId: 'task-1' },
 };
 async function connected(t, { brokerClient, extensions } = {}) {
@@ -45,7 +45,7 @@ async function invalid(client, name, args) {
 test('all seven tools use the common invocation/result path and trusted broker context', async (t) => {
   const { client, broker } = await connected(t);
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 8);
+  assert.equal(listed.tools.length, 10);
   assert.equal(broker.calls.length, 0);
   for (const [name, args] of Object.entries(samples)) {
     const result = await client.callTool({ name, arguments: args });
@@ -82,12 +82,13 @@ test('invalid inputs and actor overrides are rejected before any session or brok
 });
 
 test('all business errors use the same safe result envelope and preserve a known task ID', async (t) => {
-  const adapter = { async execute() { throw new BrokerFault('BROKER_REJECTED', 'correlated-request', 'known-task'); } };
+  let originalId;
+  const adapter = { async execute(operation, args, options) { originalId = options.mcpRequestId; throw new BrokerFault('BROKER_REJECTED', 'correlated-request', 'known-task'); } };
   const { client } = await connected(t, { brokerClient: adapter });
   for (const [name, args] of Object.entries(samples)) {
     const result = await client.callTool({ name, arguments: args });
     assert.equal(result.isError, true);
-    assert.deepEqual(result.structuredContent.error, { code: 'BROKER_REJECTED', message: 'The broker rejected the operation.', requestId: 'correlated-request', outcome: 'rejected', taskId: 'known-task' });
+    assert.deepEqual(result.structuredContent.error, { code: 'BROKER_REJECTED', category: 'domain', message: 'The broker rejected the operation.', mcpRequestId: originalId, requestId: 'correlated-request', outcome: 'rejected', taskId: 'known-task', ...(name === 'register_agent' ? { stage: 'protocol', nextActions: ['check_provider_contract'] } : {}) });
     assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
   }
 });
@@ -100,7 +101,7 @@ test('a functional module extends registration without changing the registry; un
     handler: async () => { if (name === 'throws_secret') throw new Error('secret raw internal detail'); return { privateToken: 'secret raw internal detail' }; },
   }))];
   const { client, broker } = await connected(t, { extensions: examples });
-  assert.equal((await client.listTools()).tools.length, 11);
+  assert.equal((await client.listTools()).tools.length, 13);
   assert.deepEqual((await client.callTool({ name: 'example_echo', arguments: { message: 'hello' } })).structuredContent, { message: 'hello' });
   for (const name of ['throws_secret', 'invalid_output']) {
     const result = await client.callTool({ name, arguments: {} });
@@ -118,8 +119,19 @@ test('missing broker settings produce a tool error while diagnostics remain usab
   const result = await client.callTool({ name: 'register_agent', arguments: samples.register_agent });
   assert.equal(result.structuredContent.error.code, 'CREDENTIAL_FILE_INVALID');
   assert.equal((await client.callTool({ name: 'devlink_ping', arguments: {} })).structuredContent.status, 'ok');
-  assert.equal((await client.listTools()).tools.length, 8);
+  assert.equal((await client.listTools()).tools.length, 10);
   assert.equal(broker.calls.length, 0);
+});
+
+test('registration faults retain scope/outcome/IDs and provide advice without executing recovery', async (t) => {
+  let calls = 0;
+  const adapter = { async execute() { calls++; throw new BrokerFault('CENTRAL_RESULT_UNKNOWN', 'original-request', undefined, { scope: 'transport', outcome: 'unknown' }); } };
+  const { client } = await connected(t, { brokerClient: adapter });
+  const result = await client.callTool({ name: 'register_agent', arguments: samples.register_agent });
+  const error = result.structuredContent.error;
+  assert.equal(error.requestId, 'original-request'); assert.equal(error.code, 'CENTRAL_RESULT_UNKNOWN');
+  assert.equal(error.scope, 'transport'); assert.equal(error.outcome, 'unknown'); assert.equal(error.stage, 'registration');
+  assert.deepEqual(error.nextActions, ['inspect_owned_agents_then_use']); assert.equal(calls, 1);
 });
 
 const entry = fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -134,7 +146,7 @@ for (const mode of ['legacy', { pin: '2026-07-28' }]) {
     transport.stderr.on('data', (chunk) => { logs += chunk; });
     t.after(async () => { await client.close(); try { await file.cleanup(); } finally { await broker.close(); } });
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 8);
+    assert.equal((await client.listTools()).tools.length, 10);
     await invalid(client, 'create_task', { ...samples.create_task, teamId: 'forged' });
     await client.callTool({ name: 'devlink_ping', arguments: {} });
     assert.equal(broker.calls.length, 0);
