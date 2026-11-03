@@ -7,7 +7,7 @@ use devlink_broker::{
     user_auth,
 };
 use devlink_cli::setup::{
-    NoLoginInput, Outcome, SetupContext, SetupStages, Step, StepExecutor, StepResult,
+    ErrorCode, NoLoginInput, Outcome, SetupContext, SetupStages, Step, StepExecutor, StepResult,
 };
 use serde_json::{Value, json};
 use std::{
@@ -262,8 +262,47 @@ async fn explicit_metadata_overrides_defaults_and_invalid_utf16_lengths_are_reje
     ] {
         let value = run(&f, &project, &[flag, &invalid], 2);
         assert_eq!(value["error"]["code"], "SETUP_INPUT_INVALID");
+        // Names are checked in bind_project, after sign-in and team selection,
+        // because a saved profile may still provide them.
+        assert_eq!(value["error"]["step"], "bind_project");
         assert_eq!(value["error"]["requiredInputs"][0]["field"], field);
     }
+}
+
+#[tokio::test]
+async fn a_filesystem_root_passes_validate_and_bind_project_uses_saved_names() {
+    let f = Fixture::new().await;
+    credentials::set_private_permissions(f.path.parent().unwrap()).unwrap();
+    credentials::set_private_permissions(&f.path).unwrap();
+    // A root such as C:\ or / has no folder name to derive default names from.
+    let root = f._root.path().ancestors().last().unwrap().to_path_buf();
+    assert!(root.file_name().is_none());
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages = SetupStages::default().with_project(ProjectOptions {
+        path: Some(root.clone()),
+        ..Default::default()
+    });
+    assert!(matches!(
+        stages.execute(Step::Validate, &context).await,
+        StepResult::Complete { .. }
+    ));
+    let StepResult::Failed(error) = stages.execute(Step::BindProject, &context).await else {
+        panic!("empty default names were accepted")
+    };
+    assert_eq!(error.code, ErrorCode::InputInvalid);
+    assert_eq!(error.step, Step::BindProject);
+    assert_eq!(error.required_inputs[0].field, "project.name");
+    assert!(stages.project().is_none());
+    profile(&f, &root, "ready");
+    assert!(matches!(
+        stages.execute(Step::BindProject, &context).await,
+        StepResult::Complete { reused: true, .. }
+    ));
+    let prepared = stages.project().unwrap();
+    assert_eq!(prepared.metadata.agent_name, "Saved Agent");
+    assert_eq!(prepared.metadata.project_name, "Saved project");
 }
 
 #[tokio::test]

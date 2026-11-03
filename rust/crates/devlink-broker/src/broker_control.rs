@@ -28,6 +28,9 @@ pub enum FailureKind {
     ConfigBusy,
     BrokerLockFailed,
     BrokerBusy,
+    /// broker.lock is held but runtime.json is not published yet: a broker is
+    /// starting right now. Transient; retry instead of repairing files.
+    BrokerStarting,
     Storage,
     Unhealthy,
     TokenUnavailable,
@@ -60,6 +63,7 @@ impl std::fmt::Display for Failure {
             FailureKind::ConfigBusy => "Another DevLink operation is running",
             FailureKind::BrokerLockFailed => "Cannot inspect broker lock",
             FailureKind::BrokerBusy => "Stop the broker before changing Agent credentials (running or starting)",
+            FailureKind::BrokerStarting => "Broker is starting; wait a moment and retry",
             FailureKind::Storage => "Cannot inspect broker runtime files",
             FailureKind::Unhealthy => "Broker identity or health could not be verified",
             FailureKind::TokenUnavailable => "Cannot prepare the central Agent token",
@@ -122,12 +126,14 @@ pub async fn status(path: &Path) -> Result<Status> {
         return Ok(Status::Stopped);
     }
     let runtime = Runtime::load(path).map_err(|e| {
-        classify(
-            e,
-            FailureKind::Storage,
-            &Runtime::path(path),
-            Outcome::NotApplied,
-        )
+        // The lock holder publishes runtime.json after acquiring the lock, so a
+        // missing file here is a broker still starting, not damaged storage.
+        let kind = if runtime_unpublished(path, &e) {
+            FailureKind::BrokerStarting
+        } else {
+            FailureKind::Storage
+        };
+        classify(e, kind, &Runtime::path(path), Outcome::NotApplied)
     })?;
     let health = runtime.health().await.map_err(|e| {
         classify(
@@ -138,6 +144,13 @@ pub async fn status(path: &Path) -> Result<Status> {
         )
     })?;
     Ok(Status::Running { health })
+}
+
+fn runtime_unpublished(path: &Path, error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        && std::fs::symlink_metadata(Runtime::path(path)).is_err()
 }
 
 fn control_lock(path: &Path) -> Result<File> {
@@ -222,8 +235,6 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        prevent_stdio_inheritance()
-            .map_err(|e| classify(e, FailureKind::SpawnFailed, path, Outcome::NotApplied))?;
         command.creation_flags(0x00000008 | 0x00000200);
     }
     #[cfg(unix)]
@@ -231,7 +242,15 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn().map_err(|e| {
+    // Only this spawn must not leak the CLI's standard handles; a long-running
+    // caller such as setup keeps inheritance for the hosts it launches later.
+    #[cfg(windows)]
+    let restore_inheritance = StdioInheritanceGuard::suspend()
+        .map_err(|e| classify(e, FailureKind::SpawnFailed, path, Outcome::NotApplied))?;
+    let spawned = command.spawn();
+    #[cfg(windows)]
+    drop(restore_inheritance);
+    let mut child = spawned.map_err(|e| {
         classify(
             anyhow::Error::new(e).context("Cannot spawn broker process"),
             FailureKind::SpawnFailed,
@@ -253,6 +272,8 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
 
 async fn wait_for_start(path: &Path, child: &mut Child, timeout: Duration) -> Result<Health> {
     let deadline = Instant::now() + timeout;
+    let lock = state_directory(path).join("broker.lock");
+    let mut lock_error = None;
     loop {
         if child
             .try_wait()
@@ -266,19 +287,21 @@ async fn wait_for_start(path: &Path, child: &mut Child, timeout: Duration) -> Re
         if let Ok(runtime) = Runtime::load(path)
             && runtime.pid == child.id()
             && let Ok(health) = runtime.health().await
-            && local::running(path).map_err(|error| {
-                classify(
-                    error,
-                    FailureKind::Storage,
-                    &state_directory(path).join("broker.lock"),
-                    Outcome::Unknown,
-                )
-            })?
         {
-            return Ok(health);
+            // The child already answered an authenticated health check, so a
+            // failing lock inspection here must not end a healthy broker. Keep
+            // polling; a persistent error is reported at the deadline instead.
+            match local::running(path) {
+                Ok(true) => return Ok(health),
+                Ok(false) => lock_error = None,
+                Err(error) => lock_error = Some(error),
+            }
         }
         if Instant::now() >= deadline {
-            return Err(failure(FailureKind::StartupTimedOut, path, Outcome::Unknown).into());
+            return Err(match lock_error {
+                Some(error) => classify(error, FailureKind::Storage, &lock, Outcome::Unknown),
+                None => failure(FailureKind::StartupTimedOut, path, Outcome::Unknown).into(),
+            });
         }
         sleep(POLL_INTERVAL).await;
     }
@@ -316,12 +339,12 @@ pub async fn stop(path: &Path) -> Result<StopResult> {
         return Ok(StopResult::AlreadyStopped);
     }
     let runtime = Runtime::load(path).map_err(|e| {
-        classify(
-            e,
-            FailureKind::Storage,
-            &Runtime::path(path),
-            Outcome::NotApplied,
-        )
+        let kind = if runtime_unpublished(path, &e) {
+            FailureKind::BrokerStarting
+        } else {
+            FailureKind::Storage
+        };
+        classify(e, kind, &Runtime::path(path), Outcome::NotApplied)
     })?;
     // Same health-then-authenticated-shutdown sequence as Runtime::stop.
     runtime.health().await.map_err(|e| {
@@ -357,24 +380,60 @@ pub async fn stop(path: &Path) -> Result<StopResult> {
     Ok(StopResult::Stopped)
 }
 
+/// Clears HANDLE_FLAG_INHERIT on the CLI's standard handles for one spawn and
+/// restores the previous flags on drop. Redirecting the child's stdio alone does
+/// not stop inherited capture pipes from keeping a parent's reader open.
 #[cfg(windows)]
-fn prevent_stdio_inheritance() -> Result<()> {
-    use windows_sys::Win32::{
-        Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation},
-        System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
-    };
-    // Redirecting the child's stdio alone does not prevent inherited capture pipes
-    // from the CLI. Clear flags on those borrowed handles; never close them.
-    for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: GetStdHandle borrows a process-owned handle.
-        let handle = unsafe { GetStdHandle(stream) };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            continue;
+struct StdioInheritanceGuard {
+    inheritable: Vec<windows_sys::Win32::Foundation::HANDLE>,
+}
+#[cfg(windows)]
+impl StdioInheritanceGuard {
+    fn suspend() -> Result<Self> {
+        use windows_sys::Win32::{
+            Foundation::{
+                GetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+                SetHandleInformation,
+            },
+            System::Console::{
+                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            },
+        };
+        let mut guard = Self {
+            inheritable: Vec::new(),
+        };
+        for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle borrows a process-owned handle.
+            let handle = unsafe { GetStdHandle(stream) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            let mut flags = 0;
+            // SAFETY: flags is a valid out-pointer for the borrowed handle.
+            if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+                anyhow::bail!("Cannot inspect CLI standard handle inheritance");
+            }
+            if flags & HANDLE_FLAG_INHERIT == 0 {
+                continue;
+            }
+            // SAFETY: Only the inheritance flag of the valid borrowed handle changes.
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                anyhow::bail!("Cannot prevent CLI standard handle inheritance");
+            }
+            guard.inheritable.push(handle);
         }
-        // SAFETY: Only the inheritance flag of the valid borrowed handle changes.
-        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-            anyhow::bail!("Cannot prevent CLI standard handle inheritance");
+        Ok(guard)
+    }
+}
+#[cfg(windows)]
+impl Drop for StdioInheritanceGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        for handle in self.inheritable.drain(..) {
+            // SAFETY: Restores the flag this guard cleared on the same borrowed
+            // handle. A failure only leaves it non-inheritable; nothing is closed.
+            let _ =
+                unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
         }
     }
-    Ok(())
 }

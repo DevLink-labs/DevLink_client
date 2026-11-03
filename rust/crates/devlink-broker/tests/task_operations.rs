@@ -181,7 +181,7 @@ async fn status(
         .await
         .push(json!({"operation":"status","taskId":id,"body":body}));
     reply(&s,json!({"taskId":id,"status":body["status"],"version":body["version"].as_u64().unwrap()+1,
-        "failureReason":body.get("failureReason"),"rejectionReason":body.get("rejectionReason"),"partiallyModified":body.get("partiallyModified").unwrap_or(&json!(false)),"startedAt":"2026-10-30T01:00:00","completedAt":null})).await
+        "failureReason":body.get("failureReason"),"rejectionReason":null,"partiallyModified":body.get("partiallyModified").unwrap_or(&json!(false)),"startedAt":"2026-10-30T01:00:00","completedAt":null})).await
 }
 async fn complete(
     Path(id): Path<u64>,
@@ -357,30 +357,6 @@ async fn status_and_complete_map_exact_provider_fields_and_long_precision() {
     assert_eq!(status, 200, "{response}");
     assert_eq!(response["data"]["failureReason"], "  exact failure\n사유  ");
     assert_eq!(response["data"]["partiallyModified"], false);
-    // Central allows PENDING -> REJECTED with rejectionReason only; the adapter
-    // must forward exactly that field and nothing from the FAILED branch.
-    let args = json!({"taskId":"101","version":"0","status":"REJECTED","rejectionReason":"  거절 사유\n원문  "});
-    let (status, response) = f
-        .post(
-            "/v1/tasks/status",
-            &request(&session, "update_task_status", args),
-        )
-        .await;
-    assert_eq!(status, 200, "{response}");
-    assert_eq!(response["data"]["status"], "REJECTED");
-    assert_eq!(response["data"]["version"], "1");
-    assert_eq!(response["data"]["rejectionReason"], "  거절 사유\n원문  ");
-    let calls = f.remote.calls.lock().await;
-    let rejected = calls
-        .iter()
-        .rev()
-        .find(|call| call["operation"] == "status")
-        .expect("central status call");
-    assert_eq!(
-        rejected["body"],
-        json!({"status":"REJECTED","version":0,"rejectionReason":"  거절 사유\n원문  "})
-    );
-    drop(calls);
     let files = json!([{"relativePath":"src/nonexistent.rs","changeType":"RENAMED","diffText":"- old\n+ new"},{"relativePath":"gone.rs","changeType":"DELETED","diffText":null}]);
     let args = json!({"taskId":"101","version":"1","resultText":"  result\n검증 그대로 ","taskFiles":files});
     let (status, response) = f
@@ -392,9 +368,9 @@ async fn status_and_complete_map_exact_provider_fields_and_long_precision() {
     assert_eq!(status, 200, "{response}");
     assert_eq!(response["data"]["version"], "2");
     let calls = f.remote.calls.lock().await;
-    assert_eq!(calls.len(), 4);
-    assert_eq!(calls[3]["body"]["taskFiles"], files);
-    assert_eq!(calls[3]["body"]["resultText"], "  result\n검증 그대로 ");
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[2]["body"]["taskFiles"], files);
+    assert_eq!(calls[2]["body"]["resultText"], "  result\n검증 그대로 ");
 }
 #[tokio::test]
 async fn list_cursors_bind_actor_filters_and_size_and_result_preserves_files() {
@@ -482,11 +458,6 @@ async fn invalid_legacy_dtos_and_actor_inputs_never_reach_central() {
         json!({"taskId":"101","status":"IN_PROGRESS"}),
         json!({"taskId":"101","version":0,"status":"FAILED","reason":"reason"}),
         json!({"taskId":"101","version":0,"status":"REJECTED"}),
-        json!({"taskId":"101","version":0,"status":"REJECTED","rejectionReason":"  \n "}),
-        json!({"taskId":"101","version":0,"status":"REJECTED","rejectionReason":"reason","partiallyModified":false}),
-        json!({"taskId":"101","version":0,"status":"REJECTED","rejectionReason":"reason","failureReason":"reason"}),
-        json!({"taskId":"101","version":0,"status":"IN_PROGRESS","rejectionReason":"reason"}),
-        json!({"taskId":"101","version":1,"status":"FAILED","reason":"reason","partiallyModified":false,"rejectionReason":"reason"}),
         json!({"taskId":"01","version":0,"status":"IN_PROGRESS"}),
         json!({"taskId":"101","version":"01","status":"IN_PROGRESS"}),
         json!({"taskId":"101","version":1.5,"status":"IN_PROGRESS"}),

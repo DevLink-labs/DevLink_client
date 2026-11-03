@@ -116,7 +116,9 @@ impl ToolSearch {
         vec![codex, claude]
     }
 
-    async fn detect_one(
+    /// Probe one tool only. A caller that already knows which tool it needs
+    /// (explicit, bound, or chosen) must not pay for the other host's probe.
+    pub async fn detect_one(
         &self,
         tool: ToolType,
         preferred: Option<&SelectedTool>,

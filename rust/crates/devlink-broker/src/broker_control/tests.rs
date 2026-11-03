@@ -294,18 +294,43 @@ async fn wrong_service_version_pid_or_instance_cannot_be_reused_or_stopped() {
 }
 
 #[tokio::test]
-async fn a_linked_lock_after_verified_health_reports_storage_before_startup_timeout() {
+async fn a_held_lock_without_runtime_is_a_starting_broker_not_damaged_storage() {
+    let (_root, path) = fixture();
+    let _broker = config::lock(&state_directory(&path).join("broker.lock")).unwrap();
+    for result in [
+        status(&path).await.map(|_| ()),
+        start(&path, Path::new("must-not-spawn")).await.map(|_| ()),
+        stop(&path).await.map(|_| ()),
+    ] {
+        let error = result.err().unwrap();
+        let fault = error.downcast_ref::<Failure>().unwrap();
+        assert_eq!(fault.kind, FailureKind::BrokerStarting);
+        assert_eq!(fault.outcome, Outcome::NotApplied);
+        assert_eq!(fault.file, Runtime::path(&path));
+    }
+    // Unreadable runtime metadata is still a storage fault, not a startup race.
+    fs::write(Runtime::path(&path), b"{").unwrap();
+    assert_eq!(
+        status(&path)
+            .await
+            .err()
+            .unwrap()
+            .downcast_ref::<Failure>()
+            .unwrap()
+            .kind,
+        FailureKind::Storage
+    );
+}
+
+#[tokio::test]
+async fn a_linked_lock_after_verified_health_is_retried_and_reported_as_storage_at_the_deadline() {
     use axum::{Json, Router, routing::get};
     let (root, path) = fixture();
     let mut child = child(false);
-    let owned = StartingChild {
-        child: &mut child,
-        armed: true,
-    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let runtime = Runtime {
         api_version: local::API_VERSION,
-        pid: owned.child.id(),
+        pid: child.id(),
         port: listener.local_addr().unwrap().port(),
         instance_id: "expected-instance".into(),
         control_token: "private-control-marker".into(),
@@ -360,18 +385,29 @@ async fn a_linked_lock_after_verified_health_reports_storage_before_startup_time
         .await
         .unwrap();
     });
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        wait_for_start(&path, owned.child, Duration::from_secs(30)),
-    )
-    .await
-    .expect("unsafe lock must fail before the readiness deadline")
-    .err()
-    .unwrap();
-    let fault = error.downcast_ref::<Failure>().unwrap();
-    assert_eq!(fault.kind, FailureKind::Storage);
-    assert_eq!(fault.outcome, Outcome::Unknown);
-    assert_eq!(fault.file, lock);
+    // A verified-healthy child is not killed by one failing lock inspection; the
+    // error is retried until the deadline and then reported in place of a timeout.
+    let started = Instant::now();
+    {
+        let owned = StartingChild {
+            child: &mut child,
+            armed: true,
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_start(&path, owned.child, Duration::from_millis(400)),
+        )
+        .await
+        .expect("unsafe lock must be reported at the readiness deadline")
+        .err()
+        .unwrap();
+        let fault = error.downcast_ref::<Failure>().unwrap();
+        assert_eq!(fault.kind, FailureKind::Storage);
+        assert_eq!(fault.outcome, Outcome::Unknown);
+        assert_eq!(fault.file, lock);
+    }
+    assert!(started.elapsed() >= Duration::from_millis(400));
+    assert!(child.try_wait().unwrap().is_some());
     assert_eq!(fs::read_to_string(sentinel).unwrap(), "preserved");
     server.abort();
 }

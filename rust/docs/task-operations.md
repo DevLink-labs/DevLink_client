@@ -41,13 +41,7 @@ ID는 정규 양의 Java Long 범위 문자열이다. version은 필수이며 0.
 {"taskId":"101","version":"1","status":"FAILED","failureReason":"검증 실패 원문","partiallyModified":false}
 ```
 
-거절:
-
-```json
-{"taskId":"101","version":"0","status":"REJECTED","rejectionReason":"거절 사유 원문"}
-```
-
-reason은 failureReason의 호환 별칭이다. FAILED에는 비어 있지 않은 사유와 명시적 boolean이 필요하다. REJECTED에는 비어 있지 않은 rejectionReason이 필요하며 중앙 규칙대로 PENDING에서만 허용된다. 수락에는 사유·partiallyModified를 넣지 않는다. 각 상태는 자기 사유 필드만 받고 다른 상태의 필드가 섞이면 중앙 호출 전에 400으로 거부한다. 중앙 본문에는 요청한 상태의 필드만 보낸다. 응답은 taskId/status/version/rejectionReason/failureReason/partiallyModified/startedAt/completedAt이다.
+reason은 failureReason의 호환 별칭이다. FAILED에는 비어 있지 않은 사유와 명시적 boolean이 필요하다. 수락에는 사유·partiallyModified를 넣지 않는다. 이 adapter는 수락/실패만 변경하며 중앙의 REJECTED는 목록·상세에서 보존한다. 응답은 taskId/status/version/rejectionReason/failureReason/partiallyModified/startedAt/completedAt이다.
 
 완료:
 
@@ -62,7 +56,7 @@ reason은 failureReason의 호환 별칭이다. FAILED에는 비어 있지 않�
 }
 ```
 
-resultText는 비어 있지 않아야 하며 공백·개행을 보존한다. resultText는 요청자에게 TASK_COMPLETED로 되돌아가므로 생성 prompt와 같은 중앙 프레임 한도(256 KiB − envelope 여유) 검사를 통과해야 하며, 넘으면 중앙 호출 전에 400으로 거부한다. changeType은 ADDED/MODIFIED/DELETED/RENAMED, relativePath는 비어 있지 않은 최대 500 UTF-16 코드 단위다. diffText의 문자열/null을 보존한다. taskFiles 생략/null/빈 배열은 중앙 계약대로 빈 배열이다. 실제 로컬 파일 존재 여부나 diff 내용은 검사·수정하지 않는다. 응답은 taskId/status/version/completedAt이다.
+resultText는 비어 있지 않아야 하며 공백·개행을 보존한다. changeType은 ADDED/MODIFIED/DELETED/RENAMED, relativePath는 비어 있지 않은 최대 500 UTF-16 코드 단위다. diffText의 문자열/null을 보존한다. taskFiles 생략/null/빈 배열은 중앙 계약대로 빈 배열이다. 실제 로컬 파일 존재 여부나 diff 내용은 검사·수정하지 않는다. 응답은 taskId/status/version/completedAt이다.
 
 목록:
 

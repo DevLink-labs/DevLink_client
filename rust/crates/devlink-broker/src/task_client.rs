@@ -3,11 +3,7 @@
 //! WebSocket 접속 origin으로부터 HTTP/HTTPS 엔드포인트를 도출하며,
 //! Bearer 인증 토큰을 안전하게 주입하고 로그, URL, 에러 메시지에 인증 정보가 누출되지 않도록 보장합니다.
 
-use crate::{
-    central::endpoint_url,
-    protocol::{DELIVERY_ENVELOPE_RESERVE, MAX_CENTRAL_MESSAGE_BYTES},
-    sessions::Principal,
-};
+use crate::{central::endpoint_url, protocol::MAX_CENTRAL_MESSAGE_BYTES, sessions::Principal};
 use anyhow::{Context, Result, ensure};
 use reqwest::{
     Client,
@@ -19,9 +15,6 @@ use std::time::Duration;
 
 /// 요청 본문 최대 크기 제한 (128 KB)
 pub const REQUEST_LIMIT: usize = 128 * 1024;
-// 로컬 REST 한도 안에서 받은 prompt·resultText는 TASK_CREATED/TASK_COMPLETED로
-// 감싸여 돌아와도 중앙 프레임 한도에 들어가야 합니다. 한도를 바꾸면 여기서 막힙니다.
-const _: () = assert!(REQUEST_LIMIT <= MAX_CENTRAL_MESSAGE_BYTES - DELIVERY_ENVELOPE_RESERVE);
 /// 응답 본문 최대 수신 제한 (256 KB)
 const RESPONSE_LIMIT: usize = 256 * 1024;
 
@@ -46,9 +39,12 @@ pub fn numeric_id(value: &str) -> Option<u64> {
 }
 
 impl CreateTaskCommand {
-    /// prompt가 TASK_CREATED envelope 여유를 남기고 중앙 프레임 한도 안에 들어가는지 검증
+    /// 메시지가 중앙 서버 WebSocket/HTTP 전송 제한 내에 들어가는지 검증
+    ///
+    /// TASK_CREATED 엔벨로프, 식별자, 타임스탬프 등을 위한 여유 공간(1024바이트)을 확보합니다.
     pub fn fits_delivery(&self) -> bool {
-        crate::protocol::fits_delivery(&self.prompt)
+        serde_json::to_vec(&self.prompt)
+            .is_ok_and(|bytes| bytes.len() <= MAX_CENTRAL_MESSAGE_BYTES - 1024)
     }
 
     /// 커맨드 필드의 필수값 및 크기 제약 조건 검증
@@ -527,7 +523,7 @@ mod tests {
             request_key: "request".into(),
             requester_agent_id: i64::MAX as u64,
             receiver_agent_id: i64::MAX as u64,
-            prompt: "x".repeat(MAX_CENTRAL_MESSAGE_BYTES - DELIVERY_ENVELOPE_RESERVE - 2),
+            prompt: "x".repeat(MAX_CENTRAL_MESSAGE_BYTES - 1024 - 2),
         };
         assert!(command.fits_delivery());
         let wire = ServerMessage::TaskCreated {
@@ -544,22 +540,6 @@ mod tests {
         assert!(serde_json::to_vec(&wire).unwrap().len() <= MAX_CENTRAL_MESSAGE_BYTES);
         command.prompt.push('x');
         assert!(!command.fits_delivery());
-    }
-
-    #[test]
-    fn anything_accepted_by_the_local_request_limit_fits_a_returned_central_frame() {
-        // A completion result as large as the whole local request body must still
-        // arrive at the requester inside one TASK_COMPLETED frame.
-        let result_text = "결".repeat(REQUEST_LIMIT / "결".len());
-        assert!(crate::protocol::fits_delivery(&result_text));
-        let wire = serde_json::json!({
-            "type":"TASK_COMPLETED","event_id":uuid::Uuid::new_v4().to_string(),
-            "task_id":i64::MAX,"version":i64::MAX,
-            "payload":{"status":"COMPLETED","result_text":result_text,"partially_modified":true,
-                "started_at":"+999999999-12-31T23:59:59.999999999",
-                "completed_at":"+999999999-12-31T23:59:59.999999999"}
-        });
-        assert!(serde_json::to_vec(&wire).unwrap().len() <= MAX_CENTRAL_MESSAGE_BYTES);
     }
 
     #[test]

@@ -638,8 +638,7 @@ async fn session(
         return Outcome::ProtocolViolation;
     };
 
-    // 웹소켓 프레임 및 메시지 최대 크기 제한 (protocol::MAX_CENTRAL_MESSAGE_BYTES, 256 KiB)
-    // 로컬 REST 요청 한도(128 KiB)보다 크므로 이 브로커가 만든 prompt·resultText는 항상 수신 가능
+    // 웹소켓 프레임 및 메시지 최대 크기 제한 (64KB)
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(MAX_CENTRAL_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_CENTRAL_MESSAGE_BYTES));

@@ -37,7 +37,7 @@
 }
 ```
 
-prompt의 공백·개행을 보존하고 중앙 WebSocket 프레임 한도(256 KiB, envelope 여유 1 KiB) 안에 들어가는지도 검증한다. 이 한도는 로컬 요청 128 KiB 한도보다 크므로 브로커가 보낸 prompt·resultText는 TASK_CREATED·TASK_COMPLETED로 항상 되돌아올 수 있다. 중앙 POST 본문은 `requestKey`, 숫자 `receiverAgentId`, `prompt` 세 필드만 포함한다. 본문에는 requesterAgentId/teamId를 넣지 않으며, teamId는 검증된 세션 값으로 경로에만 사용한다.
+prompt의 공백·개행을 보존하고 중앙 WebSocket 64 KiB 전송 한도 안에 들어가는지도 검증한다. 중앙 POST 본문은 `requestKey`, 숫자 `receiverAgentId`, `prompt` 세 필드만 포함한다. 본문에는 requesterAgentId/teamId를 넣지 않으며, teamId는 검증된 세션 값으로 경로에만 사용한다.
 
 현재 MCP의 `recipientAgentId/title/description/taskContext?` 입력도 호환한다. 이 기존 입력은 이전 구현과 같은 JSON 문자열 prompt로 직렬화한다. 두 입력을 섞거나 actor·requestKey를 인자에 추가하면 거부한다. MCP schema/문구의 최종 수렴은 -97이며 이 스토리에서 MCP 소스를 변경하지 않는다. 같은 키로 기존 작업을 확인할 때 중앙의 `REJECTED`도 결과 상태로 보존한다. 이는 새 작업 생성·자동 수락·상태 변경이 아니다.
 

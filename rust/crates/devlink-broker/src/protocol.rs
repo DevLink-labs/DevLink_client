@@ -11,24 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 중앙에서 수신하는 WebSocket 텍스트 프레임·메시지의 최대 크기입니다.
-///
-/// 중앙은 `prompt`·`result_text` 길이를 제한하지 않으므로 이 값은 클라이언트 측 합의입니다.
-/// 이 브로커가 REST로 보낼 수 있는 최대 본문(`task_client::REQUEST_LIMIT`, 128 KiB)에
-/// 전달 envelope 여유를 더한 값보다 항상 커야 합니다. 그래야 여기서 생성·완료한 작업이
-/// `TASK_CREATED`/`TASK_COMPLETED`로 되돌아올 때 프레임에 들어갑니다.
-/// 이 관계는 `task_client`에서 컴파일 시점에 검사합니다.
-pub const MAX_CENTRAL_MESSAGE_BYTES: usize = 256 * 1024;
-
-/// 전달되는 텍스트 페이로드를 감싸는 envelope 필드(type, event_id, 각종 ID, 시각)용 여유 바이트입니다.
-pub const DELIVERY_ENVELOPE_RESERVE: usize = 1024;
-
-/// `text`를 JSON으로 인코딩했을 때 envelope 여유를 남기고 중앙 프레임 하나에 들어가는지 검사합니다.
-/// 작업 생성(prompt)과 완료(resultText)가 같은 규칙을 공유합니다.
-pub fn fits_delivery(text: &str) -> bool {
-    serde_json::to_vec(text)
-        .is_ok_and(|bytes| bytes.len() <= MAX_CENTRAL_MESSAGE_BYTES - DELIVERY_ENVELOPE_RESERVE)
-}
+/// Shared receive limit, also used when validating newly created task payloads.
+pub const MAX_CENTRAL_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// 로컬 Agent와 브로커 사이의 접속 상태 (`ONLINE` 또는 `OFFLINE`)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

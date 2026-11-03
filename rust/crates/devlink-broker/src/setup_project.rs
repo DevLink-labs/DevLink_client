@@ -49,17 +49,32 @@ fn failure(kind: FailureKind, file: Option<PathBuf>, field: &'static str) -> Fai
     Failure { kind, file, field }
 }
 
-/// Resolve before authentication or configuration creation. Never creates a directory.
-pub fn resolve(options: &ProjectOptions) -> Result<PreparedProject, Failure> {
+/// Resolve only the directory, before authentication or configuration creation.
+/// Never creates a directory. Display names are not checked here: a saved profile
+/// may still supply them in `prepare`, so a root without a folder name must not
+/// stop setup before sign-in.
+pub fn resolve_root(options: &ProjectOptions) -> Result<PathBuf, Failure> {
     let requested = options
         .path
         .clone()
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)
         .map_err(|_| failure(FailureKind::InvalidPath, None, "project.path"))?;
-    let root = agent_profile::project(&requested)
+    agent_profile::project(&requested)
         .map(PathBuf::from)
-        .map_err(|_| failure(FailureKind::InvalidPath, Some(requested), "project.path"))?;
+        .map_err(|_| failure(FailureKind::InvalidPath, Some(requested), "project.path"))
+}
+
+/// Resolve the directory and the explicit or folder-derived names, validated.
+pub fn resolve(options: &ProjectOptions) -> Result<PreparedProject, Failure> {
+    let prepared = defaults(options)?;
+    validate_metadata(&prepared.metadata)?;
+    Ok(prepared)
+}
+
+/// Unvalidated defaults; callers validate after any saved metadata is merged.
+fn defaults(options: &ProjectOptions) -> Result<PreparedProject, Failure> {
+    let root = resolve_root(options)?;
     let folder = root
         .file_name()
         .and_then(|name| name.to_str())
@@ -76,7 +91,6 @@ pub fn resolve(options: &ProjectOptions) -> Result<PreparedProject, Failure> {
             .unwrap_or_else(|| truncate(folder, 100)),
         role_description: options.role_description.clone(),
     };
-    validate_metadata(&metadata)?;
     Ok(PreparedProject {
         root,
         metadata,
@@ -120,7 +134,7 @@ fn validate_metadata(metadata: &AgentMetadata) -> Result<(), Failure> {
 
 /// Compare under the same control lock used by profile writers. No profile is saved here.
 pub fn prepare(config_path: &Path, options: &ProjectOptions) -> Result<PreparedProject, Failure> {
-    let mut prepared = resolve(options)?;
+    let mut prepared = defaults(options)?;
     let lock = config::state_directory(config_path).join("control.lock");
     let _guard = config::try_lock(&lock)
         .map_err(|_| failure(FailureKind::Storage, Some(lock.clone()), "project.path"))?
@@ -157,9 +171,10 @@ pub fn prepare(config_path: &Path, options: &ProjectOptions) -> Result<PreparedP
             if options.role_description.is_none() {
                 prepared.metadata.role_description = metadata.role_description;
             }
-            validate_metadata(&prepared.metadata)?;
         }
         prepared.reused = true;
     }
+    // Validate once, after saved names had the chance to fill an empty folder default.
+    validate_metadata(&prepared.metadata)?;
     Ok(prepared)
 }

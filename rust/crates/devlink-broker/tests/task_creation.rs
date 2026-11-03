@@ -838,29 +838,17 @@ async fn known_task_identity_survives_response_validation_errors() {
 }
 
 #[tokio::test]
-async fn oversized_prompt_is_rejected_before_persistence_and_legacy_maximum_fits_delivery() {
+async fn oversized_prompt_is_rejected_before_persistence_or_central_creation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
     let remote = Central::start(&path).await;
     let broker = Broker::start(&path, &remote, Duration::from_secs(1)).await;
     let session = broker.claim("host", true).await;
-    // A prompt beyond the local 128 KiB request limit is refused before any key
-    // is minted or central is called. The central frame limit stays above that
-    // request limit, so nothing this broker forwards can exceed the
-    // TASK_CREATED/TASK_COMPLETED frame it must later receive.
-    let mut oversized = request(&session, "oversized-canonical");
-    oversized["arguments"] = json!({"receiverAgentId":"13","prompt":"x".repeat(128 * 1024)});
-    assert_eq!(broker.post("/v1/tasks/create", &oversized).await.0, 413);
-    assert!(remote.state.calls.lock().await.is_empty());
-    assert!(!TaskRequests::path(&path).exists());
-    // The largest legacy MCP inputs (200 + 16,000 + 16,000 characters with
-    // worst-case UTF-8 or escaped bytes) fit the frame limit and are delivered.
     for (index, description, context) in [
         (1, "한".repeat(16_000), "글".repeat(16_000)),
         (2, "\u{0001}".repeat(16_000), "context".into()),
-        (3, "\"".repeat(16_000), "context".into()),
     ] {
-        let mut body = request(&session, &format!("legacy-maximum-{index}"));
+        let mut body = request(&session, &format!("oversized-{index}"));
         body["arguments"]["description"] = json!(description);
         body["arguments"]["taskContext"] = json!(context);
         assert!(serde_json::to_vec(&body).unwrap().len() < 128 * 1024);
@@ -871,12 +859,18 @@ async fn oversized_prompt_is_rejected_before_persistence_and_legacy_maximum_fits
             "prompt":prompt,"created_at":"2026-10-29T09:00:00"}});
         assert!(
             serde_json::to_vec(&wire).unwrap().len()
-                <= devlink_broker::protocol::MAX_CENTRAL_MESSAGE_BYTES
+                > devlink_broker::protocol::MAX_CENTRAL_MESSAGE_BYTES
         );
         let (status, result) = broker.post("/v1/tasks/create", &body).await;
-        assert_eq!(status, 200, "{result}");
+        assert_eq!(status, 400);
+        assert_eq!(result["error"]["code"], "VALIDATION_FAILED");
     }
-    assert_eq!(remote.state.calls.lock().await.len(), 3);
+    assert!(remote.state.calls.lock().await.is_empty());
+    assert!(!TaskRequests::path(&path).exists());
+    let mut valid = request(&session, "escaped-but-deliverable");
+    valid["arguments"]["description"] = json!("\"".repeat(16_000));
+    valid["arguments"]["taskContext"] = json!("context");
+    assert_eq!(broker.post("/v1/tasks/create", &valid).await.0, 200);
     broker.stop().await;
 }
 

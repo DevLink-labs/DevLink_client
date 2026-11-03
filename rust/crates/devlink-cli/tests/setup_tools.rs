@@ -376,6 +376,80 @@ async fn interactive_selection_emits_detected_choices_and_resumes_only_the_tool_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requested_tool_is_probed_alone_and_other_hosts_are_never_launched() {
+    let f = fixture().await;
+    let directory = f._root.path().join("tools");
+    let codex = tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
+    let claude = tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages = prepare(&f, &directory)
+        .await
+        .with_tool(Some(ToolType::Codex), None);
+    assert!(matches!(
+        stages.execute(Step::SelectTool, &context).await,
+        StepResult::Complete { .. }
+    ));
+    assert_eq!(stages.tool().unwrap().tool_type, ToolType::Codex);
+    assert_eq!(
+        fs::read_to_string(codex.with_extension("calls")).unwrap(),
+        "--version\n"
+    );
+    assert!(!claude.with_extension("calls").exists());
+    // The saved choice is probed first on a rerun; the other host is still untouched.
+    let mut again = prepare(&f, &directory).await;
+    assert!(matches!(
+        again.execute(Step::SelectTool, &context).await,
+        StepResult::Complete { reused: true, .. }
+    ));
+    assert_eq!(
+        fs::read_to_string(codex.with_extension("calls")).unwrap(),
+        "--version\n--version\n"
+    );
+    assert!(!claude.with_extension("calls").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_interactive_choice_reprobes_only_the_chosen_tool() {
+    let f = fixture().await;
+    let directory = f._root.path().join("tools");
+    let codex = tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
+    let claude = tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    let stages = SetupStages::default()
+        .with_project(devlink_broker::setup_project::ProjectOptions {
+            path: Some(f._root.path().to_path_buf()),
+            ..Default::default()
+        })
+        .with_tool_search(search(&directory))
+        .with_tool_input(ChooseClaude);
+    let result = setup::run(
+        &SetupContext {
+            config_path: f.path.clone(),
+        },
+        stages,
+        |_| Ok(()),
+    )
+    .await;
+    assert_eq!(result.exit_code, 3, "{:?}", result.status);
+    // Both hosts are probed once to build the choice list; after the choice only
+    // Claude Code is probed again, so a host removed during input is still caught.
+    assert_eq!(
+        fs::read_to_string(codex.with_extension("calls")).unwrap(),
+        "--version\n"
+    );
+    assert_eq!(
+        fs::read_to_string(claude.with_extension("calls")).unwrap(),
+        "--version\n--version\n"
+    );
+    assert!(setup_tools::path(&f.path).exists());
+    let Completion::Failure { error } = result.completion else {
+        panic!("Registration is not connected")
+    };
+    assert_eq!(error.step, Step::RegisterAgent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_tools_returns_installation_links_and_next_action_without_saving() {
     let f = fixture().await;
     let directory = f._root.path().join("empty");

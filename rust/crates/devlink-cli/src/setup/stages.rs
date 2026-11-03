@@ -16,28 +16,56 @@ use devlink_broker::{
 };
 
 /// Production setup stages. Each completed feature is connected here incrementally.
+/// Per-stage state lives in small structs, so swapping one input adapter moves a
+/// handful of fields and a new stage adds its own struct instead of touching three
+/// field lists.
 pub struct SetupStages<I = NoLoginInput, T = NoTeamInput, U = NoToolInput> {
-    prepared: Option<PreparedConfig>,
     input: I,
+    team_input: T,
+    tool_input: U,
+    prepared: Option<PreparedConfig>,
+    auth: AuthState,
+    teams: TeamState,
+    project: ProjectState,
+    tools: ToolState,
+    broker: BrokerState,
+}
+
+#[derive(Default)]
+struct AuthState {
     credentials: Option<LoginCredentials>,
     user: Option<User>,
-    team_input: T,
-    requested_team: Option<u64>,
-    team_choices: Vec<TeamChoice>,
-    waiting_team: bool,
-    team: Option<Team>,
-    project_options: ProjectOptions,
-    project: Option<PreparedProject>,
-    tool_input: U,
-    requested_tool: Option<ToolType>,
-    tool_path: Option<std::path::PathBuf>,
-    tool_search: ToolSearch,
-    tool_reports: Vec<ToolDetection>,
-    tool_snapshot: Option<SelectionSnapshot>,
-    waiting_tool: bool,
-    tool: Option<SelectedTool>,
-    broker_executable: Option<std::path::PathBuf>,
-    broker: Option<broker_control::StartResult>,
+}
+
+#[derive(Default)]
+struct TeamState {
+    requested: Option<u64>,
+    choices: Vec<TeamChoice>,
+    waiting: bool,
+    selected: Option<Team>,
+}
+
+#[derive(Default)]
+struct ProjectState {
+    options: ProjectOptions,
+    prepared: Option<PreparedProject>,
+}
+
+#[derive(Default)]
+struct ToolState {
+    requested: Option<ToolType>,
+    path: Option<std::path::PathBuf>,
+    search: ToolSearch,
+    reports: Vec<ToolDetection>,
+    snapshot: Option<SelectionSnapshot>,
+    waiting: bool,
+    selected: Option<SelectedTool>,
+}
+
+#[derive(Default)]
+struct BrokerState {
+    executable: Option<std::path::PathBuf>,
+    result: Option<broker_control::StartResult>,
 }
 
 impl Default for SetupStages<NoLoginInput> {
@@ -49,27 +77,15 @@ impl Default for SetupStages<NoLoginInput> {
 impl<I> SetupStages<I, NoTeamInput> {
     pub fn new(input: I) -> Self {
         Self {
-            prepared: None,
             input,
-            credentials: None,
-            user: None,
             team_input: NoTeamInput,
-            requested_team: None,
-            team_choices: Vec::new(),
-            waiting_team: false,
-            team: None,
-            project_options: ProjectOptions::default(),
-            project: None,
             tool_input: NoToolInput,
-            requested_tool: None,
-            tool_path: None,
-            tool_search: ToolSearch::default(),
-            tool_reports: Vec::new(),
-            tool_snapshot: None,
-            waiting_tool: false,
-            tool: None,
-            broker_executable: None,
-            broker: None,
+            prepared: None,
+            auth: AuthState::default(),
+            teams: TeamState::default(),
+            project: ProjectState::default(),
+            tools: ToolState::default(),
+            broker: BrokerState::default(),
         }
     }
 }
@@ -77,94 +93,70 @@ impl<I> SetupStages<I, NoTeamInput> {
 impl<I, T, U> SetupStages<I, T, U> {
     pub fn with_team_input<V>(self, input: V) -> SetupStages<I, V, U> {
         SetupStages {
-            prepared: self.prepared,
             input: self.input,
-            credentials: self.credentials,
-            user: self.user,
             team_input: input,
-            requested_team: self.requested_team,
-            team_choices: self.team_choices,
-            waiting_team: self.waiting_team,
-            team: self.team,
-            project_options: self.project_options,
-            project: self.project,
             tool_input: self.tool_input,
-            requested_tool: self.requested_tool,
-            tool_path: self.tool_path,
-            tool_search: self.tool_search,
-            tool_reports: self.tool_reports,
-            tool_snapshot: self.tool_snapshot,
-            waiting_tool: self.waiting_tool,
-            tool: self.tool,
-            broker_executable: self.broker_executable,
+            prepared: self.prepared,
+            auth: self.auth,
+            teams: self.teams,
+            project: self.project,
+            tools: self.tools,
             broker: self.broker,
         }
     }
 
     pub fn with_tool_input<V>(self, input: V) -> SetupStages<I, T, V> {
         SetupStages {
-            prepared: self.prepared,
             input: self.input,
-            credentials: self.credentials,
-            user: self.user,
             team_input: self.team_input,
-            requested_team: self.requested_team,
-            team_choices: self.team_choices,
-            waiting_team: self.waiting_team,
-            team: self.team,
-            project_options: self.project_options,
-            project: self.project,
             tool_input: input,
-            requested_tool: self.requested_tool,
-            tool_path: self.tool_path,
-            tool_search: self.tool_search,
-            tool_reports: self.tool_reports,
-            tool_snapshot: self.tool_snapshot,
-            waiting_tool: self.waiting_tool,
-            tool: self.tool,
-            broker_executable: self.broker_executable,
+            prepared: self.prepared,
+            auth: self.auth,
+            teams: self.teams,
+            project: self.project,
+            tools: self.tools,
             broker: self.broker,
         }
     }
     pub fn with_tool(mut self, tool: Option<ToolType>, path: Option<std::path::PathBuf>) -> Self {
-        self.requested_tool = tool;
-        self.tool_path = path;
+        self.tools.requested = tool;
+        self.tools.path = path;
         self
     }
     pub fn with_tool_search(mut self, search: ToolSearch) -> Self {
-        self.tool_search = search;
+        self.tools.search = search;
         self
     }
     pub fn tool(&self) -> Option<&SelectedTool> {
-        self.tool.as_ref()
+        self.tools.selected.as_ref()
     }
 
     /// Non-CLI callers must supply the actual devlink executable, not their host process.
     pub fn with_broker_executable(mut self, executable: std::path::PathBuf) -> Self {
-        self.broker_executable = Some(executable);
+        self.broker.executable = Some(executable);
         self
     }
 
     pub fn broker(&self) -> Option<&broker_control::StartResult> {
-        self.broker.as_ref()
+        self.broker.result.as_ref()
     }
 
     pub fn with_team_id(mut self, id: Option<u64>) -> Self {
-        self.requested_team = id;
+        self.teams.requested = id;
         self
     }
 
     pub fn with_project(mut self, options: ProjectOptions) -> Self {
-        self.project_options = options;
+        self.project.options = options;
         self
     }
 
     pub fn project(&self) -> Option<&PreparedProject> {
-        self.project.as_ref()
+        self.project.prepared.as_ref()
     }
 
     pub fn team(&self) -> Option<&Team> {
-        self.team.as_ref()
+        self.teams.selected.as_ref()
     }
 
     pub fn configuration(&self) -> Option<&PreparedConfig> {
@@ -172,7 +164,7 @@ impl<I, T, U> SetupStages<I, T, U> {
     }
 
     pub fn user(&self) -> Option<&User> {
-        self.user.as_ref()
+        self.auth.user.as_ref()
     }
 }
 
@@ -191,7 +183,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
         }
         if step == Step::StartBroker {
             let executable = self
-                .broker_executable
+                .broker
+                .executable
                 .clone()
                 .map(Ok)
                 .unwrap_or_else(std::env::current_exe);
@@ -202,7 +195,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
             return match result {
                 Ok(result) => {
                     let reused = result.reused;
-                    self.broker = Some(result);
+                    self.broker.result = Some(result);
                     StepResult::Complete {
                         outcome: if reused {
                             Outcome::NotApplied
@@ -214,16 +207,17 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
                 }
                 Err(error) => {
                     let mut safe = broker_error(&context.config_path, &error);
-                    safe.known.user_id = self.user.as_ref().map(|u| u.user_id.to_string());
-                    safe.known.team_id = self.team.as_ref().map(|t| t.team_id.to_string());
-                    safe.known.tool_type = self.tool.as_ref().map(|t| t.tool_type);
+                    safe.known.user_id = self.auth.user.as_ref().map(|u| u.user_id.to_string());
+                    safe.known.team_id =
+                        self.teams.selected.as_ref().map(|t| t.team_id.to_string());
+                    safe.known.tool_type = self.tools.selected.as_ref().map(|t| t.tool_type);
                     StepResult::Failed(safe)
                 }
             };
         }
         if step == Step::BindProject {
             let path = context.config_path.clone();
-            let options = self.project_options.clone();
+            let options = self.project.options.clone();
             return match tokio::task::spawn_blocking(move || {
                 setup_project::prepare(&path, &options)
             })
@@ -231,7 +225,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
             {
                 Ok(Ok(project)) => {
                     let reused = project.reused;
-                    self.project = Some(project);
+                    self.project.prepared = Some(project);
                     StepResult::Complete {
                         outcome: Outcome::NotApplied,
                         reused,
@@ -239,8 +233,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
                 }
                 Ok(Err(failure)) => {
                     let mut error = project_error(step, failure);
-                    error.known.user_id = self.user.as_ref().map(|u| u.user_id.to_string());
-                    error.known.team_id = self.team.as_ref().map(|t| t.team_id.to_string());
+                    error.known.user_id = self.auth.user.as_ref().map(|u| u.user_id.to_string());
+                    error.known.team_id =
+                        self.teams.selected.as_ref().map(|t| t.team_id.to_string());
                     StepResult::Failed(error)
                 }
                 Err(_) => StepResult::Failed(SetupError::new(
@@ -252,22 +247,24 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
         }
         if step != Step::Validate {
             let mut error = SetupError::new(ErrorCode::StepUnavailable, step, Outcome::NotApplied);
-            if let Some(user) = &self.user {
+            if let Some(user) = &self.auth.user {
                 error.known.user_id = Some(user.user_id.to_string());
             }
-            if let Some(team) = &self.team {
+            if let Some(team) = &self.teams.selected {
                 error.known.team_id = Some(team.team_id.to_string());
             }
-            error.tools = self.tool_reports.clone();
-            error.known.tool_type = self.tool.as_ref().map(|s| s.tool_type);
+            error.tools = self.tools.reports.clone();
+            error.known.tool_type = self.tools.selected.as_ref().map(|s| s.tool_type);
             return StepResult::Failed(error);
         }
-        // Reject invalid local input before initializing settings or contacting central.
-        let options = self.project_options.clone();
-        match tokio::task::spawn_blocking(move || setup_project::resolve(&options)).await {
-            Ok(Ok(project)) => {
+        // Reject an invalid directory before initializing settings or contacting
+        // central. Display names wait for BindProject, where a saved profile may
+        // still supply them (a filesystem root has no folder name to default from).
+        let options = self.project.options.clone();
+        match tokio::task::spawn_blocking(move || setup_project::resolve_root(&options)).await {
+            Ok(Ok(root)) => {
                 // Freeze cwd now; later stages must not resolve a relative path again.
-                self.project_options.path = Some(project.root.clone());
+                self.project.options.path = Some(root);
             }
             Ok(Err(failure)) => return StepResult::Failed(project_error(step, failure)),
             Err(_) => {
@@ -324,18 +321,18 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
     }
 
     fn can_resolve_input(&self) -> bool {
-        if self.waiting_tool {
+        if self.tools.waiting {
             self.tool_input.available()
-        } else if self.waiting_team {
+        } else if self.teams.waiting {
             self.team_input.available()
         } else {
             self.input.available()
         }
     }
     fn input_is_interactive(&self) -> bool {
-        if self.waiting_tool {
+        if self.tools.waiting {
             self.tool_input.interactive()
-        } else if self.waiting_team {
+        } else if self.teams.waiting {
             self.team_input.interactive()
         } else {
             self.input.interactive()
@@ -344,14 +341,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
 
     async fn resolve_input(&mut self, required: &SetupError) -> Result<(), SetupError> {
         if required.step == Step::SelectTool {
-            let code = match self.tool_input.request(&self.tool_reports).await {
+            let code = match self.tool_input.request(&self.tools.reports).await {
                 Ok(tool)
                     if self
-                        .tool_reports
+                        .tools
+                        .reports
                         .iter()
                         .any(|r| r.tool_type == tool && r.selected.is_some()) =>
                 {
-                    self.requested_tool = Some(tool);
+                    self.tools.requested = Some(tool);
                     return Ok(());
                 }
                 Ok(_) | Err(ToolInputError::Invalid) => ErrorCode::InputInvalid,
@@ -361,13 +359,13 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
             };
             let mut error = SetupError::new(code, Step::SelectTool, Outcome::NotApplied);
             error.known = required.known.clone();
-            error.tools = self.tool_reports.clone();
+            error.tools = self.tools.reports.clone();
             return Err(error);
         }
         if required.step == Step::SelectTeam {
-            let code = match self.team_input.request(&self.team_choices).await {
+            let code = match self.team_input.request(&self.teams.choices).await {
                 Ok(id) => {
-                    self.requested_team = Some(id);
+                    self.teams.requested = Some(id);
                     return Ok(());
                 }
                 Err(TeamInputError::Unavailable) => return Err(required.clone()),
@@ -381,7 +379,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
         }
         let code = match self.input.request().await {
             Ok(credentials) => {
-                self.credentials = Some(credentials);
+                self.auth.credentials = Some(credentials);
                 return Ok(());
             }
             Err(LoginInputError::Unavailable) => return Err(required.clone()),
@@ -430,6 +428,8 @@ fn broker_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
         Some(FailureKind::InvalidConfig) => ErrorCode::ConfigInvalid,
         Some(FailureKind::ConfigBusy) => ErrorCode::ConfigBusy,
         Some(FailureKind::BrokerBusy) => ErrorCode::BrokerBusy,
+        // Lock held, runtime not yet published: retryable like a running broker.
+        Some(FailureKind::BrokerStarting) => ErrorCode::BrokerBusy,
         Some(
             FailureKind::ControlLockFailed | FailureKind::BrokerLockFailed | FailureKind::Storage,
         ) => ErrorCode::UnsafeFile,
@@ -456,9 +456,12 @@ fn broker_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
 
 impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
     async fn select_tool(&mut self, context: &SetupContext) -> StepResult {
-        let (Some(config), Some(user), Some(team), Some(project)) =
-            (&self.prepared, &self.user, &self.team, &self.project)
-        else {
+        let (Some(config), Some(user), Some(team), Some(project)) = (
+            &self.prepared,
+            &self.auth.user,
+            &self.teams.selected,
+            &self.project.prepared,
+        ) else {
             return StepResult::Failed(SetupError::new(
                 ErrorCode::InternalError,
                 Step::SelectTool,
@@ -491,7 +494,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
                     ));
                 }
             };
-        if self.waiting_tool && self.tool_snapshot.as_ref() != Some(&snapshot) {
+        if self.tools.waiting && self.tools.snapshot.as_ref() != Some(&snapshot) {
             return self.tool_failure(SetupError::new(
                 ErrorCode::ToolSelectionConflict,
                 Step::SelectTool,
@@ -499,7 +502,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
             ));
         }
         if snapshot.bound_tool.is_some_and(|bound| {
-            self.requested_tool
+            self.tools
+                .requested
                 .is_some_and(|requested| requested != bound)
         }) {
             return self.tool_failure(SetupError::new(
@@ -509,21 +513,53 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
             ));
         }
         let preferred = snapshot.preferred();
-        let requested = self
-            .requested_tool
-            .or(snapshot.bound_tool)
-            .or_else(|| preferred.map(|s| s.tool_type));
-        self.tool_reports = self
-            .tool_search
-            .detect(preferred, requested.zip(self.tool_path.as_deref()))
-            .await;
+        let pinned = self.tools.requested.or(snapshot.bound_tool);
+        let requested = pinned.or_else(|| preferred.map(|s| s.tool_type));
+        let explicit = requested.zip(self.tools.path.as_deref());
+        // Probe only what is needed. A pinned tool (explicit, bound, or just chosen)
+        // is probed alone, so a host removed during input is still caught while the
+        // other host's earlier report stays in the choice list. A saved, unbound
+        // choice is probed first; the full scan runs only when it is gone.
+        self.tools.reports = match (pinned, requested) {
+            (Some(tool), _) => {
+                let report = self
+                    .tools
+                    .search
+                    .detect_one(tool, preferred, explicit)
+                    .await;
+                let mut reports = if self.tools.waiting {
+                    std::mem::take(&mut self.tools.reports)
+                } else {
+                    Vec::new()
+                };
+                match reports.iter_mut().find(|r| r.tool_type == tool) {
+                    Some(slot) => *slot = report,
+                    None => reports.push(report),
+                }
+                reports
+            }
+            (None, Some(tool)) => {
+                let report = self
+                    .tools
+                    .search
+                    .detect_one(tool, preferred, explicit)
+                    .await;
+                if report.selected.is_some() {
+                    vec![report]
+                } else {
+                    self.tools.search.detect(preferred, explicit).await
+                }
+            }
+            (None, None) => self.tools.search.detect(preferred, explicit).await,
+        };
         let mut selected = requested.and_then(|tool| {
-            self.tool_reports
+            self.tools
+                .reports
                 .iter()
                 .find(|r| r.tool_type == tool)
                 .and_then(|r| r.selected.clone())
         });
-        if selected.is_none() && (self.requested_tool.is_some() || snapshot.bound_tool.is_some()) {
+        if selected.is_none() && (self.tools.requested.is_some() || snapshot.bound_tool.is_some()) {
             return self.tool_failure(SetupError::new(
                 ErrorCode::ToolUnavailable,
                 Step::SelectTool,
@@ -532,7 +568,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
         }
         if selected.is_none() {
             let available: Vec<_> = self
-                .tool_reports
+                .tools
+                .reports
                 .iter()
                 .filter_map(|r| r.selected.clone())
                 .collect();
@@ -546,8 +583,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
                     ));
                 }
                 _ => {
-                    self.tool_snapshot = Some(snapshot);
-                    self.waiting_tool = true;
+                    self.tools.snapshot = Some(snapshot);
+                    self.tools.waiting = true;
                     let mut error = SetupError::new(
                         ErrorCode::ToolRequired,
                         Step::SelectTool,
@@ -577,8 +614,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
             .await
         {
             Ok(Ok(reused)) => {
-                self.tool = Some(selected);
-                self.waiting_tool = false;
+                self.tools.selected = Some(selected);
+                self.tools.waiting = false;
                 StepResult::Complete {
                     outcome: if reused {
                         Outcome::NotApplied
@@ -602,14 +639,14 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
     }
 
     fn tool_error(&self, mut error: SetupError) -> SetupError {
-        error.known.user_id = self.user.as_ref().map(|u| u.user_id.to_string());
-        error.known.team_id = self.team.as_ref().map(|t| t.team_id.to_string());
-        error.tools = self.tool_reports.clone();
+        error.known.user_id = self.auth.user.as_ref().map(|u| u.user_id.to_string());
+        error.known.team_id = self.teams.selected.as_ref().map(|t| t.team_id.to_string());
+        error.tools = self.tools.reports.clone();
         error
     }
 
     async fn select_team(&mut self, context: &SetupContext) -> StepResult {
-        let (Some(prepared), Some(user)) = (&self.prepared, &self.user) else {
+        let (Some(prepared), Some(user)) = (&self.prepared, &self.auth.user) else {
             return StepResult::Failed(SetupError::new(
                 ErrorCode::InternalError,
                 Step::SelectTeam,
@@ -627,13 +664,13 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
             &context.config_path,
             origin.as_str(),
             user.user_id,
-            self.requested_team,
+            self.teams.requested,
         )
         .await;
         let mut error = match result {
             Ok(SetupSelection::Selected { team, reused }) => {
-                self.team = Some(team);
-                self.waiting_team = false;
+                self.teams.selected = Some(team);
+                self.teams.waiting = false;
                 return StepResult::Complete {
                     outcome: if reused {
                         Outcome::NotApplied
@@ -644,14 +681,14 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
                 };
             }
             Ok(SetupSelection::Choose(teams)) => {
-                self.team_choices = teams
+                self.teams.choices = teams
                     .into_iter()
                     .map(|team| TeamChoice {
                         id: team.team_id.to_string(),
                         name: team.name,
                     })
                     .collect();
-                self.waiting_team = true;
+                self.teams.waiting = true;
                 let mut required = SetupError::new(
                     ErrorCode::TeamRequired,
                     Step::SelectTeam,
@@ -663,7 +700,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
                     secret: false,
                     source: InputSource::VerifiedTeamList,
                 }];
-                required.team_choices = self.team_choices.clone();
+                required.team_choices = self.teams.choices.clone();
                 required.known.user_id = Some(user.user_id.to_string());
                 return StepResult::InputRequired(required);
             }
@@ -698,15 +735,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
         match checked {
             Ok(SessionCheck::Authenticated(user)) => {
                 // Another process may have signed in while input was being collected.
-                self.credentials = None;
-                self.user = Some(user);
+                self.auth.credentials = None;
+                self.auth.user = Some(user);
                 StepResult::Complete {
                     outcome: Outcome::Applied,
                     reused: true,
                 }
             }
             Ok(SessionCheck::LoginRequired { expired_now }) => {
-                let Some(credentials) = self.credentials.take() else {
+                let Some(credentials) = self.auth.credentials.take() else {
                     let mut error = SetupError::new(
                         ErrorCode::AuthRequired,
                         Step::Authenticate,
@@ -741,7 +778,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
                 .await
                 {
                     Ok(login) => {
-                        self.user = Some(login.user);
+                        self.auth.user = Some(login.user);
                         StepResult::Complete {
                             outcome: Outcome::Applied,
                             reused: login.reused,
