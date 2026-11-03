@@ -10,6 +10,7 @@ export const operationRoutes = {
   complete_task: '/v1/tasks/complete',
   get_tasks: '/v1/tasks/list',
   get_task_result: '/v1/tasks/result',
+  get_updates: '/v1/updates',
 } as const;
 export type BrokerOperation = keyof typeof operationRoutes;
 

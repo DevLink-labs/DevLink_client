@@ -727,6 +727,70 @@ impl SessionManager {
         self.authorize_context(id, expected, false).await
     }
 
+    /// Authorization for reads of locally stored data only. Keeps the same local
+    /// ownership, expiry, replacement and subject-change checks as `authorize`, but
+    /// never requires a live central connection and never performs central IO: a
+    /// transient disconnect or an unconfirmed legacy READY of the same Agent is
+    /// served from the verified local session. Authentication failure and a
+    /// different connected subject still reject.
+    pub async fn authorize_local_read(
+        &self,
+        id: &Identifier,
+        expected: &Principal,
+    ) -> Result<Principal, SessionError> {
+        let mut registry = self.registry.lock().await;
+        if !self.identity.requires_current_ready() {
+            registry.expire(Instant::now());
+            let result = registry.authorize_context(id, expected, false);
+            registry.publish_presence(&self.central);
+            return result;
+        }
+        self.central
+            .with_ready_context(|status, identity, epoch| {
+                // A subject change or authentication rejection bumps the epoch and
+                // invalidates every local session before any read.
+                registry.sync_subject(epoch);
+                registry.expire(Instant::now());
+                let confirmed = ready_principal(status, identity).is_ok();
+                let result =
+                    registry
+                        .authorize_context(id, expected, false)
+                        .and_then(|principal| {
+                            if status == ConnectionStatus::AuthFailed {
+                                return Err(SessionError::Identity(IdentityError::Unauthenticated));
+                            }
+                            // Compare only what the current connection asserts; a legacy
+                            // READY without user/team is not resolved here.
+                            let differs = |asserted: Option<u64>, local: Option<&Identifier>| {
+                                asserted.is_some_and(|value| {
+                                    local.is_none_or(|local| value.to_string() != local.as_str())
+                                })
+                            };
+                            if status == ConnectionStatus::Connected
+                                && identity.is_some_and(|current| {
+                                    differs(Some(current.agent_id), principal.agent_id.as_ref())
+                                        || differs(current.user_id, Some(&principal.user_id))
+                                        || differs(current.team_id, Some(&principal.team_id))
+                                })
+                            {
+                                return Err(SessionError::Identity(IdentityError::Forbidden));
+                            }
+                            Ok(principal)
+                        });
+                // Same presence rule as other registry operations: an unconfirmed
+                // legacy reconnect never republishes old ONLINE ownership.
+                if self.identity.requires_live_check() && !confirmed {
+                    if registry.observed {
+                        self.central.set_presence(PresenceStatus::Offline);
+                    }
+                } else {
+                    registry.publish_presence(&self.central);
+                }
+                result
+            })
+            .await
+    }
+
     /// Only register_agent may confirm the current bootstrap Agent before bind.
     pub async fn authorize_registration(
         &self,
