@@ -169,6 +169,17 @@ pub fn session_path(config_path: &Path) -> PathBuf {
     config::state_directory(config_path).join("user-session.json")
 }
 
+/// Local setup continuity only; this does not replace a live central identity check.
+pub(crate) fn setup_session_matches(
+    config_path: &Path,
+    origin: &str,
+    user_id: u64,
+) -> Result<bool> {
+    Ok(private_file::read::<Snapshot>(&session_path(config_path), LIMIT)?.is_some_and(|s|
+        s.schema_version == 1 && s.origin == origin && matches!(s.state,
+            SessionState::Authenticated { user, cookie } if user.user_id == user_id && valid_user(&user) && valid_cookie(&cookie))))
+}
+
 pub fn validate_config(config_path: &Path) -> Result<()> {
     config_origin(config_path).map(|_| ())
 }

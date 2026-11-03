@@ -18,8 +18,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use std::{path::Path, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::RwLock, time::timeout};
+use std::{fs::File, path::Path, sync::Arc, time::Duration};
+use tokio::{
+    net::TcpListener,
+    sync::RwLock,
+    time::{Instant, sleep, timeout},
+};
 use tokio_util::sync::CancellationToken;
 
 /// 로컬 HTTP API 핸들러에서 공유하는 상태
@@ -63,7 +67,7 @@ pub async fn run(path: &Path) -> Result<()> {
     // 설정 로드 및 환경변수 토큰 확인
     let config = Config::load(path)?;
     // 중복 실행 방지를 위한 파일 락 획득 (broker.lock)
-    let _lock = config::lock(&state_directory(path).join("broker.lock"))?;
+    let _lock = startup_lock(path).await?;
     let prepared = crate::agent_profile::prepare_broker(path).await?;
     let (token, _owner_guard) = match prepared {
         Some(identity) => (identity.token, Some(identity._owner)),
@@ -223,6 +227,23 @@ pub async fn run(path: &Path) -> Result<()> {
     result.context("Broker HTTP server failed")
 }
 
+/// A status probe may briefly own broker.lock while cleaning stale discovery.
+/// Retry only contention; unsafe paths and I/O errors still fail immediately.
+async fn startup_lock(path: &Path) -> Result<File> {
+    let lock = state_directory(path).join("broker.lock");
+    let deadline = Instant::now() + Duration::from_millis(200);
+    loop {
+        if let Some(guard) = config::try_lock(&lock)? {
+            return Ok(guard);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Another DevLink operation is running"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// 환경변수 `DEVLINK_TOKEN`에서 중앙 서버 인증 토큰을 읽어와 유효성을 검증합니다.
 pub fn central_token() -> Result<String> {
     let token = std::env::var("DEVLINK_TOKEN")
@@ -335,6 +356,54 @@ async fn termination_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_lock_waits_for_a_short_probe_then_acquires() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        config::init(&path).unwrap();
+        let probe = config::lock(&state_directory(&path).join("broker.lock")).unwrap();
+        let pending = startup_lock(&path);
+        tokio::pin!(pending);
+        assert!(
+            timeout(Duration::from_millis(30), &mut pending)
+                .await
+                .is_err()
+        );
+        drop(probe);
+        let acquired = pending.await.unwrap();
+        assert!(
+            config::try_lock(&state_directory(&path).join("broker.lock"))
+                .unwrap()
+                .is_none()
+        );
+        drop(acquired);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_lock_stays_bounded_for_persistent_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        config::init(&path).unwrap();
+        let _probe = config::lock(&state_directory(&path).join("broker.lock")).unwrap();
+        let began = Instant::now();
+        assert_eq!(
+            startup_lock(&path).await.err().unwrap().to_string(),
+            "Another DevLink operation is running"
+        );
+        assert_eq!(began.elapsed(), Duration::from_millis(200));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_lock_does_not_retry_unsafe_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        config::init(&path).unwrap();
+        std::fs::create_dir(state_directory(&path).join("broker.lock")).unwrap();
+        let began = Instant::now();
+        assert!(startup_lock(&path).await.is_err());
+        assert_eq!(began.elapsed(), Duration::ZERO);
+    }
 
     #[test]
     fn runtime_guard_preserves_config_named_like_runtime_metadata() {

@@ -206,7 +206,7 @@ fn valid_token(token: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b))
 }
-fn project(path: &Path) -> Result<String> {
+pub(crate) fn project(path: &Path) -> Result<String> {
     let canonical = path
         .canonicalize()
         .map_err(|_| anyhow::anyhow!("Local project directory does not exist"))?;
@@ -223,6 +223,53 @@ fn load(config_path: &Path) -> Result<Option<Profile>> {
     }
     Ok(value)
 }
+
+pub(crate) struct ProjectBinding {
+    pub root: String,
+    pub metadata: Option<crate::setup_project::AgentMetadata>,
+    pub tool: Option<crate::sessions::ToolType>,
+    pub origin: String,
+    pub user_id: u64,
+    pub team_id: u64,
+}
+
+/// Local comparison only; never exposes the private state or Agent token.
+pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<ProjectBinding>> {
+    use crate::setup_project::AgentMetadata;
+    Ok(load(config_path)?.map(|profile| {
+        let metadata = match &profile.state {
+            State::Ready { agent, .. } | State::NeedsToken { agent } => Some(AgentMetadata {
+                project_name: agent.project_name.clone(),
+                agent_name: agent.name.clone(),
+                role_description: agent.role_description.clone(),
+            }),
+            State::CreatePending {
+                name, project_name, ..
+            } => Some(AgentMetadata {
+                project_name: project_name.clone(),
+                agent_name: name.clone(),
+                role_description: None,
+            }),
+            State::Vacant => None,
+        };
+        ProjectBinding {
+            root: profile.project_root,
+            metadata,
+            tool: match &profile.state {
+                State::Ready { agent, .. } | State::NeedsToken { agent } => Some(&agent.tool_type),
+                State::CreatePending { tool, .. } => Some(tool),
+                State::Vacant => None,
+            }
+            .map(|tool| match tool {
+                Tool::Codex => crate::sessions::ToolType::Codex,
+                Tool::ClaudeCode => crate::sessions::ToolType::ClaudeCode,
+            }),
+            origin: profile.origin,
+            user_id: profile.user_id,
+            team_id: profile.team_id,
+        }
+    }))
+}
 fn load_for_explicit_use(config_path: &Path) -> Result<Option<Profile>> {
     let Some(bytes) = private_file::read_bytes(&path(config_path), LIMIT)? else {
         return Ok(None);
@@ -236,39 +283,17 @@ fn save(config_path: &Path, profile: &Profile) -> Result<()> {
     private_file::write(&path(config_path), profile, LIMIT)
 }
 
-struct SetupGuard {
-    _control: File,
-    _broker: File,
-}
-fn stopped(config_path: &Path) -> Result<SetupGuard> {
-    let directory = config::state_directory(config_path);
-    credentials::ensure_safe_parent_directory(&directory)?;
-    let lock = directory.join("control.lock");
-    let guard = (|| {
-        if std::fs::symlink_metadata(&lock).is_ok() {
-            credentials::verify_path_safety(&lock)?;
-        }
-        config::try_lock(&lock)
-    })()
-    .map_err(|error| user_auth::classify(error, user_auth::AuthFaultKind::ControlLockFailed))?
-    .ok_or_else(|| {
-        user_auth::fault(
-            user_auth::AuthFaultKind::ConfigBusy,
-            "Another DevLink operation is running",
-        )
-    })?;
-    // Also synchronize with direct/internal broker startup before runtime.json exists.
-    let broker = config::try_lock(&directory.join("broker.lock"))
-        .map_err(|error| user_auth::classify(error, user_auth::AuthFaultKind::BrokerLockFailed))?
-        .ok_or_else(|| {
-            user_auth::fault(
-                user_auth::AuthFaultKind::BrokerBusy,
-                "Stop the broker before changing Agent credentials (running or starting)",
-            )
-        })?;
-    Ok(SetupGuard {
-        _control: guard,
-        _broker: broker,
+fn stopped(config_path: &Path) -> Result<crate::broker_control::StoppedGuard> {
+    use crate::broker_control::{self, Failure, FailureKind};
+    broker_control::require_stopped(config_path).map_err(|error| {
+        let kind = match error.downcast_ref::<Failure>().map(|f| f.kind) {
+            Some(FailureKind::ControlLockFailed) => user_auth::AuthFaultKind::ControlLockFailed,
+            Some(FailureKind::ConfigBusy) => user_auth::AuthFaultKind::ConfigBusy,
+            Some(FailureKind::BrokerLockFailed) => user_auth::AuthFaultKind::BrokerLockFailed,
+            Some(FailureKind::BrokerBusy) => user_auth::AuthFaultKind::BrokerBusy,
+            _ => return error,
+        };
+        user_auth::classify(error, kind)
     })
 }
 

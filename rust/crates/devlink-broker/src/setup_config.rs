@@ -196,6 +196,7 @@ fn inspect_snapshots(path: &Path) -> Result<(), Failure> {
         user_auth::session_path(path),
         teams::selection_path(path),
         agent_profile::path(path),
+        crate::setup_tools::path(path),
     ] {
         private_file::read::<serde_json::Value>(&file, LIMIT)
             .map_err(|_| Failure::new(FailureKind::UnsafeFile, &file))?;

@@ -1,17 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use devlink_broker::{
-    broker,
+    broker, broker_control,
     config::{self, Config, state_directory},
-    local::{self, Runtime},
 };
 use devlink_cli::setup::terminal::{self as setup_terminal, SetupArgs};
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::Duration,
-};
-use tokio::time::{Instant, sleep};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "devlink", version, about = "DevLink CLI and local broker")]
@@ -416,13 +410,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         },
         // 로컬 브로커 백그라운드 프로세스 시작
-        Commands::Start => start(&path).await?,
+        Commands::Start => {
+            let result = broker_control::start(&path, &std::env::current_exe()?).await?;
+            if result.reused {
+                println!("Broker already running");
+            } else {
+                println!("Broker started (PID: {})", result.health.pid);
+            }
+        }
         // 로컬 브로커 실행 여부 및 중앙 서버(WebSocket) 연결 상태 확인
         Commands::Status => {
-            if !local::running(&path)? {
-                println!("Local Broker  : Stopped\nCentral Server: Disconnected");
-            } else {
-                let health = Runtime::load(&path)?.health().await?;
+            if let broker_control::Status::Running { health } =
+                broker_control::status(&path).await?
+            {
                 println!(
                     "Local Broker  : Running (PID: {})\nCentral Server: {:?}",
                     health.pid, health.central_server
@@ -438,34 +438,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                         "Notification rejects: {count}; verify central details with get_task_result/get_tasks in the bound MCP session"
                     );
                 }
+            } else {
+                println!("Local Broker  : Stopped\nCentral Server: Disconnected");
             }
         }
         // 실행 중인 브로커 정상 종료 (Graceful shutdown)
-        Commands::Stop => {
-            if std::fs::symlink_metadata(state_directory(&path)).is_ok() {
-                devlink_broker::credentials::verify_parent_safety(&state_directory(&path))?;
-            }
-            if !state_directory(&path).exists() {
-                println!("Broker already stopped");
-                return Ok(());
-            }
-            // 중복 제어 방지를 위한 파일 락 획득
-            let _guard = config::lock(&state_directory(&path).join("control.lock"))?;
-            if !local::running(&path)? {
-                println!("Broker already stopped");
-                return Ok(());
-            }
-            // 종료 요청 전송 후 최대 8초간 정상 종료 대기
-            Runtime::load(&path)?.stop().await?;
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while local::running(&path)? {
-                if Instant::now() >= deadline {
-                    bail!("Broker shutdown timed out; process was not force-killed");
-                }
-                sleep(Duration::from_millis(50)).await;
-            }
-            println!("Broker stopped");
-        }
+        Commands::Stop => match broker_control::stop(&path).await? {
+            broker_control::StopResult::AlreadyStopped => println!("Broker already stopped"),
+            broker_control::StopResult::Stopped => println!("Broker stopped"),
+        },
         // MCP 자격 경로 조회 및 토큰 회전
         Commands::Mcp { command } => match command.unwrap_or(McpCommand::Path) {
             McpCommand::Path => {
@@ -478,94 +459,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
         // 포그라운드에서 직접 브로커 통신 루프 실행 (start 명령어로 생성된 자식 프로세스가 실행)
         Commands::Broker => broker::run(&path).await?,
-    }
-    Ok(())
-}
-
-/// 브로커를 터미널과 분리된 백그라운드 독립 프로세스로 구동하고 정상 기동을 검증합니다.
-async fn start(path: &Path) -> Result<()> {
-    Config::load(path)?;
-    let _guard = config::lock(&state_directory(path).join("control.lock"))?;
-    if local::running(path)? {
-        Runtime::load(path)?.health().await?;
-        println!("Broker already running");
-        return Ok(());
-    }
-    broker::central_token_for(path)?;
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .arg("--config")
-        .arg(path)
-        .arg("broker")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // Windows 파이프 핸들 상속 방지
-        prevent_stdio_inheritance()?;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: 콘솔 창 없는 독립 프로세스 그룹으로 분리
-        command.creation_flags(0x00000008 | 0x00000200);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().context("Cannot spawn broker process")?;
-    // Credential publication precedes runtime discovery. On Windows its three ACL
-    // checks can each succeed within 5 s and still exceed the former 8 s wait.
-    let startup_timeout = Duration::from_secs(8)
-        + devlink_broker::credentials::startup_validation_allowance()
-        + devlink_broker::agent_profile::startup_allowance(path);
-    let deadline = Instant::now() + startup_timeout;
-    // Poll process exit and authenticated readiness within the combined budget.
-    loop {
-        if let Some(_exit) = child.try_wait()? {
-            bail!(
-                "Broker exited during startup; check configuration and local port, or run devlink broker in foreground"
-            );
-        }
-        if let Ok(runtime) = Runtime::load(path)
-            && runtime.pid == child.id()
-            && runtime.health().await.is_ok()
-        {
-            println!("Broker started (PID: {})", child.id());
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            // 타임아웃 발생 시 생성한 자식 프로세스 정리
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Broker startup timed out; child process cleaned up");
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Windows 환경에서 부모 CLI의 표준 핸들(stdin, stdout, stderr) 상속을 차단합니다.
-/// 백그라운드 브로커가 파이프를 잡고 있어 CLI 종료 후에도 호출자가 대기(Hang)하는 문제를 방지합니다.
-#[cfg(windows)]
-fn prevent_stdio_inheritance() -> Result<()> {
-    use windows_sys::Win32::{
-        Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation},
-        System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
-    };
-    // std::process on Windows inherits all inheritable handles, including the CLI's
-    // original capture pipes even when the broker's own stdio is redirected to NUL.
-    // Clear inheritance on those three existing handles so `devlink start` captured
-    // by an Agent/test can reach EOF while its background broker stays alive.
-    for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: GetStdHandle borrows a process-owned handle; it is never closed here.
-        let handle = unsafe { GetStdHandle(stream) };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            continue;
-        }
-        // SAFETY: This only changes the inheritance flag on a valid borrowed handle.
-        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-            bail!("Cannot prevent CLI standard handle inheritance");
-        }
     }
     Ok(())
 }

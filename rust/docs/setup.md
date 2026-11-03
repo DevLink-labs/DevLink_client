@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05. 2026-11-02 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택을 구현했다.
+작업 02·03·04·05·06·07·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·공통 브로커 제어 실행부를 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -13,13 +13,18 @@ devlink setup --output jsonl
 devlink setup --email user@example.test --password-stdin --output json
 # 가입 팀이 여러 개이거나 기존 선택을 변경할 때
 devlink setup --team-id 71 --output json
+# 생략하면 현재 작업 폴더 사용. 공백·한글 경로는 따옴표로 묶는다.
+devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝트 표시명" --agent-name "개발 Agent"
+# 도구 선택. PATH 밖 설치는 실행 파일을 함께 지정할 수 있다.
+devlink setup --tool codex
+devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용**이다. 프로젝트·도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비·도구 탐지/선택·공통 브로커 제어와 start_broker 어댑터**다. Agent 선택/등록 및 MCP 설정/연결 상태 조회 통합은 후속 작업이다. register_agent가 아직 미연결이므로 일반 setup 전체 흐름은 이 단계에서 중단하며, 연결해 둔 start_broker까지 자동으로 건너뛰지 않는다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. 완료되면 아직 미연결인 bind_project에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 완료되면 아직 미연결인 register_agent에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -33,12 +38,17 @@ devlink setup --team-id 71 --output json
 | `devlink-cli/src/setup/stages.rs` | 설정 준비·세션 확인·로그인 연결, 검증한 설정/사용자를 후속 단계용으로 보관 |
 | `devlink-cli/src/setup/login_input.rs` | 비밀을 직렬화/Debug하지 않는 입력 DTO와 주입 가능한 입력 인터페이스 |
 | `devlink-cli/src/setup/team_input.rs` | 팀 ID 검증과 주입 가능한 팀 선택 입력 인터페이스 |
+| `devlink-cli/src/setup/tool_input.rs` | 탐지된 도구 선택 입력 인터페이스 |
 | `devlink-cli/src/setup/terminal.rs` | clap 옵션·human/JSON/JSONL 렌더링·프로세스 종료 코드 전달 |
 | `devlink-cli/src/terminal_input.rs` | 기존 auth/team 명령과 setup이 공유하는 숨김/전용 stdin 입력 |
 | `devlink-broker/src/user_auth.rs` | 기존 로그인·CSRF·세션 저장과 typed session check·장애 분류 |
 | `devlink-broker/src/teams.rs` | 현재 사용자·목록·상세·멤버십 검증과 선택 저장 |
 | `devlink-broker/src/agent_profile.rs` | 기존/미확정 Agent 바인딩의 사용자·서버·팀 충돌 확인 |
 | `devlink-broker/src/setup_config.rs` | 설정 경로·형식·값·자격 파일 안전성·브로커 잠금 검사 |
+| `devlink-broker/src/setup_project.rs` | 프로젝트 경로 정규화·표시명 기본값·기존 프로젝트 비교, 등록 메타데이터와 로컬 경로 분리 |
+| `devlink-broker/src/tool_discovery.rs` | 설치 위치 탐색·버전 전용 실행·재사용 가능한 실행 정보·MCP 제공자 연결 |
+| `devlink-broker/src/setup_tools.rs` | 사용자/팀/프로젝트에 묶인 비공개 도구 선택 저장·재사용·경합 검사 |
+| `devlink-broker/src/broker_control.rs` | 공통 시작·중지·상태 조회·중지 상태 잠금·소유 자식 정리. CLI와 setup이 공유 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
 
@@ -195,7 +205,7 @@ LoginCredentials에는 Debug/Serialize를 구현하지 않는다. 비밀번호�
 
 브로커/제어 잠금 충돌·잠금 파일 오류와 config 재읽기 실패는 세션 저장 오류로 분류하지 않고 해당 파일 위치와 not_applied를 반환한다. config 값 오류는 Config 검증의 필드(JSON 오류는 `$`)를, 읽기 I/O 오류는 SETUP_CONFIG_STORAGE_FAILED를 반환한다. 로그인·팀 선택 입력의 I/O 실패는 SETUP_INTERNAL_ERROR로, 비밀번호 입력의 EOF·입력 중단은 SETUP_CANCELLED로 구분한다. 빈 비밀번호 줄이나 길이·형식 위반은 SETUP_INPUT_INVALID다. 같은 입력 함수를 쓰는 auth/team 명령은 빈 stdin에서 "No Password was received on stdin"처럼 누락된 값을 안내한다. 앞서 확인된 세션 만료 등 이미 적용한 변경은 공통 흐름에서 계속 보존한다.
 
-인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택을 연결했으며 현재 중단 단계는 bind_project다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
+인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택, 작업 06에서 프로젝트 준비, 작업 07에서 도구 선택을 연결했으며 현재 중단 단계는 register_agent다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
 
 ```powershell
 # rust 디렉터리에서 인증 통합과 기존 인증 회귀 확인
@@ -236,7 +246,7 @@ select_team은 인증 단계에서 확인한 사용자 ID와 중앙 origin을 �
 
 새 선택은 기존 private writer로 selected-team.json에 origin/userId/teamId만 원자 저장한다. 정상 선택 재사용은 파일 내용과 수정 시각을 보존하며 `reused:true/outcome:not_applied`다. 새 선택은 `reused:false/outcome:applied`이고 저장 결과가 불확실하면 unknown으로 멈춘다. 손상된 선택·Agent 파일은 자동 삭제하거나 덮어쓰지 않는다.
 
-대화형 선택은 waiting_input 진행 이벤트에 descriptor와 teamChoices만 전달하고 해당 단계만 재개한다. 후보 이름은 기존 출력 어댑터의 제어/bidi 문자 escape를 적용한다. 입력 취소는 종료 130이며 인증 단계의 완료 상태를 보존한다. 후속 단계에 검증한 Team을 보관하고 결과의 known.userId/teamId를 전달한다. 현재 팀 선택 완료 후에는 미구현 bind_project에서 종료 3이다.
+대화형 선택은 waiting_input 진행 이벤트에 descriptor와 teamChoices만 전달하고 해당 단계만 재개한다. 후보 이름은 기존 출력 어댑터의 제어/bidi 문자 escape를 적용한다. 입력 취소는 종료 130이며 인증 단계의 완료 상태를 보존한다. 후속 단계에 검증한 Team을 보관하고 결과의 known.userId/teamId를 전달한다. 작업 05 종료 당시에는 bind_project에서 종료 3이었으며 작업 06에서 프로젝트 준비를 연결했다.
 
 | 코드 | 종료 | 복구 action |
 | --- | --- | --- |
@@ -338,3 +348,121 @@ select_team은 인증 단계에서 확인한 사용자 ID와 중앙 origin을 �
 Windows ACL 판정 함수를 실제 검사와 회귀 테스트에서 공유한다. 새 테스트는 실제 .NET FileSecurity 객체의 소유자를 현재 사용자·Administrators·SYSTEM·Everyone으로 바꿔 config와 비공개 파일의 허용/거부를 대조하고, 관리자 소유 config에서도 Everyone 쓰기 및 부모 쓰기를 거부하는지 검사한다. 관리자 권한 없이 메모리의 ACL 객체로 검사하므로 실제 파일 소유자나 사용자 환경의 권한을 변경하지 않는다. 기존 정책에서는 config 소유자 검사에서 실패하고 정책 변경 후 통과했다.
 
 2026-11-02 Windows MSVC에서 새 정책 회귀와 기본 병렬 `cargo test --workspace`가 **260 passed / 0 failed / 기존 opt-in 2 ignored**로 통과했다. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, 변경 공백 검사도 통과했다. 전체 실행 로그는 `rust/target/admin-owner-verification/workspace.log`에 보관한다. 이번 수정은 credentials.rs의 Windows ACL 정책·회귀와 이 문서에 한정하며 기존 setup 변경을 보존했다. 실제 관리자 셸에서의 init 수동 실행과 Unix 전용 테스트는 이번 검증에 포함하지 않았다.
+
+#### P3 리뷰 수정: config와 시스템 파일 소유자 정책 분리
+
+2026-11-03 리뷰에서 실제 config 검사에 실행 파일용 정책이 적용돼 SYSTEM·TrustedInstaller 소유까지 허용하던 불일치를 수정했다. config 소유자는 현재 사용자·Administrators만 허용한다. 실행 파일·상태 상위 디렉터리의 시스템 소유 허용은 별도 정책으로 구분한다.
+
+테스트 전용으로 중복돼 있던 ACL 판정 함수를 실제 파일 검사와 공유하도록 옮겼다. 공통 함수에 이전 정책을 적용하면 SYSTEM 소유 config 사례가 실패하는 것을 확인한 뒤 수정했다. 메모리 ACL로 현재 사용자·Administrators·SYSTEM·TrustedInstaller·Everyone 소유를 검사하며, config의 공개 읽기 허용과 비신뢰 주체의 파일·부모 쓰기 거부도 검증한다. 실제 파일 소유자를 변경하지 않는다.
+
+Windows MSVC에서 `cargo test --workspace --offline --locked`는 **293 passed / 0 failed / 기존 opt-in 2 ignored**다. 이후 보강한 TrustedInstaller 파일·부모 쓰기 검사도 해당 소유자 정책 테스트를 다시 실행해 통과했다. fmt·변경 공백 검사는 통과했다. 전체 Clippy `-D warnings`는 이번에 수정하지 않은 `mcp_config.rs:201`, `sessions.rs:558`의 기존 `collapsible_if` 진단으로 실패했으며, 해당 lint만 제외한 전체 타깃 검사는 통과했다. Unix와 실제 관리자 셸 수동 검증은 포함하지 않았다.
+
+## 작업 06: 프로젝트 경로와 Agent 기본 정보
+
+`--project <DIRECTORY>`는 기존 디렉터리를 받으며 `--project-path`도 같은 옵션이다. 생략하면 실행 시 현재 작업 폴더를 사용한다. 상대 경로·공백·한글을 지원하고 기존 Agent bootstrap과 같은 canonicalize 검사로 절대 경로를 확정한다. 없는 경로와 파일은 거부하며 프로젝트 폴더를 자동 생성하지 않는다.
+
+validate는 설정 생성·로그인·팀 조회 전에 경로만 검사한다. 이때 확정한 절대 경로를 보관해 후속 단계에서 상대 경로나 현재 작업 폴더를 다시 해석하지 않는다. bind_project는 디렉터리 존재 여부를 재검사하고 control.lock 안에서 Agent 프로필을 읽어 프로젝트를 비교한 뒤, 저장된 이름을 반영한 메타데이터를 한 번 검증한다. 다른 디렉터리이거나 기존 디렉터리가 사라졌으면 `SETUP_PROJECT_BINDING_CONFLICT`/종료 6으로 중단한다. ready·needs_token·create_pending·vacant 모두 다른 프로젝트로 조용히 바꾸지 않는다. 별도 `--config` 프로필 또는 기존 `agent status` 확인 후 명시적 `agent use --project`로 복구하도록 안내한다.
+
+프로젝트명·Agent명은 폴더명에서 각각 UTF-16 120·100 단위까지 기본 구성한다. 경계의 이모지를 자르지 않는다. `--project-name`·`--agent-name`·`--role-description`으로 명시할 수 있고, 이름은 공백만으로 구성할 수 없으며 역할은 255 단위 이하다. 명시값이 제한을 넘으면 자동 절단하지 않고 bind_project에서 `SETUP_INPUT_INVALID`/종료 2와 해당 필드 descriptor를 반환한다. 폴더명이 없는 파일시스템 루트는 두 이름을 명시하거나 같은 프로젝트의 기존 프로필에 저장된 이름이 있어야 하며, 이 검증을 validate로 당기면 기존 바인딩이 있는 사용자가 로그인 전에 막히므로 bind_project에서 수행한다. 같은 프로젝트의 기존 프로필에서는 생략한 이름·역할을 저장된 값으로 채우며, create_pending은 저장돼 있는 이름·프로젝트명만 재사용한다.
+
+bind_project는 프로필·Agent/MCP 자격을 쓰거나 토큰을 발급/회전하지 않는다. 성공은 `outcome:not_applied`이며 기존 프로젝트를 재사용하면 `reused:true`다. 결과는 `SetupStages::project()`의 PreparedProject에 보관해 후속 도구·등록 단계에서 사용한다. 실제 프로필 저장은 후속 register_agent의 역할이다. 로컬 root를 가진 PreparedProject는 Serialize를 구현하지 않고, AgentMetadata는 이름·프로젝트 표시명·역할만 직렬화한다. 기존 create 요청도 이 공개 필드와 toolType만 중앙에 보내고 projectRoot는 로컬 비공개 프로필에만 저장한다.
+
+없는 경로/파일은 `SETUP_PROJECT_PATH_INVALID`/종료 2, 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`/종료 5다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 작업 06 종료 당시에는 select_tool에서 종료 3이었으며 작업 07에서 도구 선택을 연결했다.
+
+### 작업 06 검증 결과
+
+2026-11-03 Windows MSVC에서 합성 중앙 서버·임시 로컬 프로필로 새 프로젝트 검사 10건과 기존 Agent CLI 12건, setup CLI 6건, 인증 22건, 설정 14건, 흐름 10건, 출력 5건, 팀 선택 17건이 통과했다. 최종 관련 회귀는 중복을 제외해 **96 passed / 0 failed**다. 프로젝트 테스트의 UTF-16 이모지 경계·신규 config 미생성 입력을 보강한 뒤 10건을 재실행했고, 기존 팀 테스트에도 연결된 프로젝트 단계를 통과하도록 같은 프로젝트 경로를 명시한 뒤 17건을 재실행했다. 이 재실행을 합계에 더하지 않는다.
+
+한글·공백·상대/절대 경로·현재 폴더 기본값·없는 경로/파일 거부·설정 생성 전 거부·프로젝트 단계 전 디렉터리 삭제·이름과 역할의 UTF-16 경계·같은 프로젝트 이름 재사용·모든 기존 프로필 상태의 프로젝트 충돌·손상 파일과 자격 보존·control.lock 경합을 검사했다. 중앙의 실제 생성 요청은 합성 서버가 허용한 name/projectName/roleDescription/toolType 네 필드만 받는지 검사하고 로컬 projectRoot 저장과 구분했다. 프로필 재사용/거부 시 파일 바이트와 수정 시각도 보존됐다.
+
+fmt·변경 공백 검사는 통과했다. 전체 workspace/all-targets Clippy `-D warnings`는 이번에 수정하지 않은 mcp_config.rs:201, sessions.rs:558의 기존 collapsible_if 두 건으로 실패했다. 해당 lint만 제외한 전체 타깃 검사와 최종 보강한 두 테스트 타깃의 Clippy는 통과했다. 최초 샌드박스에서는 임시 파일 교체가 차단됐으며 이후 허용된 샌드박스 밖 테스트에서 위 회귀를 확인했다. 전체 workspace 테스트·실제 운영 중앙·Unix 전용 경로·실제 대화형 콘솔 검증은 이번에 수행하지 않았다.
+
+## 작업 07: Codex·Claude Code 탐지와 선택
+
+`--tool codex|claude-code`로 선택하고 `--tool-path <FILE>`로 PATH 밖 설치를 지정할 수 있다. 경로 옵션은 도구 종류와 함께 사용한다. 명시 선택 → 기존 Agent 프로필의 도구 → 같은 중앙 origin/사용자/팀/프로젝트에 저장된 유효한 선택 순으로 사용한다. 선택이 없고 사용 가능한 도구가 하나면 그 도구를 선택한다. 여러 개면 ToolInput 어댑터에 요청하며 TTY가 없으면 `SETUP_TOOL_REQUIRED`/종료 2와 `tool.type/selection/detected_tool_list` descriptor 및 탐지 목록을 반환한다. 기존 Agent와 다른 도구를 명시하면 종료 6으로 중단한다. 기존 Agent의 도구가 없을 때도 다른 도구로 자동 전환하지 않는다. Agent에 묶이지 않은 저장 선택이 무효일 때는 현재 설치 목록에서 다시 선택한다.
+
+탐색은 절대 PATH 항목과 사용자 `.local/bin`, `.cargo/bin`, Windows APPDATA/npm을 사용한다. Windows는 codex.exe/codex.cmd와 claude.exe/claude.cmd, Unix는 codex/claude를 찾는다. 상대/빈 PATH 항목을 현재 프로젝트에서 실행하지 않는다. 첫 PATH 명령이 실행 불가면 뒤의 같은 이름으로 조용히 우회하지 않는다. 명시한 실행 경로와 저장 경로를 우선 검사하며 canonical 실행 파일과 검증한 절대 경로 argv를 보관한다. Windows npm .cmd는 배치 문자열을 실행하지 않고 같은 설치의 알려진 패키지 진입점과 Node 실행 파일로 변환한다. Node 스크립트 인자는 일반 드라이브/UNC 경로로 전달하고 canonicalize 왕복으로 같은 파일인지 확인한다. 이전 빌드에서 저장한 verbatim 스크립트 인자도 재사용 전에 변환한다. 셸 명령 문자열이나 임의 저장 argv는 실행하지 않는다.
+
+Windows pnpm·yarn 전역 설치 중 shim 옆의 `node_modules`에 패키지가 없는 배치는 현재 지원하지 않으며 `not_executable`로 표시된다. 같은 `.cmd`를 `--tool-path`로 지정해도 해결되지 않는다. 패키지의 실제 네이티브 `.exe`를 `--tool codex|claude-code --tool-path <FILE>`로 지정하거나 지원하는 npm/네이티브 설치를 사용한다. 임의 shim의 내용을 해석하거나 실행해 우회하지 않는다.
+
+실행 가능 여부는 stdin을 닫고 임시 작업 폴더에서 버전 명령만 호출해 검사한다. 네이티브 도구에는 `--version` 하나, npm 도구에는 Node의 패키지 진입점과 `--version`만 전달한다. 탐지 과정은 프롬프트·exec·print 모드·로그인·설치·업데이트·모델 호출을 사용하지 않는다. 각 probe의 기본 timeout은 5초이며 stdout/stderr 각각 8 KiB를 넘으면 실패한다. timeout/출력 초과에서는 자식 프로세스를 종료·수거하고 원문 출력을 사용자 오류에 전달하지 않는다. Node preload 환경 NODE_OPTIONS/NODE_PATH는 probe에서 제외한다. 버전은 Codex의 codex-cli 접두사, Claude Code의 도구 접미사 및 숫자 버전 형식으로 확인한다.
+
+탐지 DTO의 상태는 available/missing/not_executable/version_check_failed/timed_out/invalid_version이다. `tools` 목록은 probe한 도구의 상태·공식 설치 URL·available 도구의 installation(toolType/executable/version)·mcpAutomaticSupported를 제공한다. 도구를 지정하지 않으면 두 도구를 모두 probe하고, `--tool`·기존 Agent 바인딩·대화형 선택으로 도구가 정해지면 그 도구만 probe한다(Agent에 묶이지 않은 저장 선택은 먼저 단독 probe하고 실패할 때만 전체 탐지). npm shim은 Node 기동이 들어가고 probe당 최대 5초이므로 불필요한 probe를 피한다. 선택 요청의 waiting_input progress에도 같은 목록을 전달한다. 도구가 없거나 명시한 도구가 실행 불가면 `SETUP_TOOL_UNAVAILABLE`/종료 5와 설치 링크, 터미널 재실행, `setup --tool` 및 `--tool-path` 안내를 반환한다. 입력 취소는 종료 130, 입력 I/O 실패는 종료 1이며 인증·팀·프로젝트의 완료 상태를 보존한다. 선택 후 선택한 도구만 다시 probe하고 다른 도구의 이전 탐지 결과는 목록에 유지하므로, 입력 중 삭제된 실행 파일을 선택 완료로 처리하지 않으면서 probe를 반복하지 않는다.
+
+선택은 `.devlink-runtime/selected-tool.json`에 schemaVersion/binding/selected로 비공개 원자 저장한다. binding은 origin/userId/teamId/projectRoot, selected는 toolType/executable{command,args}/version이다. 이 파일은 중앙 요청에 포함하지 않는다. 경로·버전을 실제 재검사한 뒤 내용이 같으면 파일 바이트·수정 시각을 보존하고 reused:true/not_applied를 반환한다. 첫 저장이나 선택 갱신은 applied다. 기존 Agent 선택 재사용은 새 캐시 파일을 저장해도 reused:true다. Agent/MCP 자격은 변경하지 않는다.
+
+읽기와 저장은 account.lock → control.lock 순서로 보호한다. 버전 실행과 사용자 입력 중에는 잠금을 유지하지 않으며 저장 전에 로컬 세션·현재 서버·팀·프로젝트·Agent 도구·선택 스냅샷을 다시 대조한다. 다른 선택이 저장됐으면 `SETUP_TOOL_SELECTION_CONFLICT`/종료 6, 기존 Agent 도구 충돌은 `SETUP_TOOL_BINDING_CONFLICT`/종료 6, 잘못된 선택 파일은 `SETUP_TOOL_STORAGE_FAILED`/종료 5로 보존한다. 저장 결과가 불확실하면 unknown으로 멈춘다. 세션·서버 변경과 잠금 오류는 기존 setup 오류를 재사용한다.
+
+`SetupStages::tool()`은 SelectedTool을 후속 모듈에 전달한다. 재실행할 때 command와 args를 그대로 재사용할 수 있고, 자동 설정 제공자는 `McpConfig::new(selected.verified_host()?)`로 만들 수 있다. 탐지 단계의 mcpAutomaticSupported도 이 VerifiedHost API의 결과다. 도구를 실행할 수 있는 것과 해당 버전의 자동 Host 설정을 지원하는 것은 별개다. 알 수 없는 버전도 available일 수 있지만 자동 설정 지원 여부는 제공자가 결정한다. Host 설정 위치·TOML/JSON 형식·지원 버전 판단은 [기존 MCP 설정 제공자](../../contracts/setup/v1/mcp-config-provider.md)에 위임한다. 이 단계는 Host 설정 파일을 고르거나 쓰지 않는다. Host 실행 정보와 MCP 서버용 Node/스크립트 실행 정보도 구분하며, 후자의 Node >=24·빌드 결과 검사는 후속 MCP 연동 작업이다.
+
+버전 확인과 설치 안내 근거: [OpenAI 공식 CLI 문서](https://learn.chatgpt.com/docs/codex/cli), [Codex 버전 확인 예시](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex), [Claude Code 설치](https://code.claude.com/docs/en/setup), [Claude CLI 참조](https://code.claude.com/docs/en/cli-reference). 자동 설치를 실행하지 않는다.
+
+### 작업 07 검증 결과
+
+2026-11-03 Windows MSVC에서 신규 도구 회귀 13건, 기존 setup CLI 6건·설정 14건·인증 22건·팀 선택 17건·프로젝트 10건·흐름 10건·출력 5건·Agent CLI 12건이 통과했다. 중복을 제외한 관련 회귀는 **109 passed / 0 failed**다. 합성 도구는 Rust로 빌드한 실행 파일이며 받은 argv를 기록하고 허용된 버전 인자 외에는 실패한다. 설치 탐지는 AI 프롬프트나 작업 명령을 실행하지 않는다. 기존 setup 회귀는 명시한 합성 Codex 경로를 사용해 사용자 설치의 선택 상태에 의존하지 않도록 보완했다.
+
+탐지 없음·두 도구 탐지·명시 한글/공백 경로·Node/npm shim·실행 불가/실패/잘못된 출력/출력 초과/timeout·PATH 우선순위·알 수 없는 버전의 제공자 판단·단일 선택 저장·다중 선택 입력/재개·저장 경로의 PATH 외 재사용·오래된 선택 교체·파일 바이트/수정 시각/비공개 권한 보존·기존 Agent 도구 우선/전환 거부·손상 argv 보존·계정/프로필 잠금·입력 취소/I/O 오류·입력 중 도구 삭제/서버/사용자/선택 변경을 검사했다. 자동 Host 설정 파일을 생성하지 않았으며 Agent 토큰을 발급/회전하지 않았다.
+
+전체 타깃 check, fmt, 변경 공백 검사와 기존 collapsible_if lint만 제외한 workspace/all-targets Clippy `-D warnings`가 통과했다. lint 제외 없이 실행한 Clippy는 기존 mcp_config.rs:201, sessions.rs:558의 두 진단이 남아 있다. 전체 workspace 테스트, 운영 중앙/DB, 실제 AI 작업·모델 호출, 실제 콘솔 대화형 입력, Unix 전용 실행 권한 분기는 이번 검증에 포함하지 않았다. Agent 등록 및 실제 Host/MCP 연결은 후속 작업이다.
+
+### 작업 07 리뷰: Windows npm 경로·테스트 timeout·전역 shim 범위
+
+2026-11-03 Windows의 실제 Node 24.18.0에서 버전만 출력하는 ESM 파일을 검사했다. 일반 절대 경로는 종료 0, canonicalize의 verbatim 경로는 EISDIR/lstat C:와 종료 1이었다. 새 실제 Node 회귀도 수정 전에는 version_check_failed로 실패했다. 이전 npm 회귀는 Node 역할을 Rust 합성 실행 파일로 대체해 모듈 로딩 오류를 발견하지 못했다.
+
+이제 파일 검사는 canonical 경로로 유지하고 Node 스크립트 argv만 일반 드라이브/UNC 경로로 변환한다. 변환 결과를 다시 canonicalize해 같은 대상인지 확인하므로 접두사 제거로 다른 파일을 실행하지 않는다. Node 실행 파일의 canonical 경로는 유지한다. 이전 선택 파일에 저장한 verbatim 스크립트 argv도 재사용 시 변환한다. 실제 Node·임시 ESM 패키지로 Codex/Claude 두 형식의 PATH 탐지·명시 .cmd 선택·PATH 밖 저장 경로 재사용과 한글/공백/&/#/% 경로가 수정 후 통과했다. 이 회귀는 Node 설치가 Rust 테스트의 필수 조건이 되지 않도록 opt-in ignored 테스트로 두고 다음 명령으로 별도 실행했다.
+
+```powershell
+cargo test --offline --locked -p devlink-cli --test setup_tools real_node_loads_npm_esm_entries_for_both_hosts_and_reuses_saved_paths -- --ignored
+```
+
+정상 탐지 검사에 공통 적용되던 800ms 제한을 제품 기본 5초와 통일했다. 의도적으로 30초 멈추는 합성 도구의 종료 검사만 별도 테스트에서 800ms를 사용한다. 짧은 제한과 실패 가능성은 코드에서 확인했지만, 이번 검토에서 기존 간헐 실패 자체를 재현한 것은 아니다. 제품 probe timeout은 변경하지 않았다.
+
+shim 옆에 node_modules가 없는 전역 pnpm/yarn 배치는 코드 및 합성 배치 회귀에서 not_executable임을 확인했다. 이 구조의 자동 해석은 추가하지 않았으며, 실제 네이티브 실행 파일을 --tool-path로 지정하거나 지원하는 설치를 사용하라는 내용을 오류 안내와 문서에 추가했다. 같은 .cmd를 다시 지정하는 것으로 해결되지 않음을 명시했다. 실제 패키지 매니저 설치/변경과 AI 작업·모델 호출은 하지 않았다. 실제 네트워크 UNC 공유는 이번에 검증하지 않았다.
+
+기본 병렬 `cargo test --workspace --offline --locked`는 **318 passed / 0 failed / 3 ignored**로 종료 0이다. ignored는 기존 opt-in 2건과 새 실제 Node 회귀 1건이며, 새 Node 회귀는 위 명령으로 따로 실행해 **1 passed**를 확인했다. 정상 탐지·전역 shim 제한·전용 timeout을 포함한 setup_tools는 전체 실행 안에서 15 passed / 1 ignored다. 재시도와 --test-threads=1은 사용하지 않았다. fmt·변경 공백 검사 및 기존 collapsible_if만 제외한 전체 타깃 Clippy가 통과했다. 전체 실행 로그는 빌드 산출물 `rust/target/setup07-review-workspace.log`에 보관한다. 이 결과는 이번 병렬 실행의 통과이며 모든 CI 부하에서 간헐 실패가 사라졌음을 보장하는 검증은 아니다.
+
+## 작업 11: 브로커 시작·중지·상태 실행부 공통화
+
+`devlink_broker::broker_control`로 기존 cli.rs의 실행 제어를 옮겼다. 모듈은 stdout/stderr에 출력하지 않으며 `start(configPath, cliExecutable)`, `stop(configPath)`, `status(configPath)`, `require_stopped(configPath)`를 제공한다. 개별 start/stop/status 명령은 이 모듈의 결과만 렌더링한다. 기존 성공 출력과 stopped/running 표시, 수신함/알림 진단을 유지한다. 실행 오류에는 typed Failure(kind/outcome/file)를 붙이고 setup은 허용 코드로 매핑한다. CLI에서 이미 제공하던 설정·토큰 충돌 진단은 Failure의 비직렬화 진단으로 유지한다. 원문 provider 오류나 private runtime/토큰을 setup 결과로 직렬화하지 않는다.
+
+start는 control.lock을 유지하면서 broker.lock과 인증된 health를 확인한다. 이미 실행 중이면 service/API version/PID/instanceId와 control-token 인증을 통과한 health를 반환하며 reused:true다. 잠금이 잡혔는데 runtime/health를 확인할 수 없으면 실패하며 새 프로세스를 만들거나 기존 PID를 종료하지 않는다. local::running의 기존 broker.lock 기반 판정과 stale runtime 정리도 유지한다. PID 파일만 있으면 running으로 간주하지 않는다.
+
+새 프로세스는 지정한 CLI 실행 파일에 --config <FILE> broker만 전달한다. stdin/stdout/stderr는 null이며 Windows의 DETACHED_PROCESS/CREATE_NEW_PROCESS_GROUP를 유지한다. 부모 표준 핸들의 HANDLE_FLAG_INHERIT는 이 spawn 동안만 해제하고 spawn 직후 원래 플래그로 복원하므로, 오래 실행되는 setup이 이후 단계에서 stdio를 상속하는 Host 자식을 띄워도 영향을 받지 않는다. Unix는 process_group(0)을 유지한다. 라이브러리 호출자는 자신의 current_exe가 테스트/다른 앱일 수 있으므로 실제 devlink 실행 파일을 넘긴다. CLI는 current_exe를 사용하고 setup은 기본값 외에 with_broker_executable로 주입할 수 있다. windows-sys는 이미 고정된 workspace 버전을 브로커 crate에도 연결했으며 외부 패키지 버전은 바꾸지 않았다.
+
+기동 제한은 기존 8초 + credentials::startup_validation_allowance() + agent_profile::startup_allowance(configPath)다. 50ms 간격으로 직접 만든 Child의 종료를 확인하고, runtime 로드·해당 Child PID 일치·인증 health 확인을 통과한 뒤 broker.lock을 확인한다. 시작 대기 중 timeout/오류/취소가 발생하면 RAII 가드가 바로 그 Child 핸들만 kill/wait한다. 성공 시 가드를 해제하고 독립 브로커를 남긴다. 다른 runtime의 PID로 프로세스를 찾아 종료하지 않는다. 기동 실패 전에 자격 파일 등이 발행됐을 수 있으므로 spawn 이후 실패는 outcome:unknown으로 반환한다.
+
+stop은 control.lock 안에서 health를 인증한 뒤 같은 control token으로 shutdown 요청을 보낸다. health 검증과 요청은 기존 Runtime::stop과 같은 순서이며 중복 health 요청을 추가하지 않는다. 요청 뒤 최대 8초 동안 broker.lock 해제를 기다리고 timeout이나 장애 때도 발견한 PID를 강제 종료하지 않는다. stopped는 AlreadyStopped, 정상 종료는 Stopped로 구분한다. 로컬 인스턴스 검증과 중앙 WS/업무 신원의 일치는 구분한다. start 성공 자체가 중앙 Connected나 전체 setupReady를 의미하지 않는다.
+
+프로필 변경·중앙 Agent 토큰 발급·계정 전환 전의 기존 agent_profile::stopped는 이제 require_stopped를 공유한다. control.lock과 broker.lock을 모두 잡아 변경이 끝날 때까지 유지하며 runtime 발행 전 기동 중인 브로커도 차단한다. 기존 AuthFault 분류와 복구 안내를 보존한다. 실행 중인 브로커를 setup이 자동 중지하지 않으며 devlink stop을 명시적으로 실행하도록 안내한다. 사용자가 정상 중지한 뒤 변경을 재시도하면 같은 잠금 검사를 다시 수행한다. 기존 MCP 자격 회전의 중지 요구 정책도 유지한다.
+
+setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStages::broker()에 보관한다. 신규 기동은 applied/reused:false, 재사용은 not_applied/reused:true다. 공통 실행부의 시작/신원 검증 실패는 SETUP_BROKER_START_FAILED/종료 5·inspect_broker_then_retry로, 설정/잠금/자격 실패는 기존 setup 코드로 매핑한다. broker.lock은 잡혀 있지만 runtime.json이 아직 발행되지 않은 기동 중 브로커(BrokerStarting)는 잠시 뒤 다시 시도하면 풀리므로 SETUP_UNSAFE_FILE 대신 재시도 가능한 SETUP_BROKER_BUSY/종료 6으로 보고한다. runtime.json이 있으나 읽을 수 없는 경우만 Storage/SETUP_UNSAFE_FILE이다. 작업 08~10의 Agent 등록 흐름을 대신 구현하거나 건너뛰지는 않는다. 현재 일반 setup은 register_agent에서 종료 3이며 어댑터 통합 검사는 이미 등록된 합성 프로필에서 StartBroker를 호출해 검증한다.
+
+### 작업 11 검증 결과
+
+2026-11-03 Windows MSVC에서 신규 회귀는 공통 실행부 7건·setup/CLI 교차 제어 3건·캡처 파이프 EOF 1건으로 11건이 통과했다. 실제 기동·재사용·상태·명시 종료·중지 전 토큰 발급 차단/중지 후 발급·잘못된 제어 토큰 보존·포트 충돌·조기 종료/timeout/취소의 소유 자식 수거·다른 runtime PID 보존·서비스/API 버전/PID/instance 불일치 차단을 포함한다.
+
+최종 `cargo test --target-dir target/setup11-verify --workspace --offline --locked --no-fail-fast -j 2`는 **330 passed / 0 failed / 기존 opt-in 3 ignored**로 종료 0이다. 새 11건은 이 합계에 포함한다. 기존 CLI 브로커 36건에는 동시 시작·느린 정상 ACL 기동·MCP 토큰과 중앙 WS 회귀가 포함되며, Agent CLI 15건·setup 설정/인증/팀/프로젝트/도구 회귀도 통과했다. -j 2는 컴파일 작업 수만 제한하며 테스트는 기본 병렬 설정이었다. --test-threads=1과 실패 테스트 자동 재시도는 사용하지 않았다.
+
+첫 전체 실행에서 새 typed 오류가 기존 CLI의 토큰 충돌 진단을 가리는 문제를 발견해 원래 진단을 보존하도록 수정했고, 해당 기존 회귀를 단독 확인한 뒤 최종 전체 실행에서 재검증했다. 공용 target의 테스트 실행 파일 잠금으로 발생한 LNK1104는 실행 중인 다른 프로세스를 종료하지 않고 별도 target을 사용해 해결했다. 로그는 빌드 산출물 `rust/target/setup11-workspace.log`, `rust/target/setup11-workspace-final.log`, 최종 `rust/target/setup11-isolated-workspace.log`에 보관한다.
+
+전체 fmt·변경 공백 검사가 통과했으며 기존 collapsible_if lint만 제외한 workspace/all-targets Clippy도 통과했다. 동시 수정 중이던 task_creation.rs의 포맷 차이는 해당 변경이 정리된 뒤 전체 검사를 다시 확인했으며, 이번 작업에서 별도 작업의 MCP/중앙/작업 처리 코드를 수정하거나 되돌리지 않았다. 테스트는 임시 프로필과 합성 중앙/자식 프로세스 기준이며 운영 중앙·실제 모델·Unix 전용 분기는 실행하지 않았다. 일반 setup의 register_agent 미연결 범위는 유지한다.
+
+### 작업 11 리뷰: 기동 대기와 broker.lock 경합
+
+2026-11-03 리뷰에서 부모의 `wait_for_start`가 runtime 발행 전에 `local::running`을 호출하면 자식이 필요한 broker.lock을 잠깐 획득할 수 있음을 확인했다. runtime 로드·자식 PID 일치·인증 health를 먼저 확인하고 마지막에 `local::running`을 호출하도록 순서를 바꿨다. runtime을 발행하지 않는 자식을 기다리는 동안 broker.lock 파일 자체를 만들지 않는 회귀도 추가했다. 마지막 락 검사의 오류는 PID 일치와 인증 health까지 확인된 브로커를 종료하지 않도록 다음 폴링으로 넘기고, 기동 제한 시간까지 계속 실패하면 StartupTimedOut 대신 마지막 오류를 `Storage / Unknown`과 broker.lock 경로로 반환한다(PR #41 리뷰 반영). Windows 회귀는 별도 심볼릭 링크 권한 없이 생성 가능한 junction으로 reparse point 거부와 대상 파일 보존을 확인하며, Unix 파일 symlink 분기는 이번 환경에서 실행하지 않았다.
+
+별도 status 프로브도 같은 락을 잠깐 소유할 수 있어 자식의 최초 락 획득에만 10ms 간격·200ms 한도의 재시도를 추가했다. 재시도 대상은 `try_lock == None`인 경합뿐이며 경로 안전 검사/I/O 오류는 즉시 실패한다. 계속 점유한 경우 기존 `Another DevLink operation is running` 메시지를 유지한다. 가상 시계 테스트로 일시 경합 후 성공·지속 경합의 제한 시간·안전하지 않은 경로의 즉시 실패를 검사하고, 실제 자식 프로세스에서도 짧은 점유 후 기동과 지속 점유 시 실패를 확인했다. 새 설정 옵션이나 일반 재시도 계층은 추가하지 않았다.
+
+제안 1·2·4를 적용했다. 제안 3의 알림/수신함 삭제 및 MCP 토큰 회전 가드 통일은 이번 기동 실패 해결에 필요하지 않은 별도 리팩터링이므로 제외했다. 해당 경로의 기존 안내 메시지와 중지 요구 정책은 회귀 테스트로 확인했다.
+
+같은 `target/setup11-verify`에서 `cargo test --offline --locked -p devlink-broker --lib`는 **101 passed**, `cargo test --offline --locked -p devlink-cli --test cli_broker`는 **37 passed**로 총 **138 passed / 0 failed**다. 기존 `broker_control::tests` 7건과 새 Storage 회귀 1건, `detached_lifecycle_duplicate_and_local_authentication`, `simultaneous_start_cannot_spawn_two_brokers`, 캡처 파이프 EOF, 수신함 삭제 및 MCP 토큰 회전 회귀를 포함한다. 마지막 파일 상태에서 공통 실행부 8건을 다시 실행해 통과했다. 전체 workspace 테스트를 이번 리뷰에서 다시 실행하지는 않았다.
+
+빌드된 `target/setup11-verify/debug/devlink.exe`를 출력 캡처 상태에서 한글·공백이 있는 별도 임시 프로필로 **start/stop 100회** 실행했다. **100/100 성공, 명령 실패 0건, `Broker exited during startup` 0건**이며 약 128초가 걸렸다. 합성 토큰과 loopback 중앙 주소만 사용했고 마지막 정상 stop도 성공했다. 재현 스크립트는 빌드 산출물 `target/broker-start-stop-stress.py`, 결과는 `target/broker stress 한글 1793681791792299200/result.json`에 보관한다. 이 반복 검증은 모든 부하에서 경합이 없음을 보장하는 증명은 아니다.
+
+수정한 Rust 파일의 rustfmt·변경 공백 검사와 broker/CLI의 all-targets Clippy가 통과했다. Clippy는 기존 `collapsible_if` 진단만 제외했다. 운영 중앙·실제 AI 작업·Unix 실행 검증은 포함하지 않았다.
+
+### PR #41 리뷰 반영
+
+2026-11-03 PR #41 리뷰의 인라인 지적 7건을 반영했다. (1) broker.lock은 잡혀 있지만 runtime.json이 없는 기동 중 브로커를 `BrokerStarting`으로 구분해 setup에서 SETUP_UNSAFE_FILE 대신 재시도 가능한 SETUP_BROKER_BUSY로 보고한다. CLI start/status/stop도 "Broker is starting; wait a moment and retry"를 출력한다. (2) `wait_for_start`는 health까지 확인한 뒤의 `local::running` 오류로 자식을 종료하지 않고 제한 시간까지 재시도하며, 계속 실패하면 마지막 오류를 Storage/Unknown으로 반환한다. (3) validate는 프로젝트 경로만 확정하고 표시명·Agent명·역할 검증은 bind_project로 옮겨, 폴더명이 없는 루트에서도 저장된 프로필 이름으로 진행할 수 있다. (4) Windows 표준 핸들 상속 해제는 spawn 동안만 적용하고 직후 원래 플래그로 복원한다. (5) 도구 probe는 지정·바인딩·선택된 도구만 수행하고 대화형 재진입 때 선택한 도구만 다시 probe한다. (6) SetupStages의 단계별 상태를 auth/teams/project/tools/broker 하위 struct로 묶어 입력 어댑터 교체가 필드 9개만 옮긴다. (7) resultText 크기 검사와 함께 지적된 중앙 계약 변경(메시지 한도 64→256 KiB, REJECTED 전환, 완료 결과 크기 검사)은 브로커 제어와 무관하므로 이 브랜치에서 작업 전 상태로 되돌렸다. 중앙 서버 상한과 함께 별도 작업으로 맞춘다.
+
+Windows MSVC에서 `devlink-broker --lib` **102 passed**(기동 중 분류·제한 시간 후 Storage 회귀 포함), broker 통합 task_operations 22·task_creation 7, CLI setup 8개 스위트(프로젝트 루트/bind_project 이름 검증·단독 probe·선택 재진입 probe 회귀 포함) 102 passed / 1 ignored, cli_agents 15·cli_broker 37이 모두 통과했다. workspace all-targets Clippy `-D warnings`(기존 collapsible_if 제외)와 fmt가 통과했다. 로그는 빌드 산출물 `rust/target/pr41-review-fix.log`에 보관한다. 전체 workspace 테스트와 Unix 분기는 이번에 다시 실행하지 않았다.

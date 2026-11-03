@@ -1,19 +1,20 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
 use super::{
     Completion, LoginCredentials, LoginInput, LoginInputError, ProgressEvent, ProgressUnavailable,
-    RunResult, SetupContext, SetupStages, TeamChoice, TeamInput, TeamInputError, parse_team_id,
+    RunResult, SetupContext, SetupStages, TeamChoice, TeamInput, TeamInputError, ToolInput,
+    ToolInputError, parse_team_id,
 };
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::{
     fmt,
     io::{IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes settings, verifies your user session, and selects a joined team.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection. Project and remaining stages follow."
+    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nAgent registration and remaining stages follow."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
@@ -28,6 +29,24 @@ pub struct SetupArgs {
     /// Select a current joined team by ID; otherwise reuse or choose a team
     #[arg(long, value_name = "ID", value_parser = parse_team_id)]
     pub team_id: Option<u64>,
+    /// Existing project directory (default: current working directory)
+    #[arg(long, alias = "project-path", value_name = "DIRECTORY")]
+    pub project: Option<PathBuf>,
+    /// Central project display name (default: folder name, or saved profile name)
+    #[arg(long, value_name = "NAME")]
+    pub project_name: Option<String>,
+    /// Agent display name (default: folder name, or saved profile name)
+    #[arg(long, value_name = "NAME")]
+    pub agent_name: Option<String>,
+    /// Optional Agent role description
+    #[arg(long, value_name = "DESCRIPTION")]
+    pub role_description: Option<String>,
+    /// Select codex or claude-code; otherwise reuse a valid selection or choose
+    #[arg(long, value_name = "TYPE", value_parser = devlink_broker::tool_discovery::parse_tool)]
+    pub tool: Option<devlink_broker::sessions::ToolType>,
+    /// Explicit Host executable or npm .cmd shim outside PATH (requires --tool)
+    #[arg(long, value_name = "FILE", requires = "tool")]
+    pub tool_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -62,7 +81,15 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     };
     let stages = SetupStages::new(input)
         .with_team_input(TerminalTeamInput)
-        .with_team_id(args.team_id);
+        .with_tool_input(TerminalToolInput)
+        .with_tool(args.tool, args.tool_path)
+        .with_team_id(args.team_id)
+        .with_project(devlink_broker::setup_project::ProjectOptions {
+            path: args.project,
+            project_name: args.project_name,
+            agent_name: args.agent_name,
+            role_description: args.role_description,
+        });
     let result = super::run(&context, stages, |event| output.progress(event)).await;
     output.result(&result).map_err(|_| SetupExit(1))?;
     if result.exit_code != 0 {
@@ -113,6 +140,53 @@ impl TeamInput for TerminalTeamInput {
         })
         .await
         .map_err(|_| TeamInputError::ReadFailed)?
+    }
+}
+
+struct TerminalToolInput;
+impl ToolInput for TerminalToolInput {
+    fn available(&self) -> bool {
+        self.interactive()
+    }
+    fn interactive(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+    async fn request(
+        &mut self,
+        tools: &[devlink_broker::tool_discovery::ToolDetection],
+    ) -> Result<devlink_broker::sessions::ToolType, ToolInputError> {
+        if !self.interactive() {
+            return Err(ToolInputError::Unavailable);
+        }
+        let tools = tools.to_vec();
+        tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Read};
+            let stderr = std::io::stderr();
+            let mut renderer = Renderer::new(stderr.lock(), OutputFormat::Json);
+            for tool in tools {
+                renderer
+                    .json(&tool)
+                    .map_err(|_| ToolInputError::ReadFailed)?;
+            }
+            write!(renderer.writer, "Tool (codex or claude-code): ")
+                .and_then(|_| renderer.writer.flush())
+                .map_err(|_| ToolInputError::ReadFailed)?;
+            let mut bytes = Vec::new();
+            if std::io::stdin()
+                .lock()
+                .take(128)
+                .read_until(b'\n', &mut bytes)
+                .map_err(|_| ToolInputError::ReadFailed)?
+                == 0
+            {
+                return Err(ToolInputError::Cancelled);
+            }
+            let value = String::from_utf8(bytes).map_err(|_| ToolInputError::Invalid)?;
+            devlink_broker::tool_discovery::parse_tool(value.trim())
+                .map_err(|_| ToolInputError::Invalid)
+        })
+        .await
+        .map_err(|_| ToolInputError::ReadFailed)?
     }
 }
 
@@ -236,6 +310,10 @@ impl<W: Write> Renderer<W> {
                     if let Some(location) = &error.location {
                         write!(self.writer, "Location: ").map_err(|_| ProgressUnavailable)?;
                         self.json(location)?;
+                    }
+                    if !error.tools.is_empty() {
+                        write!(self.writer, "Tools: ").map_err(|_| ProgressUnavailable)?;
+                        self.json(&error.tools)?;
                     }
                     writeln!(self.writer, "Recovery: {}", error.recovery_action())
                         .map_err(|_| ProgressUnavailable)?;

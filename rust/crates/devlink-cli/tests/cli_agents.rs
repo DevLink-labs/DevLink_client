@@ -5,6 +5,9 @@ use devlink_broker::{
     agent_profile, central::ConnectionStatus, config, credentials, local::Runtime, private_file,
     teams,
 };
+use devlink_cli::setup::{
+    ErrorCode, Outcome, SetupContext, SetupStages, Step, StepExecutor, StepResult,
+};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -70,6 +73,145 @@ async fn connected(path: &Path) {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_start_uses_shared_control_and_cli_reuses_then_stops_the_same_broker() {
+    use devlink_broker::broker_control;
+    let f = Fixture::new().await;
+    selected(&f);
+    data(create(&f));
+    let _cleanup = Stop(f.path.clone());
+    let before = profile(&f.path);
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages =
+        SetupStages::default().with_broker_executable(env!("CARGO_BIN_EXE_devlink").into());
+    assert!(matches!(
+        stages.execute(Step::StartBroker, &context).await,
+        StepResult::Complete {
+            outcome: Outcome::Applied,
+            reused: false
+        }
+    ));
+    let started = stages.broker().unwrap();
+    let instance = started.health.instance_id.clone();
+    let pid = started.health.pid;
+    let output = f.run(&["start"], None);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("already running"));
+    assert!(matches!(
+        stages.execute(Step::StartBroker, &context).await,
+        StepResult::Complete {
+            outcome: Outcome::NotApplied,
+            reused: true
+        }
+    ));
+    assert_eq!(stages.broker().unwrap().health.instance_id, instance);
+    let broker_control::Status::Running { health } = broker_control::status(&f.path).await.unwrap()
+    else {
+        panic!("broker stopped")
+    };
+    assert_eq!(health.pid, pid);
+    let public = serde_json::to_string(&health).unwrap();
+    let runtime = Runtime::load(&f.path).unwrap();
+    assert!(!public.contains(&runtime.control_token));
+    deny(f.run(&["agent", "token"], None), "Stop the broker");
+    assert_eq!(before, profile(&f.path));
+    assert!(f.run(&["stop"], None).status.success());
+    assert!(matches!(
+        broker_control::status(&f.path).await.unwrap(),
+        broker_control::Status::Stopped
+    ));
+    assert_eq!(
+        broker_control::stop(&f.path).await.unwrap(),
+        broker_control::StopResult::AlreadyStopped
+    );
+    data(f.run(&["agent", "token"], None));
+    assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_start_preserves_a_live_broker_when_identity_cannot_be_verified() {
+    let f = Fixture::new().await;
+    selected(&f);
+    data(create(&f));
+    let _cleanup = Stop(f.path.clone());
+    assert!(f.run(&["start"], None).status.success());
+    let mut runtime = Runtime::load(&f.path).unwrap();
+    let original = runtime.control_token.clone();
+    runtime.control_token = "invalid-private-control-marker".into();
+    config::atomic_json(&Runtime::path(&f.path), &runtime).unwrap();
+    let mut stages =
+        SetupStages::default().with_broker_executable(env!("CARGO_BIN_EXE_devlink").into());
+    let result = stages
+        .execute(
+            Step::StartBroker,
+            &SetupContext {
+                config_path: f.path.clone(),
+            },
+        )
+        .await;
+    // Restore before assertions so fixture shutdown is always able to authenticate.
+    runtime.control_token = original;
+    config::atomic_json(&Runtime::path(&f.path), &runtime).unwrap();
+    let StepResult::Failed(error) = result else {
+        panic!("unverified identity was reused")
+    };
+    assert_eq!(error.code, ErrorCode::BrokerStartFailed);
+    assert_eq!(error.outcome, Outcome::NotApplied);
+    let safe = serde_json::to_string(&error).unwrap();
+    assert!(!safe.contains(&runtime.control_token));
+    assert!(!safe.contains("invalid-private-control-marker"));
+    assert!(devlink_broker::local::running(&f.path).unwrap());
+    assert_eq!(
+        Runtime::load(&f.path)
+            .unwrap()
+            .health()
+            .await
+            .unwrap()
+            .instance_id,
+        runtime.instance_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_start_failure_reports_unknown_side_effects_without_exposing_credentials() {
+    let f = Fixture::new().await;
+    selected(&f);
+    data(create(&f));
+    let _cleanup = Stop(f.path.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config::set(
+        &f.path,
+        "localPort",
+        &listener.local_addr().unwrap().port().to_string(),
+    )
+    .unwrap();
+    let before = profile(&f.path);
+    let mut stages =
+        SetupStages::default().with_broker_executable(env!("CARGO_BIN_EXE_devlink").into());
+    let StepResult::Failed(error) = stages
+        .execute(
+            Step::StartBroker,
+            &SetupContext {
+                config_path: f.path.clone(),
+            },
+        )
+        .await
+    else {
+        panic!("occupied port started")
+    };
+    assert_eq!(error.code, ErrorCode::BrokerStartFailed);
+    assert_eq!(error.outcome, Outcome::Unknown);
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains(before["state"]["token"].as_str().unwrap())
+    );
+    assert!(!devlink_broker::local::running(&f.path).unwrap());
+    assert_eq!(before, profile(&f.path));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

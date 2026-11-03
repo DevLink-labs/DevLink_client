@@ -17,6 +17,11 @@ use std::{
     },
 };
 use tokio::{net::TcpListener, task::JoinHandle};
+#[path = "tool_fixture.rs"]
+pub mod tool_fixture;
+pub fn test_tool() -> &'static std::path::Path {
+    tool_fixture::codex()
+}
 
 pub const PASSWORD: &str = "test-password-do-not-print";
 pub const COOKIE: &str = "post-login-cookie-do-not-print";
@@ -203,6 +208,14 @@ async fn agent_create(
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
     }
     assert!(body.get("ownerUserId").is_none() && body.get("agentId").is_none());
+    assert_eq!(
+        body.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["name", "projectName", "roleDescription", "toolType"]
+    );
     let count = state.agents.lock().unwrap().len();
     let id = 201 + count as u64;
     let user = user(&state)["userId"].as_u64().unwrap();
@@ -551,6 +564,12 @@ pub fn run_at(path: &std::path::Path, args: &[&str], input: Option<&str>) -> Out
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Existing auth/team/project fixtures use a synthetic --version-only Host.
+    if args.contains(&"setup") && !args.contains(&"--tool") && !args.contains(&"--tool-path") {
+        command
+            .args(["--tool", "codex", "--tool-path"])
+            .arg(test_tool());
+    }
     let mut child = command.spawn().unwrap();
     if let Some(input) = input {
         child
