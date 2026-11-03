@@ -42,6 +42,8 @@ fn setup_help_documents_usage_output_and_global_config() {
         "--agent-name <NAME>",
         "--tool <TYPE>",
         "--tool-path <FILE>",
+        "--create-agent",
+        "--agent-id <ID>",
         "current directory",
         "single joined team",
         "remaining stages follow",

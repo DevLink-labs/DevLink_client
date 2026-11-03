@@ -51,6 +51,9 @@ pub struct MockState {
     pub create_calls: Arc<AtomicUsize>,
     pub token_calls: Arc<AtomicUsize>,
     pub create_mode: Arc<AtomicU8>,
+    pub pause_create: Arc<AtomicBool>,
+    pub create_entered: Arc<tokio::sync::Notify>,
+    pub create_resume: Arc<tokio::sync::Notify>,
     pub token_mode: Arc<AtomicU8>,
     pub wrong_context: Arc<AtomicBool>,
     pub csrf_failure: Arc<AtomicBool>,
@@ -229,6 +232,10 @@ async fn agent_create(
     );
     agent["roleDescription"] = body["roleDescription"].clone();
     state.agents.lock().unwrap().insert(id, agent.clone());
+    if state.pause_create.load(Ordering::SeqCst) {
+        state.create_entered.notify_one();
+        state.create_resume.notified().await;
+    }
     if state.create_mode.load(Ordering::SeqCst) == 1 {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
     }

@@ -1,10 +1,13 @@
 use super::{
-    ErrorCode, ErrorLocation, InputKind, InputSource, LoginCredentials, LoginInput,
-    LoginInputError, NoLoginInput, NoTeamInput, NoToolInput, Outcome, RequiredInput, SetupContext,
-    SetupError, Step, StepExecutor, StepResult, TeamChoice, TeamInput, TeamInputError, ToolInput,
-    ToolInputError,
+    AgentInput, AgentInputError, ErrorCode, ErrorLocation, InputKind, InputSource,
+    LoginCredentials, LoginInput, LoginInputError, NoAgentInput, NoLoginInput, NoTeamInput,
+    NoToolInput, Outcome, RequiredInput, SetupContext, SetupError, Step, StepExecutor, StepResult,
+    TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError,
 };
 use devlink_broker::{
+    agent_profile::registration::{
+        self, Registration, RegistrationContext, RegistrationState, Selection,
+    },
     broker_control,
     sessions::ToolType,
     setup_config::{self, FailureKind, PreparedConfig},
@@ -19,15 +22,17 @@ use devlink_broker::{
 /// Per-stage state lives in small structs, so swapping one input adapter moves a
 /// handful of fields and a new stage adds its own struct instead of touching three
 /// field lists.
-pub struct SetupStages<I = NoLoginInput, T = NoTeamInput, U = NoToolInput> {
+pub struct SetupStages<I = NoLoginInput, T = NoTeamInput, U = NoToolInput, A = NoAgentInput> {
     input: I,
     team_input: T,
     tool_input: U,
+    agent_input: A,
     prepared: Option<PreparedConfig>,
     auth: AuthState,
     teams: TeamState,
     project: ProjectState,
     tools: ToolState,
+    agents: AgentState,
     broker: BrokerState,
 }
 
@@ -63,6 +68,13 @@ struct ToolState {
 }
 
 #[derive(Default)]
+struct AgentState {
+    selection: Option<Selection>,
+    waiting: bool,
+    registration: Option<Registration>,
+}
+
+#[derive(Default)]
 struct BrokerState {
     executable: Option<std::path::PathBuf>,
     result: Option<broker_control::StartResult>,
@@ -80,44 +92,73 @@ impl<I> SetupStages<I, NoTeamInput> {
             input,
             team_input: NoTeamInput,
             tool_input: NoToolInput,
+            agent_input: NoAgentInput,
             prepared: None,
             auth: AuthState::default(),
             teams: TeamState::default(),
             project: ProjectState::default(),
             tools: ToolState::default(),
+            agents: AgentState::default(),
             broker: BrokerState::default(),
         }
     }
 }
 
-impl<I, T, U> SetupStages<I, T, U> {
-    pub fn with_team_input<V>(self, input: V) -> SetupStages<I, V, U> {
+impl<I, T, U, A> SetupStages<I, T, U, A> {
+    pub fn with_team_input<V>(self, input: V) -> SetupStages<I, V, U, A> {
         SetupStages {
             input: self.input,
             team_input: input,
             tool_input: self.tool_input,
+            agent_input: self.agent_input,
             prepared: self.prepared,
             auth: self.auth,
             teams: self.teams,
             project: self.project,
             tools: self.tools,
+            agents: self.agents,
             broker: self.broker,
         }
     }
 
-    pub fn with_tool_input<V>(self, input: V) -> SetupStages<I, T, V> {
+    pub fn with_tool_input<V>(self, input: V) -> SetupStages<I, T, V, A> {
         SetupStages {
             input: self.input,
             team_input: self.team_input,
             tool_input: input,
+            agent_input: self.agent_input,
             prepared: self.prepared,
             auth: self.auth,
             teams: self.teams,
             project: self.project,
             tools: self.tools,
+            agents: self.agents,
             broker: self.broker,
         }
     }
+    pub fn with_agent_input<V>(self, input: V) -> SetupStages<I, T, U, V> {
+        SetupStages {
+            input: self.input,
+            team_input: self.team_input,
+            tool_input: self.tool_input,
+            agent_input: input,
+            prepared: self.prepared,
+            auth: self.auth,
+            teams: self.teams,
+            project: self.project,
+            tools: self.tools,
+            agents: self.agents,
+            broker: self.broker,
+        }
+    }
+    pub fn with_agent(mut self, selection: Option<Selection>) -> Self {
+        self.agents.selection = selection;
+        self
+    }
+    pub fn registration(&self) -> Option<&Registration> {
+        self.agents.registration.as_ref()
+    }
+
     pub fn with_tool(mut self, tool: Option<ToolType>, path: Option<std::path::PathBuf>) -> Self {
         self.tools.requested = tool;
         self.tools.path = path;
@@ -168,7 +209,9 @@ impl<I, T, U> SetupStages<I, T, U> {
     }
 }
 
-impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, T, U> {
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
+    for SetupStages<I, T, U, A>
+{
     type Data = ();
 
     async fn execute(&mut self, step: Step, context: &SetupContext) -> StepResult {
@@ -180,6 +223,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
         }
         if step == Step::SelectTool {
             return self.select_tool(context).await;
+        }
+        if step == Step::RegisterAgent {
+            return self.register_agent(context).await;
         }
         if step == Step::StartBroker {
             let executable = self
@@ -211,6 +257,12 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
                     safe.known.team_id =
                         self.teams.selected.as_ref().map(|t| t.team_id.to_string());
                     safe.known.tool_type = self.tools.selected.as_ref().map(|t| t.tool_type);
+                    safe.known.agent_id = self
+                        .agents
+                        .registration
+                        .as_ref()
+                        .and_then(|r| r.agent_id)
+                        .map(|id| id.to_string());
                     StepResult::Failed(safe)
                 }
             };
@@ -253,6 +305,12 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
             if let Some(team) = &self.teams.selected {
                 error.known.team_id = Some(team.team_id.to_string());
             }
+            error.known.agent_id = self
+                .agents
+                .registration
+                .as_ref()
+                .and_then(|r| r.agent_id)
+                .map(|id| id.to_string());
             error.tools = self.tools.reports.clone();
             error.known.tool_type = self.tools.selected.as_ref().map(|s| s.tool_type);
             return StepResult::Failed(error);
@@ -321,7 +379,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
     }
 
     fn can_resolve_input(&self) -> bool {
-        if self.tools.waiting {
+        if self.agents.waiting {
+            self.agent_input.available()
+        } else if self.tools.waiting {
             self.tool_input.available()
         } else if self.teams.waiting {
             self.team_input.available()
@@ -330,7 +390,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
         }
     }
     fn input_is_interactive(&self) -> bool {
-        if self.tools.waiting {
+        if self.agents.waiting {
+            self.agent_input.interactive()
+        } else if self.tools.waiting {
             self.tool_input.interactive()
         } else if self.teams.waiting {
             self.team_input.interactive()
@@ -340,6 +402,21 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
     }
 
     async fn resolve_input(&mut self, required: &SetupError) -> Result<(), SetupError> {
+        if required.step == Step::RegisterAgent {
+            let code = match self.agent_input.request().await {
+                Ok(selection) => {
+                    self.agents.selection = Some(selection);
+                    return Ok(());
+                }
+                Err(AgentInputError::Unavailable) => return Err(required.clone()),
+                Err(AgentInputError::Invalid) => ErrorCode::InputInvalid,
+                Err(AgentInputError::Cancelled) => ErrorCode::Cancelled,
+                Err(AgentInputError::ReadFailed) => ErrorCode::InternalError,
+            };
+            let mut error = SetupError::new(code, Step::RegisterAgent, Outcome::NotApplied);
+            error.known = required.known.clone();
+            return Err(error);
+        }
         if required.step == Step::SelectTool {
             let code = match self.tool_input.request(&self.tools.reports).await {
                 Ok(tool)
@@ -454,7 +531,7 @@ fn broker_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
     safe
 }
 
-impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T, U, A> {
     async fn select_tool(&mut self, context: &SetupContext) -> StepResult {
         let (Some(config), Some(user), Some(team), Some(project)) = (
             &self.prepared,
@@ -959,6 +1036,146 @@ fn auth_error(path: &std::path::Path, error: &anyhow::Error, login_attempted: bo
         safe.outcome = Outcome::Applied;
     }
     safe
+}
+
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T, U, A> {
+    async fn register_agent(&mut self, context: &SetupContext) -> StepResult {
+        let (Some(config), Some(user), Some(team), Some(project), Some(tool)) = (
+            &self.prepared,
+            &self.auth.user,
+            &self.teams.selected,
+            &self.project.prepared,
+            &self.tools.selected,
+        ) else {
+            return StepResult::Failed(SetupError::new(
+                ErrorCode::InternalError,
+                Step::RegisterAgent,
+                Outcome::NotApplied,
+            ));
+        };
+        let Ok(origin) = user_auth::origin(&config.config) else {
+            return StepResult::Failed(SetupError::new(
+                ErrorCode::ConfigInvalid,
+                Step::RegisterAgent,
+                Outcome::NotApplied,
+            ));
+        };
+        let expected = RegistrationContext {
+            origin: origin.to_string(),
+            user_id: user.user_id,
+            team_id: team.team_id,
+            project: project.clone(),
+            tool: tool.tool_type,
+        };
+        let result =
+            registration::ensure(&context.config_path, &expected, self.agents.selection).await;
+        let mut error = match result {
+            Ok(registration) => {
+                let outcome = registration_outcome(registration.outcome);
+                let reused = registration.reused;
+                let state = registration.state;
+                if let Some(metadata) = &registration.metadata
+                    && let Some(project) = &mut self.project.prepared
+                {
+                    project.metadata = metadata.clone();
+                }
+                self.agents.registration = Some(registration);
+                match state {
+                    RegistrationState::Ready => {
+                        self.agents.waiting = false;
+                        return StepResult::Complete { outcome, reused };
+                    }
+                    RegistrationState::Vacant => {
+                        self.agents.waiting = true;
+                        let mut error =
+                            SetupError::new(ErrorCode::InputRequired, Step::RegisterAgent, outcome);
+                        error.required_inputs.push(RequiredInput {
+                            field: "agent.action",
+                            kind: InputKind::Selection,
+                            secret: false,
+                            source: InputSource::Input,
+                        });
+                        error.known.user_id = Some(user.user_id.to_string());
+                        error.known.team_id = Some(team.team_id.to_string());
+                        error.known.tool_type = Some(tool.tool_type);
+                        return StepResult::InputRequired(error);
+                    }
+                    RegistrationState::CreationUnknown => {
+                        let mut error = SetupError::new(
+                            ErrorCode::RegistrationUnknown,
+                            Step::RegisterAgent,
+                            outcome,
+                        );
+                        error.required_inputs.push(RequiredInput {
+                            field: "agent.id",
+                            kind: InputKind::Selection,
+                            secret: false,
+                            source: InputSource::OwnedAgentList,
+                        });
+                        error
+                    }
+                    RegistrationState::TokenRequired => {
+                        SetupError::new(ErrorCode::TokenRequired, Step::RegisterAgent, outcome)
+                    }
+                }
+            }
+            Err(failure) => {
+                let code = match failure.kind {
+                    registration::FailureKind::Storage => ErrorCode::AgentStorageFailed,
+                    registration::FailureKind::Busy => ErrorCode::AuthBusy,
+                    registration::FailureKind::ConfigBusy => ErrorCode::ConfigBusy,
+                    registration::FailureKind::BrokerBusy => ErrorCode::BrokerBusy,
+                    registration::FailureKind::BindingConflict => ErrorCode::AgentBindingConflict,
+                    registration::FailureKind::Forbidden => ErrorCode::AgentForbidden,
+                    registration::FailureKind::SessionConflict => ErrorCode::AuthSessionConflict,
+                    registration::FailureKind::Rejected => ErrorCode::AgentRejected,
+                    registration::FailureKind::AuthRejected => ErrorCode::AuthRequired,
+                    registration::FailureKind::Unavailable => ErrorCode::CentralUnavailable,
+                    registration::FailureKind::Protocol => ErrorCode::ProtocolError,
+                };
+                let mut error = SetupError::new(
+                    code,
+                    Step::RegisterAgent,
+                    registration_outcome(failure.outcome),
+                );
+                error.known.agent_id = failure.agent_id.map(|id| id.to_string());
+                if code == ErrorCode::AgentForbidden {
+                    error.required_inputs.push(RequiredInput {
+                        field: "agent.id",
+                        kind: InputKind::Selection,
+                        secret: false,
+                        source: InputSource::OwnedAgentList,
+                    });
+                }
+                if code == ErrorCode::AgentStorageFailed {
+                    error.location = Some(ErrorLocation {
+                        file: devlink_broker::agent_profile::path(&context.config_path),
+                        field: None,
+                    });
+                }
+                error
+            }
+        };
+        error.known.user_id = Some(user.user_id.to_string());
+        error.known.team_id = Some(team.team_id.to_string());
+        error.known.tool_type = Some(tool.tool_type);
+        if error.known.agent_id.is_none() {
+            error.known.agent_id = self
+                .agents
+                .registration
+                .as_ref()
+                .and_then(|r| r.agent_id)
+                .map(|id| id.to_string());
+        }
+        StepResult::Failed(error)
+    }
+}
+fn registration_outcome(outcome: registration::Mutation) -> Outcome {
+    match outcome {
+        registration::Mutation::NotApplied => Outcome::NotApplied,
+        registration::Mutation::Applied => Outcome::Applied,
+        registration::Mutation::Unknown => Outcome::Unknown,
+    }
 }
 
 #[cfg(test)]

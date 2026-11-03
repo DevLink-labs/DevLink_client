@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06·07·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·공통 브로커 제어 실행부를 구현했다.
+작업 02·03·04·05·06·07·08·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·공통 브로커 제어 실행부를 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -18,13 +18,17 @@ devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝�
 # 도구 선택. PATH 밖 설치는 실행 파일을 함께 지정할 수 있다.
 devlink setup --tool codex
 devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
+# 신규 생성은 명시적으로 요청한다. 토큰 발급은 별도 단계다.
+devlink setup --tool codex --create-agent
+# 기존 본인 Agent 선택 또는 생성 결과 불명 복구
+devlink setup --tool codex --agent-id 34
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비·도구 탐지/선택·공통 브로커 제어와 start_broker 어댑터**다. Agent 선택/등록 및 MCP 설정/연결 상태 조회 통합은 후속 작업이다. register_agent가 아직 미연결이므로 일반 setup 전체 흐름은 이 단계에서 중단하며, 연결해 둔 start_broker까지 자동으로 건너뛰지 않는다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·공통 브로커 제어와 start_broker 어댑터**다. 08 등록은 기존 API와 pending 보호 정책을 연결하며 토큰을 발급하지 않는다. 새 Agent 및 토큰 없는 기존 Agent는 알려진 ID를 반환하고 register_agent에서 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 저장된 ready 프로필을 중앙 소유권·메타데이터로 재확인하면 다음 단계로 진행하며 start_broker의 기존 토큰 검증을 유지한다. 09 토큰 단계와 MCP 설정/최종 연결 상태 집계는 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 완료되면 아직 미연결인 register_agent에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 토큰이 필요하면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker로 진행한 뒤 아직 미연결인 configure_mcp에서 SETUP_STEP_UNAVAILABLE/종료 3으로 멈춘다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -466,3 +470,50 @@ setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStage
 2026-11-03 PR #41 리뷰의 인라인 지적 7건을 반영했다. (1) broker.lock은 잡혀 있지만 runtime.json이 없는 기동 중 브로커를 `BrokerStarting`으로 구분해 setup에서 SETUP_UNSAFE_FILE 대신 재시도 가능한 SETUP_BROKER_BUSY로 보고한다. CLI start/status/stop도 "Broker is starting; wait a moment and retry"를 출력한다. (2) `wait_for_start`는 health까지 확인한 뒤의 `local::running` 오류로 자식을 종료하지 않고 제한 시간까지 재시도하며, 계속 실패하면 마지막 오류를 Storage/Unknown으로 반환한다. (3) validate는 프로젝트 경로만 확정하고 표시명·Agent명·역할 검증은 bind_project로 옮겨, 폴더명이 없는 루트에서도 저장된 프로필 이름으로 진행할 수 있다. (4) Windows 표준 핸들 상속 해제는 spawn 동안만 적용하고 직후 원래 플래그로 복원한다. (5) 도구 probe는 지정·바인딩·선택된 도구만 수행하고 대화형 재진입 때 선택한 도구만 다시 probe한다. (6) SetupStages의 단계별 상태를 auth/teams/project/tools/broker 하위 struct로 묶어 입력 어댑터 교체가 필드 9개만 옮긴다. (7) resultText 크기 검사와 함께 지적된 중앙 계약 변경(메시지 한도 64→256 KiB, REJECTED 전환, 완료 결과 크기 검사)은 브로커 제어와 무관하므로 이 브랜치에서 작업 전 상태로 되돌렸다. 중앙 서버 상한과 함께 별도 작업으로 맞춘다.
 
 Windows MSVC에서 `devlink-broker --lib` **102 passed**(기동 중 분류·제한 시간 후 Storage 회귀 포함), broker 통합 task_operations 22·task_creation 7, CLI setup 8개 스위트(프로젝트 루트/bind_project 이름 검증·단독 probe·선택 재진입 probe 회귀 포함) 102 passed / 1 ignored, cli_agents 15·cli_broker 37이 모두 통과했다. workspace all-targets Clippy `-D warnings`(기존 collapsible_if 제외)와 fmt가 통과했다. 로그는 빌드 산출물 `rust/target/pr41-review-fix.log`에 보관한다. 전체 workspace 테스트와 Unix 분기는 이번에 다시 실행하지 않았다.
+
+## 작업 08: Agent 생성·재사용 및 pending 복구 연결
+
+2026-11-03 (Asia/Seoul). `agent_profile::registration`은 기존 프로필·private 저장·사용자 세션·중앙 Agent API를 재사용하는 내부 provider다. `inspect`는 Agent를 만들거나 바인딩/발급하지 않는다. `ensure`는 명시적 Create/Use(ID), 또는 저장 프로필 재확인을 처리한다. 공통 실행기·provider는 터미널 입출력을 직접 수행하지 않고 AgentInput 어댑터를 사용한다.
+
+- 새 프로필은 `--create-agent` 또는 대화형 create 입력이 있어야 생성한다. 이름·프로젝트명·역할·도구만 중앙 DTO에 넣고 로컬 경로·setup runId·추측한 등록키는 보내지 않는다.
+- 기존 프로필은 서버 origin·확인한 사용자·팀·canonical 프로젝트·도구와 중앙 소유권/메타데이터를 대조한다. 정상 재실행과 동일한 create 요청은 기존 ID를 재사용하며 토큰을 발급하거나 파일을 다시 쓰지 않는다. ready는 기존에 저장된 토큰이 있는 상태이며 이번 08 단계가 토큰의 현재 유효성을 검증했다는 뜻은 아니다. 실제 기동에서는 기존 prepare_broker 검증을 거친다.
+- `--agent-id <ID>`는 중앙에서 본인 소유·선택 팀·도구를 확인한 뒤 명시적으로 바인딩한다. 이름 일치로 자동 선택하지 않는다. `--create-agent`와 동시에 지정할 수 없으며 agent-name/project-name/role-description으로 중앙 메타데이터를 바꾸지 않는다.
+- 생성 POST 전 CSRF를 준비하고 create_pending을 내구 저장한다. 응답 유실·5xx·잘못된 성공 DTO는 creation_unknown/outcome:unknown이며 pending을 유지한다. 재실행해도 생성 POST를 반복하지 않는다. 확정된 4xx 거부만 vacant로 저장하며 새 생성은 별도 명시 요청이 필요하다.
+- 성공한 ID를 확인하면 needs_token을 저장하고 알려진 ID·outcome:applied와 SETUP_TOKEN_REQUIRED를 반환한다. 후속 09 또는 기존 명시적 `devlink agent token`으로 토큰을 준비할 수 있다. 발급·회전은 08에서 호출하지 않는다.
+- 생성 결과 불명은 `devlink agent list`로 실제 본인 ID를 확인한 뒤 `setup --agent-id <ID>`로 복구한다. 등록키 기반 자동 복구 API는 아직 없으므로 제공한 것으로 간주하지 않는다. 자동 reset-pending/중복 위험 우회도 추가하지 않았다.
+- 등록 입력/네트워크 대기 후 현재 바인딩을 다시 검사한다. account → control → broker → owner 순서로 잠그고, 실행/시작 중인 브로커의 변경은 거부한다. 손상 프로필을 명시적 use로 조용히 덮어쓰지 않는다. API 원문·토큰·쿠키를 공통 오류로 복사하지 않는다.
+
+Agent 소유권/팀 불일치와 HTTP 403은 계약의 SETUP_AGENT_FORBIDDEN(4), requiredInputs:agent.id, select_owned_agent로 통일한다. 다른 새 오류는 SETUP_AGENT_BINDING_CONFLICT(6), SETUP_AGENT_REJECTED(4), SETUP_AGENT_STORAGE_FAILED(5)다. 상태·알려진 ID·적용 여부를 보존하며 복구는 명시적 사용자 동작으로 안내한다. 이 작업의 검증은 합성 중앙/실제 CLI 기반 회귀이며 실제 운영 중앙 API·배포본·Host 전체 설정 완료는 별도 검증이다.
+
+
+### 작업 08 검증 결과
+
+2026-11-03 Windows MSVC, 합성 중앙·실제 CLI 자식 프로세스·임시 비공개 프로필 기준이다. 기본 병렬 설정으로 실행했고 중복 재실행을 합산하지 않았다.
+
+| 검사 | 결과 |
+| --- | --- |
+| 새 Agent 등록/복구/선택/잠금/CLI 계약 | 13 passed |
+| 기존 Agent CLI / setup CLI | 15 / 6 passed |
+| setup 인증 / 팀 / 프로젝트 | 22 / 17 / 10 passed |
+| 공통 흐름 / 출력 / 도구 탐지 | 10 / 5 / 15 passed, 도구의 기존 opt-in 1 ignored |
+| 관련 회귀 합계 | 113 passed / 0 failed / 1 existing opt-in ignored |
+| workspace/all-targets Clippy `-D warnings` / 전체 rustfmt / 변경 공백 | 통과 |
+| README·setup 문서의 로컬 링크 | 정상 |
+
+등록 검증에는 명시적 생성/ID 선택, 토큰 발급 0건, needs_token·pending 내구 상태, 응답 유실 후 생성 POST 1회 유지, 확정 거부와 CSRF 선행 실패 구분, 본인 ID 복구, 타 사용자/팀/도구 거부, 토큰/프로필 원문 보존, 손상 파일 보존, 계정·제어 잠금 경합, 실제 생성 응답 대기 중 broker.lock 유지, 입력 취소, 단일 JSONL 최종 결과와 Java Long 최댓값의 문자열 보존을 포함한다.
+
+초기 실행에서 손상 프로필의 오류 분류와 Windows 일반/정규화 경로의 동일성 비교를 보완했다. 앞 단계 테스트는 기존의 미구현 종료 3 대신 등록 선택 입력 부족 종료 2를 기대하도록 갱신했다. 최종 브로커 잠금 보완 후 등록 13건과 setup CLI 6건을 다시 실행해 통과했다. 로그는 `rust/target/setup08-regression-final.log`(초기 관련 묶음), `setup08-final-deltas.log`(프로젝트·팀 보완 후), `setup08-lock-final.log`(최종 등록·CLI), `setup08-clippy-final.log`에 보관한다. 각 로그의 코드 상태·중간 실패·최종 재검증을 구분한다.
+
+전체 workspace 테스트, 실제 운영 중앙/DB, 실제 대화형 콘솔 수동 입력, Unix, 배포본·실제 Host 전체 설정은 이번 검증에 포함하지 않았다. 등록키 자동 복구는 미제공 API를 가정하지 않고 pending/본인 ID 복구로 남긴다.
+
+
+### 작업 08 리뷰 보완
+
+타인 소유/다른 팀 Agent의 정상 DTO와 HTTP 403은 SETUP_AGENT_FORBIDDEN/종료 4로 통일한다. 소유권 확인 실패로 Agent를 생성하거나 프로필을 바꾸지 않는다.
+
+웹 등에서 같은 Agent의 이름·프로젝트 표시명·역할이 변경되면 일반 재실행/inspect/create는 기존 메타데이터를 보존하고 충돌을 반환한다. 브로커를 중지한 뒤 `setup --agent-id <동일 ID>`로 명시적으로 선택하면 중앙 소유권·팀·도구·프로젝트 경로를 다시 확인하고 최신 표시 메타데이터를 로컬 프로필과 후속 단계 컨텍스트에 반영한다. 기존 ready 토큰과 MCP 자격은 그대로 보존하며 생성·토큰 발급 API를 호출하지 않는다. 같은 메타데이터의 반복 선택은 다시 저장하지 않는다.
+
+09 이전의 알려진 제한: 08의 ready 재사용은 저장 토큰의 현재 유효성을 검사하지 않는다. 토큰이 폐기/만료되어 있으면 자식 브로커의 기동 중 검증에서 실패하므로 현재 `start_broker`의 SETUP_BROKER_START_FAILED/종료 5로 끝날 수 있다. `devlink agent token` 후 재실행으로 복구하며, Agent 인증 거부를 SETUP_TOKEN_REQUIRED/종료 3으로 분류하는 검증·발급 통합은 09에서 처리한다. 이 실패를 08에서 정상 토큰으로 확인한 것으로 표시하지 않는다.
+
+
+2026-11-03 리뷰 보완 검증: 수정 전 새 소유권·메타데이터 복구 회귀 2건이 모두 실패해 지적을 재현했다. 수정 후 등록 15건·도구 17건·setup CLI 6건·공통 흐름 10건·출력 5건으로 **53 passed / 0 failed / 기존 opt-in 1 ignored**다. 기본 병렬 설정으로 실행했으며 중복 재실행을 합산하지 않았다. workspace/all-targets Clippy `-D warnings`, rustfmt, 변경 공백 검사도 통과했다. 로그는 `rust/target/setup08-review-before.log`, `setup08-review-regression.log`, `setup08-review-clippy.log`에 보관한다. 운영 서버·전체 workspace 테스트는 이번에 다시 실행하지 않았다.

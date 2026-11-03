@@ -1,8 +1,8 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
 use super::{
-    Completion, LoginCredentials, LoginInput, LoginInputError, ProgressEvent, ProgressUnavailable,
-    RunResult, SetupContext, SetupStages, TeamChoice, TeamInput, TeamInputError, ToolInput,
-    ToolInputError, parse_team_id,
+    AgentInput, AgentInputError, Completion, LoginCredentials, LoginInput, LoginInputError,
+    ProgressEvent, ProgressUnavailable, RunResult, SetupContext, SetupStages, TeamChoice,
+    TeamInput, TeamInputError, ToolInput, ToolInputError, parse_team_id,
 };
 use clap::{Args, ValueEnum};
 use serde::Serialize;
@@ -14,7 +14,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nAgent registration and remaining stages follow."
+    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nUse --create-agent for explicit creation or --agent-id for an owned existing Agent.\nCreation stores the Agent ID without issuing a token; token preparation and remaining stages follow."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
@@ -47,6 +47,13 @@ pub struct SetupArgs {
     /// Explicit Host executable or npm .cmd shim outside PATH (requires --tool)
     #[arg(long, value_name = "FILE", requires = "tool")]
     pub tool_path: Option<PathBuf>,
+    /// Explicitly request Agent creation; a saved matching Agent is reused
+    #[arg(long, conflicts_with = "agent_id")]
+    pub create_agent: bool,
+    /// Explicit owned Agent ID, including recovery after an uncertain creation
+    #[arg(long, value_name = "ID", value_parser = parse_team_id,
+        conflicts_with_all = ["agent_name", "project_name", "role_description"])]
+    pub agent_id: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -80,6 +87,13 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
         password_stdin: args.password_stdin,
     };
     let stages = SetupStages::new(input)
+        .with_agent_input(TerminalAgentInput)
+        .with_agent(if args.create_agent {
+            Some(devlink_broker::agent_profile::registration::Selection::Create)
+        } else {
+            args.agent_id
+                .map(devlink_broker::agent_profile::registration::Selection::Use)
+        })
         .with_team_input(TerminalTeamInput)
         .with_tool_input(TerminalToolInput)
         .with_tool(args.tool, args.tool_path)
@@ -338,6 +352,55 @@ impl<W: Write> Renderer<W> {
         writeln!(self.writer)
             .and_then(|_| self.writer.flush())
             .map_err(|_| ProgressUnavailable)
+    }
+}
+
+struct TerminalAgentInput;
+impl AgentInput for TerminalAgentInput {
+    fn available(&self) -> bool {
+        self.interactive()
+    }
+    fn interactive(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+    async fn request(
+        &mut self,
+    ) -> Result<devlink_broker::agent_profile::registration::Selection, AgentInputError> {
+        if !self.interactive() {
+            return Err(AgentInputError::Unavailable);
+        }
+        tokio::task::spawn_blocking(|| {
+            use devlink_broker::agent_profile::registration::Selection;
+            use std::io::{BufRead, Read};
+            fn read(prompt: &str) -> Result<String, AgentInputError> {
+                let mut stderr = std::io::stderr().lock();
+                write!(stderr, "{prompt}")
+                    .and_then(|_| stderr.flush())
+                    .map_err(|_| AgentInputError::ReadFailed)?;
+                let mut bytes = Vec::new();
+                let n = std::io::stdin()
+                    .lock()
+                    .take(128)
+                    .read_until(b'\n', &mut bytes)
+                    .map_err(|_| AgentInputError::ReadFailed)?;
+                if n == 0 {
+                    return Err(AgentInputError::Cancelled);
+                }
+                if n >= 128 {
+                    return Err(AgentInputError::Invalid);
+                }
+                String::from_utf8(bytes).map_err(|_| AgentInputError::Invalid)
+            }
+            match read("Agent action (create/use): ")?.trim() {
+                "create" => Ok(Selection::Create),
+                "use" => parse_team_id(read("Owned Agent ID: ")?.trim())
+                    .map(Selection::Use)
+                    .map_err(|_| AgentInputError::Invalid),
+                _ => Err(AgentInputError::Invalid),
+            }
+        })
+        .await
+        .map_err(|_| AgentInputError::ReadFailed)?
     }
 }
 

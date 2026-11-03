@@ -354,7 +354,7 @@ async fn interactive_selection_emits_detected_choices_and_resumes_only_the_tool_
         },
     )
     .await;
-    assert_eq!(result.exit_code, 3);
+    assert_eq!(result.exit_code, 2);
     let waiting = events
         .iter()
         .find(|e| e["stepStatus"] == "waiting_input")
@@ -370,7 +370,7 @@ async fn interactive_selection_emits_detected_choices_and_resumes_only_the_tool_
         1
     );
     let Completion::Failure { error } = result.completion else {
-        panic!("Registration is not connected")
+        panic!("Registration requires an explicit action")
     };
     assert_eq!(error.step, Step::RegisterAgent);
 }
@@ -431,7 +431,8 @@ async fn a_resumed_interactive_choice_reprobes_only_the_chosen_tool() {
         |_| Ok(()),
     )
     .await;
-    assert_eq!(result.exit_code, 3, "{:?}", result.status);
+    // Registration now follows tool selection and requires an explicit action.
+    assert_eq!(result.exit_code, 2, "{:?}", result.status);
     // Both hosts are probed once to build the choice list; after the choice only
     // Claude Code is probed again, so a host removed during input is still caught.
     assert_eq!(
@@ -444,7 +445,7 @@ async fn a_resumed_interactive_choice_reprobes_only_the_chosen_tool() {
     );
     assert!(setup_tools::path(&f.path).exists());
     let Completion::Failure { error } = result.completion else {
-        panic!("Registration is not connected")
+        panic!("Registration requires an explicit action")
     };
     assert_eq!(error.step, Step::RegisterAgent);
 }
@@ -499,7 +500,7 @@ async fn cli_explicit_path_works_and_invalid_tool_arguments_are_redacted() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(3), "{}", text(&output));
+    assert_eq!(output.status.code(), Some(2), "{}", text(&output));
     account_server::assert_no_secrets(&output);
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["stages"][4]["status"], "succeeded");

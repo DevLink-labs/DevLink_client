@@ -146,6 +146,14 @@ pub enum ErrorCode {
     ToolSelectionConflict,
     #[serde(rename = "SETUP_BROKER_START_FAILED")]
     BrokerStartFailed,
+    #[serde(rename = "SETUP_AGENT_BINDING_CONFLICT")]
+    AgentBindingConflict,
+    #[serde(rename = "SETUP_AGENT_REJECTED")]
+    AgentRejected,
+    #[serde(rename = "SETUP_AGENT_FORBIDDEN")]
+    AgentForbidden,
+    #[serde(rename = "SETUP_AGENT_STORAGE_FAILED")]
+    AgentStorageFailed,
 }
 
 impl ErrorCode {
@@ -176,7 +184,9 @@ impl ErrorCode {
             Self::ToolRequired => 2,
             Self::ToolUnavailable | Self::ToolStorageFailed => 5,
             Self::ToolBindingConflict | Self::ToolSelectionConflict => 6,
-            Self::BrokerStartFailed => 5,
+            Self::BrokerStartFailed | Self::AgentStorageFailed => 5,
+            Self::AgentBindingConflict => 6,
+            Self::AgentRejected | Self::AgentForbidden => 4,
         }
     }
 
@@ -185,9 +195,11 @@ impl ErrorCode {
             Self::InputRequired => "Required setup input is missing.",
             Self::InputInvalid => "Setup input is invalid.",
             Self::RegistrationUnknown => {
-                "Agent registration outcome is unknown. Inspect your existing Agents."
+                "Agent registration outcome is unknown. Run devlink agent list, then recover with setup --agent-id <ID>. Creation was not retried."
             }
-            Self::TokenRequired => "The known Agent requires explicit token issuance.",
+            Self::TokenRequired => {
+                "The known Agent requires explicit token issuance. Use devlink agent token, then rerun setup. No token was issued by registration."
+            }
             Self::StepUnavailable => {
                 "This setup stage is not available in this build. Use the existing individual commands."
             }
@@ -274,6 +286,18 @@ impl ErrorCode {
             Self::ToolSelectionConflict => {
                 "The profile or tool selection changed while selecting a tool. Inspect the current selection and rerun setup explicitly."
             }
+            Self::AgentBindingConflict => {
+                "Agent identity, metadata or binding differs. For changed display metadata, stop this profile's broker and rerun setup --agent-id <ID> to explicitly refresh the same owned Agent. Inspect other binding conflicts before retrying; no new Agent was created."
+            }
+            Self::AgentForbidden => {
+                "The selected Agent is not owned by the current user in the selected team, or access was denied. Select an owned Agent ID with --agent-id."
+            }
+            Self::AgentRejected => {
+                "Agent creation or selection was rejected. Check the current account, team and explicit Agent ID before retrying."
+            }
+            Self::AgentStorageFailed => {
+                "Agent profile storage failed. Inspect the preserved profile and known Agent ID before retrying; do not create blindly."
+            }
             Self::BrokerStartFailed => {
                 "Broker startup or identity verification failed. Inspect devlink status, the profile and local port. Use devlink stop for a verified running broker before changing its profile or credentials; no unknown process was force-stopped."
             }
@@ -317,6 +341,10 @@ impl ErrorCode {
             Self::ToolStorageFailed => "inspect_tool_selection",
             Self::ToolSelectionConflict => "inspect_tool_selection_then_retry",
             Self::BrokerStartFailed => "inspect_broker_then_retry",
+            Self::AgentBindingConflict => "inspect_agent_binding",
+            Self::AgentRejected => "inspect_owned_agents_then_use",
+            Self::AgentForbidden => "select_owned_agent",
+            Self::AgentStorageFailed => "inspect_agent_profile",
         }
     }
 }
@@ -433,6 +461,7 @@ impl SetupError {
                     | ErrorCode::ToolRequired
                     | ErrorCode::ToolUnavailable
                     | ErrorCode::BrokerStartFailed
+                    | ErrorCode::AgentForbidden
             ),
             recovery: Recovery {
                 action: code.recovery(),

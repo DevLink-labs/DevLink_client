@@ -1,4 +1,5 @@
 //! Explicit, recoverable Agent bootstrap. Server identity is the authority.
+pub mod registration;
 use crate::{
     config::{self, Config},
     credentials, private_file, teams,
