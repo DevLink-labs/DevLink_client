@@ -283,39 +283,17 @@ fn save(config_path: &Path, profile: &Profile) -> Result<()> {
     private_file::write(&path(config_path), profile, LIMIT)
 }
 
-struct SetupGuard {
-    _control: File,
-    _broker: File,
-}
-fn stopped(config_path: &Path) -> Result<SetupGuard> {
-    let directory = config::state_directory(config_path);
-    credentials::ensure_safe_parent_directory(&directory)?;
-    let lock = directory.join("control.lock");
-    let guard = (|| {
-        if std::fs::symlink_metadata(&lock).is_ok() {
-            credentials::verify_path_safety(&lock)?;
-        }
-        config::try_lock(&lock)
-    })()
-    .map_err(|error| user_auth::classify(error, user_auth::AuthFaultKind::ControlLockFailed))?
-    .ok_or_else(|| {
-        user_auth::fault(
-            user_auth::AuthFaultKind::ConfigBusy,
-            "Another DevLink operation is running",
-        )
-    })?;
-    // Also synchronize with direct/internal broker startup before runtime.json exists.
-    let broker = config::try_lock(&directory.join("broker.lock"))
-        .map_err(|error| user_auth::classify(error, user_auth::AuthFaultKind::BrokerLockFailed))?
-        .ok_or_else(|| {
-            user_auth::fault(
-                user_auth::AuthFaultKind::BrokerBusy,
-                "Stop the broker before changing Agent credentials (running or starting)",
-            )
-        })?;
-    Ok(SetupGuard {
-        _control: guard,
-        _broker: broker,
+fn stopped(config_path: &Path) -> Result<crate::broker_control::StoppedGuard> {
+    use crate::broker_control::{self, Failure, FailureKind};
+    broker_control::require_stopped(config_path).map_err(|error| {
+        let kind = match error.downcast_ref::<Failure>().map(|f| f.kind) {
+            Some(FailureKind::ControlLockFailed) => user_auth::AuthFaultKind::ControlLockFailed,
+            Some(FailureKind::ConfigBusy) => user_auth::AuthFaultKind::ConfigBusy,
+            Some(FailureKind::BrokerLockFailed) => user_auth::AuthFaultKind::BrokerLockFailed,
+            Some(FailureKind::BrokerBusy) => user_auth::AuthFaultKind::BrokerBusy,
+            _ => return error,
+        };
+        user_auth::classify(error, kind)
     })
 }
 

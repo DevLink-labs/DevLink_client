@@ -79,6 +79,10 @@ impl Runtime {
     }
     pub async fn stop(&self) -> Result<()> {
         self.health().await?;
+        self.shutdown_verified().await
+    }
+    /// Lifecycle control calls this immediately after authenticating health.
+    pub(crate) async fn shutdown_verified(&self) -> Result<()> {
         let response = self
             .client()?
             .post(self.url("/shutdown"))

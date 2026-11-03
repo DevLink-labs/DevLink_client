@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06·07. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택을 구현했다.
+작업 02·03·04·05·06·07·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·공통 브로커 제어 실행부를 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -22,7 +22,7 @@ devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비·도구 탐지/선택**이다. Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비·도구 탐지/선택·공통 브로커 제어와 start_broker 어댑터**다. Agent 선택/등록 및 MCP 설정/연결 상태 조회 통합은 후속 작업이다. register_agent가 아직 미연결이므로 일반 setup 전체 흐름은 이 단계에서 중단하며, 연결해 둔 start_broker까지 자동으로 건너뛰지 않는다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
 기본 실행기는 validate에서 프로젝트 경로·메타데이터를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한다. select_tool에서 설치된 도구를 탐지·선택한다. 완료되면 아직 미연결인 register_agent에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
@@ -48,6 +48,7 @@ devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
 | `devlink-broker/src/setup_project.rs` | 프로젝트 경로 정규화·표시명 기본값·기존 프로젝트 비교, 등록 메타데이터와 로컬 경로 분리 |
 | `devlink-broker/src/tool_discovery.rs` | 설치 위치 탐색·버전 전용 실행·재사용 가능한 실행 정보·MCP 제공자 연결 |
 | `devlink-broker/src/setup_tools.rs` | 사용자/팀/프로젝트에 묶인 비공개 도구 선택 저장·재사용·경합 검사 |
+| `devlink-broker/src/broker_control.rs` | 공통 시작·중지·상태 조회·중지 상태 잠금·소유 자식 정리. CLI와 setup이 공유 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
 
@@ -419,3 +420,43 @@ cargo test --offline --locked -p devlink-cli --test setup_tools real_node_loads_
 shim 옆에 node_modules가 없는 전역 pnpm/yarn 배치는 코드 및 합성 배치 회귀에서 not_executable임을 확인했다. 이 구조의 자동 해석은 추가하지 않았으며, 실제 네이티브 실행 파일을 --tool-path로 지정하거나 지원하는 설치를 사용하라는 내용을 오류 안내와 문서에 추가했다. 같은 .cmd를 다시 지정하는 것으로 해결되지 않음을 명시했다. 실제 패키지 매니저 설치/변경과 AI 작업·모델 호출은 하지 않았다. 실제 네트워크 UNC 공유는 이번에 검증하지 않았다.
 
 기본 병렬 `cargo test --workspace --offline --locked`는 **318 passed / 0 failed / 3 ignored**로 종료 0이다. ignored는 기존 opt-in 2건과 새 실제 Node 회귀 1건이며, 새 Node 회귀는 위 명령으로 따로 실행해 **1 passed**를 확인했다. 정상 탐지·전역 shim 제한·전용 timeout을 포함한 setup_tools는 전체 실행 안에서 15 passed / 1 ignored다. 재시도와 --test-threads=1은 사용하지 않았다. fmt·변경 공백 검사 및 기존 collapsible_if만 제외한 전체 타깃 Clippy가 통과했다. 전체 실행 로그는 빌드 산출물 `rust/target/setup07-review-workspace.log`에 보관한다. 이 결과는 이번 병렬 실행의 통과이며 모든 CI 부하에서 간헐 실패가 사라졌음을 보장하는 검증은 아니다.
+
+## 작업 11: 브로커 시작·중지·상태 실행부 공통화
+
+`devlink_broker::broker_control`로 기존 cli.rs의 실행 제어를 옮겼다. 모듈은 stdout/stderr에 출력하지 않으며 `start(configPath, cliExecutable)`, `stop(configPath)`, `status(configPath)`, `require_stopped(configPath)`를 제공한다. 개별 start/stop/status 명령은 이 모듈의 결과만 렌더링한다. 기존 성공 출력과 stopped/running 표시, 수신함/알림 진단을 유지한다. 실행 오류에는 typed Failure(kind/outcome/file)를 붙이고 setup은 허용 코드로 매핑한다. CLI에서 이미 제공하던 설정·토큰 충돌 진단은 Failure의 비직렬화 진단으로 유지한다. 원문 provider 오류나 private runtime/토큰을 setup 결과로 직렬화하지 않는다.
+
+start는 control.lock을 유지하면서 broker.lock과 인증된 health를 확인한다. 이미 실행 중이면 service/API version/PID/instanceId와 control-token 인증을 통과한 health를 반환하며 reused:true다. 잠금이 잡혔는데 runtime/health를 확인할 수 없으면 실패하며 새 프로세스를 만들거나 기존 PID를 종료하지 않는다. local::running의 기존 broker.lock 기반 판정과 stale runtime 정리도 유지한다. PID 파일만 있으면 running으로 간주하지 않는다.
+
+새 프로세스는 지정한 CLI 실행 파일에 --config <FILE> broker만 전달한다. stdin/stdout/stderr는 null이며 Windows의 DETACHED_PROCESS/CREATE_NEW_PROCESS_GROUP와 부모 표준 핸들의 HANDLE_FLAG_INHERIT 해제를 유지한다. Unix는 process_group(0)을 유지한다. 라이브러리 호출자는 자신의 current_exe가 테스트/다른 앱일 수 있으므로 실제 devlink 실행 파일을 넘긴다. CLI는 current_exe를 사용하고 setup은 기본값 외에 with_broker_executable로 주입할 수 있다. windows-sys는 이미 고정된 workspace 버전을 브로커 crate에도 연결했으며 외부 패키지 버전은 바꾸지 않았다.
+
+기동 제한은 기존 8초 + credentials::startup_validation_allowance() + agent_profile::startup_allowance(configPath)다. 50ms 간격으로 직접 만든 Child의 종료를 확인하고, runtime 로드·해당 Child PID 일치·인증 health 확인을 통과한 뒤 broker.lock을 확인한다. 시작 대기 중 timeout/오류/취소가 발생하면 RAII 가드가 바로 그 Child 핸들만 kill/wait한다. 성공 시 가드를 해제하고 독립 브로커를 남긴다. 다른 runtime의 PID로 프로세스를 찾아 종료하지 않는다. 기동 실패 전에 자격 파일 등이 발행됐을 수 있으므로 spawn 이후 실패는 outcome:unknown으로 반환한다.
+
+stop은 control.lock 안에서 health를 인증한 뒤 같은 control token으로 shutdown 요청을 보낸다. health 검증과 요청은 기존 Runtime::stop과 같은 순서이며 중복 health 요청을 추가하지 않는다. 요청 뒤 최대 8초 동안 broker.lock 해제를 기다리고 timeout이나 장애 때도 발견한 PID를 강제 종료하지 않는다. stopped는 AlreadyStopped, 정상 종료는 Stopped로 구분한다. 로컬 인스턴스 검증과 중앙 WS/업무 신원의 일치는 구분한다. start 성공 자체가 중앙 Connected나 전체 setupReady를 의미하지 않는다.
+
+프로필 변경·중앙 Agent 토큰 발급·계정 전환 전의 기존 agent_profile::stopped는 이제 require_stopped를 공유한다. control.lock과 broker.lock을 모두 잡아 변경이 끝날 때까지 유지하며 runtime 발행 전 기동 중인 브로커도 차단한다. 기존 AuthFault 분류와 복구 안내를 보존한다. 실행 중인 브로커를 setup이 자동 중지하지 않으며 devlink stop을 명시적으로 실행하도록 안내한다. 사용자가 정상 중지한 뒤 변경을 재시도하면 같은 잠금 검사를 다시 수행한다. 기존 MCP 자격 회전의 중지 요구 정책도 유지한다.
+
+setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStages::broker()에 보관한다. 신규 기동은 applied/reused:false, 재사용은 not_applied/reused:true다. 공통 실행부의 시작/신원 검증 실패는 SETUP_BROKER_START_FAILED/종료 5·inspect_broker_then_retry로, 설정/잠금/자격 실패는 기존 setup 코드로 매핑한다. 작업 08~10의 Agent 등록 흐름을 대신 구현하거나 건너뛰지는 않는다. 현재 일반 setup은 register_agent에서 종료 3이며 어댑터 통합 검사는 이미 등록된 합성 프로필에서 StartBroker를 호출해 검증한다.
+
+### 작업 11 검증 결과
+
+2026-11-03 Windows MSVC에서 신규 회귀는 공통 실행부 7건·setup/CLI 교차 제어 3건·캡처 파이프 EOF 1건으로 11건이 통과했다. 실제 기동·재사용·상태·명시 종료·중지 전 토큰 발급 차단/중지 후 발급·잘못된 제어 토큰 보존·포트 충돌·조기 종료/timeout/취소의 소유 자식 수거·다른 runtime PID 보존·서비스/API 버전/PID/instance 불일치 차단을 포함한다.
+
+최종 `cargo test --target-dir target/setup11-verify --workspace --offline --locked --no-fail-fast -j 2`는 **330 passed / 0 failed / 기존 opt-in 3 ignored**로 종료 0이다. 새 11건은 이 합계에 포함한다. 기존 CLI 브로커 36건에는 동시 시작·느린 정상 ACL 기동·MCP 토큰과 중앙 WS 회귀가 포함되며, Agent CLI 15건·setup 설정/인증/팀/프로젝트/도구 회귀도 통과했다. -j 2는 컴파일 작업 수만 제한하며 테스트는 기본 병렬 설정이었다. --test-threads=1과 실패 테스트 자동 재시도는 사용하지 않았다.
+
+첫 전체 실행에서 새 typed 오류가 기존 CLI의 토큰 충돌 진단을 가리는 문제를 발견해 원래 진단을 보존하도록 수정했고, 해당 기존 회귀를 단독 확인한 뒤 최종 전체 실행에서 재검증했다. 공용 target의 테스트 실행 파일 잠금으로 발생한 LNK1104는 실행 중인 다른 프로세스를 종료하지 않고 별도 target을 사용해 해결했다. 로그는 빌드 산출물 `rust/target/setup11-workspace.log`, `rust/target/setup11-workspace-final.log`, 최종 `rust/target/setup11-isolated-workspace.log`에 보관한다.
+
+전체 fmt·변경 공백 검사가 통과했으며 기존 collapsible_if lint만 제외한 workspace/all-targets Clippy도 통과했다. 동시 수정 중이던 task_creation.rs의 포맷 차이는 해당 변경이 정리된 뒤 전체 검사를 다시 확인했으며, 이번 작업에서 별도 작업의 MCP/중앙/작업 처리 코드를 수정하거나 되돌리지 않았다. 테스트는 임시 프로필과 합성 중앙/자식 프로세스 기준이며 운영 중앙·실제 모델·Unix 전용 분기는 실행하지 않았다. 일반 setup의 register_agent 미연결 범위는 유지한다.
+
+### 작업 11 리뷰: 기동 대기와 broker.lock 경합
+
+2026-11-03 리뷰에서 부모의 `wait_for_start`가 runtime 발행 전에 `local::running`을 호출하면 자식이 필요한 broker.lock을 잠깐 획득할 수 있음을 확인했다. runtime 로드·자식 PID 일치·인증 health를 먼저 확인하고 마지막에 `local::running`을 호출하도록 순서를 바꿨다. runtime을 발행하지 않는 자식을 기다리는 동안 broker.lock 파일 자체를 만들지 않는 회귀도 추가했다. 마지막 락 검사에서 발생한 안전하지 않은 경로/I/O 오류는 timeout까지 삼키지 않고 `Storage / Unknown`으로 즉시 반환한다. Windows 회귀는 별도 심볼릭 링크 권한 없이 생성 가능한 junction으로 reparse point 거부와 대상 파일 보존을 확인하며, Unix 파일 symlink 분기는 이번 환경에서 실행하지 않았다.
+
+별도 status 프로브도 같은 락을 잠깐 소유할 수 있어 자식의 최초 락 획득에만 10ms 간격·200ms 한도의 재시도를 추가했다. 재시도 대상은 `try_lock == None`인 경합뿐이며 경로 안전 검사/I/O 오류는 즉시 실패한다. 계속 점유한 경우 기존 `Another DevLink operation is running` 메시지를 유지한다. 가상 시계 테스트로 일시 경합 후 성공·지속 경합의 제한 시간·안전하지 않은 경로의 즉시 실패를 검사하고, 실제 자식 프로세스에서도 짧은 점유 후 기동과 지속 점유 시 실패를 확인했다. 새 설정 옵션이나 일반 재시도 계층은 추가하지 않았다.
+
+제안 1·2·4를 적용했다. 제안 3의 알림/수신함 삭제 및 MCP 토큰 회전 가드 통일은 이번 기동 실패 해결에 필요하지 않은 별도 리팩터링이므로 제외했다. 해당 경로의 기존 안내 메시지와 중지 요구 정책은 회귀 테스트로 확인했다.
+
+같은 `target/setup11-verify`에서 `cargo test --offline --locked -p devlink-broker --lib`는 **101 passed**, `cargo test --offline --locked -p devlink-cli --test cli_broker`는 **37 passed**로 총 **138 passed / 0 failed**다. 기존 `broker_control::tests` 7건과 새 Storage 회귀 1건, `detached_lifecycle_duplicate_and_local_authentication`, `simultaneous_start_cannot_spawn_two_brokers`, 캡처 파이프 EOF, 수신함 삭제 및 MCP 토큰 회전 회귀를 포함한다. 마지막 파일 상태에서 공통 실행부 8건을 다시 실행해 통과했다. 전체 workspace 테스트를 이번 리뷰에서 다시 실행하지는 않았다.
+
+빌드된 `target/setup11-verify/debug/devlink.exe`를 출력 캡처 상태에서 한글·공백이 있는 별도 임시 프로필로 **start/stop 100회** 실행했다. **100/100 성공, 명령 실패 0건, `Broker exited during startup` 0건**이며 약 128초가 걸렸다. 합성 토큰과 loopback 중앙 주소만 사용했고 마지막 정상 stop도 성공했다. 재현 스크립트는 빌드 산출물 `target/broker-start-stop-stress.py`, 결과는 `target/broker stress 한글 1793681791792299200/result.json`에 보관한다. 이 반복 검증은 모든 부하에서 경합이 없음을 보장하는 증명은 아니다.
+
+수정한 Rust 파일의 rustfmt·변경 공백 검사와 broker/CLI의 all-targets Clippy가 통과했다. Clippy는 기존 `collapsible_if` 진단만 제외했다. 운영 중앙·실제 AI 작업·Unix 실행 검증은 포함하지 않았다.

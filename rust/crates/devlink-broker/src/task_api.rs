@@ -143,7 +143,7 @@ impl LegacyArguments {
             })
             .map_err(|_| validation())?,
         };
-        // 전체 메시지 크기가 중앙 WebSocket 전송 한도(64 KiB) 내인지 검증
+        // prompt가 TASK_CREATED envelope를 포함해 중앙 프레임 한도(protocol::MAX_CENTRAL_MESSAGE_BYTES) 내인지 검증
         if !command.fits_delivery() {
             return Err(validation());
         }

@@ -136,6 +136,8 @@ Rust는 상태 보고에 `agent_id`, 사용자·팀 식별자, 클라이언트 �
 
 최초 Agent 생성·토큰 발급·ID 재사용은 [CLI bootstrap](agent-bootstrap.md), MCP register_agent의 기존 Agent 확인·팀 목록·생성은 [업무 중계](business-relay.md), 작업 상태·완료·조회는 [업무 adapter](task-operations.md)에 구현되어 있다. MCP의 최종 소비자 DTO는 -97로 구분한다.
 
+**메시지 크기**: 중앙은 `prompt`·`result_text` 길이를 제한하지 않으므로 수신 프레임 한도는 클라이언트 측 합의다. Rust는 `protocol::MAX_CENTRAL_MESSAGE_BYTES`(256 KiB)를 WebSocket 프레임·메시지 상한으로 적용하고, 작업 생성의 prompt와 완료의 resultText를 같은 `fits_delivery` 규칙(한도 − envelope 여유 1 KiB)으로 전송 전에 거부한다. 이 한도는 로컬 REST 요청 한도 128 KiB보다 크도록 컴파일 시점에 검사하므로, 이 브로커가 만든 작업·결과는 TASK_CREATED·TASK_COMPLETED로 항상 수신 가능하다. 다른 클라이언트(웹 등)가 만든 더 큰 메시지는 수신 시 소켓 오류로 연결을 닫고 재접속하며, 중앙은 재전송하지 않으므로 해당 작업은 `DELIVERY_UNKNOWN`으로 남는다. 서버 측 길이 상한은 별도 합의 대상이다.
+
 TASK_CREATED는 인증된 수신자·팀·필드를 검사하고 디스크 저장을 완료한 뒤 정확한 event_id/task_id로 ACK한다. 파싱할 수 없는 TASK_CREATED는 ProtocolViolation, 기록 실패는 InboxFailed로 끝나며 성공 ACK를 보내지 않는다. 중복·재시작·오래된 generation·CLI 조회/정리·실제 중앙 시험은 [수신함](task-inbox.md)에 둔다. AGENT_PRESENCE에 ACK가 없다는 규칙을 업무 ACK에 적용하지 않는다.
 
 ## 8. 후속 검증

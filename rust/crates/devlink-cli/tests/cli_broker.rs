@@ -683,6 +683,56 @@ async fn detached_lifecycle_duplicate_and_local_authentication() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_pipes_reach_eof_after_start_cli_exits_while_broker_remains_running() {
+    use std::io::Read;
+    let f = Fixture::new();
+    let mut parent = f
+        .command(&["start"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let mut stdout = parent.stdout.take().unwrap();
+    let mut stderr = parent.stderr.take().unwrap();
+    let output_send = send.clone();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).unwrap();
+        let _ = output_send.send(bytes);
+    });
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).unwrap();
+        let _ = send.send(bytes);
+    });
+    let deadline = Instant::now()
+        + devlink_broker::broker_control::startup_timeout(&f.path)
+        + Duration::from_secs(10);
+    let exit = loop {
+        if let Some(exit) = parent.try_wait().unwrap() {
+            break exit;
+        }
+        if Instant::now() >= deadline {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            panic!("start CLI failed to exit");
+        }
+        sleep(Duration::from_millis(20)).await;
+    };
+    assert!(exit.success());
+    for _ in 0..2 {
+        let bytes = receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("CLI capture pipe stayed open after parent exit");
+        assert!(!String::from_utf8_lossy(&bytes).contains(TOKEN));
+    }
+    assert!(local::running(&f.path).unwrap());
+    Runtime::load(&f.path).unwrap().health().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simultaneous_start_cannot_spawn_two_brokers() {
     let f = Fixture::new();
     let mut first = f
@@ -697,6 +747,73 @@ async fn simultaneous_start_cannot_spawn_two_brokers() {
     let pid = f.health().await.pid;
     f.ok(&["start"]);
     assert_eq!(f.health().await.pid, pid);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broker_child_tolerates_a_brief_probe_but_rejects_a_persistently_held_lock() {
+    let f = Fixture::new();
+    let lock_path = config::state_directory(&f.path).join("broker.lock");
+    let probe = config::lock(&lock_path).unwrap();
+    let mut child = OwnedProcess(
+        f.command(&["broker"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    sleep(Duration::from_millis(50)).await;
+    assert!(child.0.try_wait().unwrap().is_none());
+    drop(probe);
+    let deadline = Instant::now() + devlink_broker::broker_control::startup_timeout(&f.path);
+    loop {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "broker exited after a brief probe"
+        );
+        if let Ok(runtime) = Runtime::load(&f.path)
+            && runtime.health().await.is_ok()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "broker failed to become ready");
+        sleep(Duration::from_millis(20)).await;
+    }
+    f.ok(&["stop"]);
+    assert!(child.0.wait().unwrap().success());
+    let _probe = config::lock(&lock_path).unwrap();
+    let mut blocked = OwnedProcess(
+        f.command(&["broker"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exit = loop {
+        if let Some(exit) = blocked.0.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "persistent lock did not fail within the bounded retry"
+        );
+        sleep(Duration::from_millis(20)).await;
+    };
+    assert!(!exit.success());
+    let mut diagnostic = String::new();
+    use std::io::Read;
+    blocked
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut diagnostic)
+        .unwrap();
+    assert!(diagnostic.contains("Another DevLink operation is running"));
+    assert!(!diagnostic.contains(TOKEN));
+    assert!(!Runtime::path(&f.path).exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

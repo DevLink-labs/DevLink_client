@@ -5,6 +5,7 @@ use super::{
     ToolInputError,
 };
 use devlink_broker::{
+    broker_control,
     sessions::ToolType,
     setup_config::{self, FailureKind, PreparedConfig},
     setup_project::{self, PreparedProject, ProjectOptions},
@@ -35,6 +36,8 @@ pub struct SetupStages<I = NoLoginInput, T = NoTeamInput, U = NoToolInput> {
     tool_snapshot: Option<SelectionSnapshot>,
     waiting_tool: bool,
     tool: Option<SelectedTool>,
+    broker_executable: Option<std::path::PathBuf>,
+    broker: Option<broker_control::StartResult>,
 }
 
 impl Default for SetupStages<NoLoginInput> {
@@ -65,6 +68,8 @@ impl<I> SetupStages<I, NoTeamInput> {
             tool_snapshot: None,
             waiting_tool: false,
             tool: None,
+            broker_executable: None,
+            broker: None,
         }
     }
 }
@@ -91,6 +96,8 @@ impl<I, T, U> SetupStages<I, T, U> {
             tool_snapshot: self.tool_snapshot,
             waiting_tool: self.waiting_tool,
             tool: self.tool,
+            broker_executable: self.broker_executable,
+            broker: self.broker,
         }
     }
 
@@ -115,6 +122,8 @@ impl<I, T, U> SetupStages<I, T, U> {
             tool_snapshot: self.tool_snapshot,
             waiting_tool: self.waiting_tool,
             tool: self.tool,
+            broker_executable: self.broker_executable,
+            broker: self.broker,
         }
     }
     pub fn with_tool(mut self, tool: Option<ToolType>, path: Option<std::path::PathBuf>) -> Self {
@@ -128,6 +137,16 @@ impl<I, T, U> SetupStages<I, T, U> {
     }
     pub fn tool(&self) -> Option<&SelectedTool> {
         self.tool.as_ref()
+    }
+
+    /// Non-CLI callers must supply the actual devlink executable, not their host process.
+    pub fn with_broker_executable(mut self, executable: std::path::PathBuf) -> Self {
+        self.broker_executable = Some(executable);
+        self
+    }
+
+    pub fn broker(&self) -> Option<&broker_control::StartResult> {
+        self.broker.as_ref()
     }
 
     pub fn with_team_id(mut self, id: Option<u64>) -> Self {
@@ -169,6 +188,38 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput> StepExecutor for SetupStages<I, 
         }
         if step == Step::SelectTool {
             return self.select_tool(context).await;
+        }
+        if step == Step::StartBroker {
+            let executable = self
+                .broker_executable
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(std::env::current_exe);
+            let result = match executable {
+                Ok(executable) => broker_control::start(&context.config_path, &executable).await,
+                Err(error) => Err(error.into()),
+            };
+            return match result {
+                Ok(result) => {
+                    let reused = result.reused;
+                    self.broker = Some(result);
+                    StepResult::Complete {
+                        outcome: if reused {
+                            Outcome::NotApplied
+                        } else {
+                            Outcome::Applied
+                        },
+                        reused,
+                    }
+                }
+                Err(error) => {
+                    let mut safe = broker_error(&context.config_path, &error);
+                    safe.known.user_id = self.user.as_ref().map(|u| u.user_id.to_string());
+                    safe.known.team_id = self.team.as_ref().map(|t| t.team_id.to_string());
+                    safe.known.tool_type = self.tool.as_ref().map(|t| t.tool_type);
+                    StepResult::Failed(safe)
+                }
+            };
         }
         if step == Step::BindProject {
             let path = context.config_path.clone();
@@ -370,6 +421,37 @@ fn project_error(step: Step, failure: setup_project::Failure) -> SetupError {
         });
     }
     error
+}
+
+fn broker_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
+    use broker_control::{Failure, FailureKind};
+    let failure = error.downcast_ref::<Failure>();
+    let code = match failure.map(|f| f.kind) {
+        Some(FailureKind::InvalidConfig) => ErrorCode::ConfigInvalid,
+        Some(FailureKind::ConfigBusy) => ErrorCode::ConfigBusy,
+        Some(FailureKind::BrokerBusy) => ErrorCode::BrokerBusy,
+        Some(
+            FailureKind::ControlLockFailed | FailureKind::BrokerLockFailed | FailureKind::Storage,
+        ) => ErrorCode::UnsafeFile,
+        Some(FailureKind::TokenUnavailable) => ErrorCode::TokenRequired,
+        _ => ErrorCode::BrokerStartFailed,
+    };
+    let mut safe = SetupError::new(
+        code,
+        Step::StartBroker,
+        if failure.is_some_and(|f| f.outcome == broker_control::Outcome::Unknown) {
+            Outcome::Unknown
+        } else {
+            Outcome::NotApplied
+        },
+    );
+    safe.location = Some(ErrorLocation {
+        file: failure
+            .map(|f| f.file.clone())
+            .unwrap_or_else(|| path.to_path_buf()),
+        field: None,
+    });
+    safe
 }
 
 impl<I: LoginInput, T: TeamInput, U: ToolInput> SetupStages<I, T, U> {

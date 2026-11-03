@@ -144,6 +144,8 @@ pub enum ErrorCode {
     ToolStorageFailed,
     #[serde(rename = "SETUP_TOOL_SELECTION_CONFLICT")]
     ToolSelectionConflict,
+    #[serde(rename = "SETUP_BROKER_START_FAILED")]
+    BrokerStartFailed,
 }
 
 impl ErrorCode {
@@ -174,6 +176,7 @@ impl ErrorCode {
             Self::ToolRequired => 2,
             Self::ToolUnavailable | Self::ToolStorageFailed => 5,
             Self::ToolBindingConflict | Self::ToolSelectionConflict => 6,
+            Self::BrokerStartFailed => 5,
         }
     }
 
@@ -271,6 +274,9 @@ impl ErrorCode {
             Self::ToolSelectionConflict => {
                 "The profile or tool selection changed while selecting a tool. Inspect the current selection and rerun setup explicitly."
             }
+            Self::BrokerStartFailed => {
+                "Broker startup or identity verification failed. Inspect devlink status, the profile and local port. Use devlink stop for a verified running broker before changing its profile or credentials; no unknown process was force-stopped."
+            }
         }
     }
 
@@ -310,6 +316,7 @@ impl ErrorCode {
             Self::ToolBindingConflict => "inspect_agent_binding",
             Self::ToolStorageFailed => "inspect_tool_selection",
             Self::ToolSelectionConflict => "inspect_tool_selection_then_retry",
+            Self::BrokerStartFailed => "inspect_broker_then_retry",
         }
     }
 }
@@ -425,6 +432,7 @@ impl SetupError {
                     | ErrorCode::ProjectPathInvalid
                     | ErrorCode::ToolRequired
                     | ErrorCode::ToolUnavailable
+                    | ErrorCode::BrokerStartFailed
             ),
             recovery: Recovery {
                 action: code.recovery(),

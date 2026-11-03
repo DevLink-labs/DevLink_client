@@ -2,6 +2,7 @@ pub mod agent_api;
 pub mod agent_context;
 pub mod agent_profile;
 pub mod broker;
+pub mod broker_control;
 pub mod business_api;
 pub mod central;
 #[cfg(test)]

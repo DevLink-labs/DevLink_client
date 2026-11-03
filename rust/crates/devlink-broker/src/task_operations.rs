@@ -75,6 +75,8 @@ pub struct StatusArgs {
     #[serde(default, alias = "reason")]
     pub failure_reason: Option<String>,
     #[serde(default)]
+    pub rejection_reason: Option<String>,
+    #[serde(default)]
     pub partially_modified: Option<bool>,
     #[serde(default)]
     pub request_key: Option<String>,
@@ -298,17 +300,27 @@ impl Arguments for StatusArgs {
         if !key_valid(self.request_key()) {
             return Err(validation());
         }
+        // Mirror the central field rules: each status accepts only its own reason fields.
+        let has_text =
+            |value: &Option<String>| value.as_ref().is_some_and(|s| !s.trim().is_empty());
         let body = match self.status {
             TaskStatus::InProgress
-                if self.failure_reason.is_none() && self.partially_modified.is_none() =>
+                if self.failure_reason.is_none()
+                    && self.rejection_reason.is_none()
+                    && self.partially_modified.is_none() =>
             {
                 json!({"status":self.status,"version":self.version.0})
             }
+            TaskStatus::Rejected
+                if has_text(&self.rejection_reason)
+                    && self.failure_reason.is_none()
+                    && self.partially_modified.is_none() =>
+            {
+                json!({"status":self.status,"version":self.version.0,"rejectionReason":self.rejection_reason})
+            }
             TaskStatus::Failed
-                if self
-                    .failure_reason
-                    .as_ref()
-                    .is_some_and(|s| !s.trim().is_empty())
+                if has_text(&self.failure_reason)
+                    && self.rejection_reason.is_none()
                     && self.partially_modified.is_some() =>
             {
                 json!({"status":self.status,"version":self.version.0,"failureReason":self.failure_reason,"partiallyModified":self.partially_modified})
@@ -333,8 +345,11 @@ impl Arguments for CompleteArgs {
     }
     fn prepare(&self, _: &Principal, _: &str) -> Result<Operation, TaskError> {
         let id = self.task_id().ok_or_else(validation)?;
+        // The result travels back to the requester inside TASK_COMPLETED, so it must
+        // fit a central frame just like a created prompt must fit TASK_CREATED.
         if !key_valid(self.request_key())
             || self.result_text.trim().is_empty()
+            || !crate::protocol::fits_delivery(&self.result_text)
             || self.task_files.as_ref().is_some_and(|files| {
                 files.iter().any(|f| {
                     f.relative_path.trim().is_empty()
