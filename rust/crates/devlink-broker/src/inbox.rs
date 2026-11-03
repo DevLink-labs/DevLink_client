@@ -369,6 +369,21 @@ impl Inbox {
             .take(limit)
             .collect())
     }
+    /// Update-feed source in persisted append order. Read-only: no ACK, receipt or task state changes.
+    pub(crate) fn received_config(
+        config_path: &Path,
+        server_url: &str,
+        agent_id: u64,
+    ) -> Result<Vec<TaskCreatedMessage>> {
+        let origin = endpoint_url(server_url)?.to_string();
+        let snapshot = read_snapshot(&Self::path(config_path))?.unwrap_or_else(empty);
+        Ok(snapshot
+            .tasks
+            .into_iter()
+            .filter(|t| t.server_url == origin && t.message.payload.receiver_agent_id == agent_id)
+            .map(|t| t.message)
+            .collect())
+    }
     /// Caller must hold control.lock and broker.lock; retain strict safe-path/private-file checks.
     pub fn clear_config(config_path: &Path) -> Result<()> {
         let path = Self::path(config_path);

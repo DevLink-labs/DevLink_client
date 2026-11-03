@@ -24,7 +24,7 @@ async function fixture(t, handler) {
 }
 function respond(res, status, body = '') { res.writeHead(status); res.end(body); }
 
-test('real credential reader + health-only Rust shape blocks all 11 routes without mutations or secret output', async (t) => {
+test('real credential reader + health-only Rust shape blocks every required route without mutations or secret output', async (t) => {
   const f = await fixture(t, (req, res) => respond(res, req.url === '/health' ? 200 : 404,
     req.url === '/health' ? JSON.stringify({ ...health, centralServer: 'Disconnected',
       inbox: { rejectedEvents: 1, lastError: 'STORE_FAILED' }, secret: token }) : token));
@@ -33,7 +33,8 @@ test('real credential reader + health-only Rust shape blocks all 11 routes witho
   const result = await checkIntegration(file.path);
   assert.equal(result.status, 'blocked');
   assert.equal(result.actualMvpVerified, false);
-  assert.equal(result.routes.length, 11);
+  assert.equal(result.routes.length, requiredRoutes.length);
+  assert.ok(requiredRoutes.includes('/v1/updates'));
   assert.ok(result.routes.every((r) => r.observation === 'NOT_FOUND'));
   assert.ok(result.blockers.includes('CENTRAL_NOT_CONNECTED'));
   assert.deepEqual(result.health.health, { centralServer: 'Disconnected' });
