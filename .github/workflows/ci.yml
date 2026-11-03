@@ -39,7 +39,13 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # 기존 로컬 검증과 같이 테스트를 직렬로 실행한다.
       - name: 테스트
+        if: runner.os != 'Windows'
         run: cargo test --workspace --all-targets --locked -- --test-threads=1
+      # 관리자 runner의 새 파일 소유자를 현재 사용자로 보정해 일반 사용자 환경과 맞춘다.
+      - name: 테스트 (Windows, 소유자 보정)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1 cargo test --workspace --all-targets --locked '--' --test-threads=1
 
   mcp-server:
     name: MCP 서버 (${{ matrix.os }})
@@ -62,4 +68,9 @@ jobs:
         run: npm ci
       # 빌드, contracts/ 계약 대조, node --test 회귀를 함께 실행한다.
       - name: 빌드·계약 대조·테스트
+        if: runner.os != 'Windows'
         run: npm test
+      - name: 빌드·계약 대조·테스트 (Windows, 소유자 보정)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1 npm test
