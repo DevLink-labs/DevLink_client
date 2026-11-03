@@ -75,6 +75,7 @@ export async function fakeBroker({ profiles } = {}) {
       if (body.operation !== 'register_agent' && !principal.agentId) return fail('AGENT_UNREGISTERED');
       if (businessHook && await businessHook({ path, body, req, res, send, profile })) return;
       if (body.operation === 'register_agent') return send({ data: { agentId: principal.agentId ?? 'registered-agent' } });
+      if (body.operation === 'get_updates') return send({ data: { updates: [], nextCursor: `v1.0.0.${'0'.repeat(32)}`, hasMore: false, cursorReset: false, coverage: 'local' } });
       return send({ data: { taskId: 'task-1', status: 'PENDING', delivery: { status: 'FAILED' }, echo: body.arguments } });
     } catch {
       if (!res.destroyed) res.writeHead(500).end();

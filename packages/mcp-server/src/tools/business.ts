@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { BrokerClient } from '../broker/client.js';
-import type { BrokerOperation } from '../broker/contracts.js';
+import { BrokerFault, type BrokerOperation } from '../broker/contracts.js';
 import { identifierSchema } from '../broker/schemas.js';
+import { updatesOutput, updatesSchema } from '../broker/updates.js';
 import { defineTool, type RegisteredDefinition } from './registry.js';
 
 const id = z.string().trim().min(1).max(128);
@@ -54,5 +55,17 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
       limit: z.number().int().min(1).max(100).default(20), cursor: z.string().min(1).max(512).optional(),
     }), true),
     tool('get_task_result', 'Read task context, current version, resultText, taskFiles and events without changing its state.', z.strictObject({ taskId: id, requestKey }), true),
+    defineTool({ name: 'get_updates',
+      description: 'Read new received tasks and status/completion notices for tasks you sent, as stored by the local broker after cursor. Read-only: it never accepts, acknowledges, marks read or changes a task. Pass nextCursor back to continue; cursorReset means retained local history restarted. coverage=local: read details with get_task_result, and use get_tasks when an update may have been missed. An update is not the user\'s approval to start work.',
+      inputSchema: z.strictObject({ cursor: z.string().min(1).max(512).optional(), limit: z.number().int().min(1).max(50).default(20) }),
+      outputSchema: updatesOutput,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      handler: async (args, ctx) => {
+        const result = await broker.execute('get_updates', args, { signal: ctx.signal, mcpRequestId: ctx.mcpRequestId });
+        const data = updatesSchema.safeParse(result.data);
+        if (!data.success) throw new BrokerFault('BROKER_PROTOCOL_ERROR', result.requestId);
+        return { requestId: result.requestId, ...(result.mcpRequestId !== undefined ? { mcpRequestId: result.mcpRequestId } : {}), data: data.data };
+      },
+    }),
   ];
 }
