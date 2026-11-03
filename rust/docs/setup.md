@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04. 2026-11-02 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인을 구현했다.
+작업 02·03·04·05. 2026-11-02 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택을 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -11,13 +11,15 @@ devlink setup --config C:\work\profile\config.json --output json
 devlink setup --output jsonl
 # 비밀번호는 비밀 관리 도구 등이 stdin 한 줄로 전달한다.
 devlink setup --email user@example.test --password-stdin --output json
+# 가입 팀이 여러 개이거나 기존 선택을 변경할 때
+devlink setup --team-id 71 --output json
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인**이다. 팀·프로젝트·도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용**이다. 프로젝트·도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. 인증이 완료되면 아직 미연결인 select_team에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. 완료되면 아직 미연결인 bind_project에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -30,9 +32,12 @@ devlink setup --email user@example.test --password-stdin --output json
 | `devlink-cli/src/setup/flow.rs` | StepExecutor를 순차 호출하고 주입한 콜백으로 progress 전달 |
 | `devlink-cli/src/setup/stages.rs` | 설정 준비·세션 확인·로그인 연결, 검증한 설정/사용자를 후속 단계용으로 보관 |
 | `devlink-cli/src/setup/login_input.rs` | 비밀을 직렬화/Debug하지 않는 입력 DTO와 주입 가능한 입력 인터페이스 |
+| `devlink-cli/src/setup/team_input.rs` | 팀 ID 검증과 주입 가능한 팀 선택 입력 인터페이스 |
 | `devlink-cli/src/setup/terminal.rs` | clap 옵션·human/JSON/JSONL 렌더링·프로세스 종료 코드 전달 |
 | `devlink-cli/src/terminal_input.rs` | 기존 auth/team 명령과 setup이 공유하는 숨김/전용 stdin 입력 |
 | `devlink-broker/src/user_auth.rs` | 기존 로그인·CSRF·세션 저장과 typed session check·장애 분류 |
+| `devlink-broker/src/teams.rs` | 현재 사용자·목록·상세·멤버십 검증과 선택 저장 |
+| `devlink-broker/src/agent_profile.rs` | 기존/미확정 Agent 바인딩의 사용자·서버·팀 충돌 확인 |
 | `devlink-broker/src/setup_config.rs` | 설정 경로·형식·값·자격 파일 안전성·브로커 잠금 검사 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
@@ -63,7 +68,7 @@ json은 최종 result만, jsonl은 progress 뒤 result 한 개를 출력한다. 
 rust 디렉터리에서 실행한다.
 
 ```powershell
-cargo test --offline --locked -p devlink-cli --test setup_flow --test cli_setup --test setup_output --test setup_configuration --test setup_authentication --test cli_auth -- --test-threads=1
+cargo test --offline --locked -p devlink-cli --test setup_flow --test cli_setup --test setup_output --test setup_configuration --test setup_authentication --test setup_teams --test cli_auth --test cli_teams -- --test-threads=1
 cargo test --offline --locked -p devlink-cli --test cli_broker setup_validates_existing_config_without_changing_a_running_broker -- --test-threads=1
 cargo test --offline --locked --workspace --all-targets -- --test-threads=1
 cargo fmt --all -- --check
@@ -118,13 +123,15 @@ Complete/unknown이라는 모순된 단계 결과를 성공으로 받아들여 �
 
 validate의 파일·권한 검사는 spawn_blocking에서 실행해 비동기 실행 흐름의 스레드에서 터미널 입력이나 동기 ACL 검사를 기다리지 않는다. 경로는 파일을 가리키는 절대 경로여야 하고 `.devlink-runtime` 내부는 거부한다. 파일·부모·상위 경로의 symlink/Windows junction·reparse point를 확인한 뒤 디렉터리와 잠금을 준비한다.
 
-설정은 기존 private snapshot reader의 사용자 소유권·권한·일반 파일·16 KiB 상한 검사를 거쳐 읽는다. JSON/스키마·중복 키·알 수 없는 필드·값 형식을 검사하고 기존 Config 검증을 재사용한다. 사용자 인증 origin 검증도 재사용하므로 원격 중앙은 wss, ws는 localhost/loopback만 허용한다. agent·포트·재연결·인증 제한시간도 검증한다. 기존 3필드 설정은 기본값을 메모리에 보충하며 파일을 재작성하지 않는다.
+설정에는 비밀값이 없으므로 다른 사용자의 읽기 권한이 있는 기존 init·수동 작성 config도 허용한다. 다만 serverUrl이 비밀번호 전송 대상을 결정하므로 Windows config 소유자는 현재 사용자 또는 BUILTIN\Administrators(S-1-5-32-544)여야 한다. 관리자 셸에서 init으로 만든 config도 이 기준으로 허용한다. 신뢰 주체(현재 사용자·SYSTEM·Administrators) 외의 쓰기·삭제·권한 변경 허용과 부모 디렉터리의 같은 권한은 SETUP_UNSAFE_FILE로 거부한다. Unix에서는 현재 사용자 소유만 허용하고 group/other 쓰기 비트(0o022)를 거부한다. config는 일반 파일 여부와 16 KiB 상한을 검사하고 비공개 snapshot과 같은 제한 읽기 함수로 읽는다. JSON/스키마·중복 키·알 수 없는 필드·값 형식을 검사하고 Config 검증이 반환하는 필드 정보를 진단에 사용한다. 사용자 인증 origin 검증도 재사용하므로 원격 중앙은 wss, ws는 localhost/loopback만 허용한다. agent·포트·재연결·인증 제한시간도 검증한다. 기존 3필드 설정은 기본값을 메모리에 보충하며 파일을 재작성하지 않는다. 세션·Agent·팀 선택·MCP 자격 파일에는 현재 사용자 소유를 요구하는 기존 비공개 권한 검사를 유지한다.
 
-새 부모 디렉터리만 비공개 권한으로 준비한다. 기존 디렉터리/파일의 불안전한 권한은 자동 수정하지 않는다. 새 설정은 기존 init이 사용하는 기본값·같은 디렉터리 임시 파일·flush 경로를 공유하고, 설정 생성은 persist_noclobber로 다른 생성 결과를 덮어쓰지 않는다. setup의 임시 파일에는 기록 전 비공개 권한을 적용한다. 기존 init도 같은 생성 함수를 사용하며 이미 존재하는 설정을 보존한다.
+새 부모 디렉터리만 비공개 권한으로 준비한다. 기존 디렉터리/파일의 권한은 자동 수정하지 않는다. 새 설정은 기존 init이 사용하는 기본값·같은 디렉터리 임시 파일·flush 경로를 공유하고, 설정 생성은 persist_noclobber로 다른 생성 결과를 덮어쓰지 않는다. setup의 임시 파일에는 기록 전 비공개 권한을 적용한다. 생성이 성공하면 메모리의 기본값을 재사용한다. persist 이전 실패는 not_applied이며, persist 이후 부모 디렉터리 동기화 실패만 unknown으로 보고한다. 기존 init도 같은 생성 함수를 사용하며 이미 존재하는 설정을 보존한다.
+
+setup은 config 대상과 모든 상위 경로의 symlink·Windows junction/reparse point를 계속 거부한다. macOS의 `/tmp`·`/var` 또는 링크된 `/home` 아래도 이 제한을 받으므로 `--config`에 링크를 해석한 실제 경로를 지정해야 한다. 이 정책은 setup의 경로 검사에 적용하며, 기존 init은 유효한 config를 가리키는 심볼릭 링크를 종전처럼 읽고 보존한다.
 
 control.lock을 확보한 뒤 broker.lock을 확인한다. 다른 제어 작업이 있으면 CONFIG_BUSY다. broker.lock이 점유됐으면 실행 중/시작 중으로 취급한다. 기존 정상 설정은 읽기 검증만 허용하며 누락 설정 생성은 BROKER_BUSY로 중단한다. health/PID만으로 실행 여부를 추정하거나 브로커를 중지하지 않는다. 중지 상태에서는 broker.lock도 유지해 초기화 중 직접 브로커 기동과 충돌하지 않게 한다. 상태 조회 도중 stale runtime 파일을 삭제하는 기존 local::running은 이 단계에서 호출하지 않는다.
 
-기존 broker/user-session/selected-team/agent-profile 파일이 있으면 private reader로 크기·권한·JSON 안전성을 확인하고 MCP 파일은 기존 credentials::load로 스키마도 검증한다. 자격을 발급·회전·삭제하지 않고 원문을 출력하지 않는다. 사용자·팀·Agent의 권한/세션 유효성 확인은 후속 단계 책임이며 이 저장소 검사가 중앙 인증 성공을 뜻하지 않는다.
+기존 user-session/selected-team/agent-profile 파일이 있으면 private reader로 크기·권한·JSON 안전성을 확인한다. MCP 자격 파일은 credentials::load 한 번으로 크기·권한·스키마를 검증한다. 자격을 발급·회전·삭제하지 않고 원문을 출력하지 않는다. 사용자·팀·Agent의 권한/세션 유효성 확인은 후속 단계 책임이며 이 저장소 검사가 중앙 인증 성공을 뜻하지 않는다.
 
 오류에는 step=validate, location.file과 가능한 location.field, 고정 문구·복구 action·outcome을 포함한다. human 출력에도 실패 단계·위치·복구 action을 표시하고 경로의 제어/bidi 문자를 escape한다. 원본 JSON·URL의 비밀번호/토큰·provider 오류 본문은 전달하지 않는다.
 
@@ -139,7 +146,7 @@ control.lock을 확보한 뒤 broker.lock을 확인한다. 다른 제어 작업�
 | SETUP_BROKER_BUSY | 6 | stop_owned_broker_then_retry: 해당 프로필 브로커 중지 후 누락 파일 생성 |
 | SETUP_CONFIG_STORAGE_FAILED | 5 | inspect_config_before_retry: 경로/파일과 저장 결과부터 확인 |
 
-초기화 중 저장 오류는 unknown으로 보수적으로 기록하며 파일을 삭제하지 않는다. 파일 생성이 확인된 뒤 추가 검증이 실패하면 applied를 유지한다. 손상 파일을 자동 초기화하거나 재생성하지 않는다.
+초기화 중 persist 이전 저장 오류는 not_applied, persist 이후 부모 디렉터리 동기화 오류는 unknown으로 기록하며 파일을 삭제하지 않는다. 손상 파일을 자동 초기화하거나 재생성하지 않는다.
 
 작업 03의 수용 검사는 최초 자동 생성·두 번째 실행 내용/수정 시각 보존·기존 3필드 설정·잘못된 JSON/URL/범위·초과 크기·불안전한 파일 권한·control/broker 잠금·동시 setup·junction 상위 경로·기존 MCP 토큰 보존·human 복구 안내를 포함한다. 실제 브로커를 실행한 검사에서는 PID·설정·MCP 파일·runtime 원문이 모두 보존됐는지 대조한다. 테스트는 임시 config를 명시해 실제 사용자 기본 설정을 생성하지 않는다.
 
@@ -178,10 +185,17 @@ LoginCredentials에는 Debug/Serialize를 구현하지 않는다. 비밀번호�
 | SETUP_PROTOCOL_ERROR | 7 | check_provider_contract: 응답·신원·CSRF/쿠키 확인 |
 | SETUP_AUTH_SESSION_CONFLICT | 6 | inspect_profile_then_reauthenticate: 중앙 origin/프로필 확인 |
 | SETUP_AUTH_BUSY | 6 | wait_for_auth_operation: account.lock 소유 작업 종료 대기 |
-| SETUP_AUTH_STORAGE_FAILED | 5 | inspect_private_session: 세션 파일·권한·실행 중 브로커 확인 |
+| SETUP_CONFIG_BUSY | 6 | wait_for_config_operation: 로그인 발행 전 control.lock 소유 작업 종료 대기 |
+| SETUP_BROKER_BUSY | 6 | stop_owned_broker_then_retry: 사용자 전환 전 실행/시작 중인 브로커 중지 |
+| SETUP_CONFIG_INVALID | 2 | repair_config_then_retry: 인증 중 다시 읽은 config의 표시 필드 확인 |
+| SETUP_CONFIG_STORAGE_FAILED | 5 | inspect_config_before_retry: 인증 중 config를 읽지 못함 |
+| SETUP_UNSAFE_FILE | 5 | repair_private_file: 사용자 전환 중 control.lock/broker.lock이 불안전하거나 열 수 없음 |
+| SETUP_AUTH_STORAGE_FAILED | 5 | inspect_private_session: 세션 파일·권한 확인 |
 | SETUP_CANCELLED | 130 | inspect_status_before_resume: 완료 단계 확인 후 재개 |
 
-인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 아직 미연결인 select_team은 STEP_UNAVAILABLE/종료 3이며 알려진 userId만 안전하게 유지한다. 회원가입·팀 선택·Agent 등록·Host 전체 연결은 후속 작업이다.
+브로커/제어 잠금 충돌·잠금 파일 오류와 config 재읽기 실패는 세션 저장 오류로 분류하지 않고 해당 파일 위치와 not_applied를 반환한다. config 값 오류는 Config 검증의 필드(JSON 오류는 `$`)를, 읽기 I/O 오류는 SETUP_CONFIG_STORAGE_FAILED를 반환한다. 로그인·팀 선택 입력의 I/O 실패는 SETUP_INTERNAL_ERROR로, 비밀번호 입력의 EOF·입력 중단은 SETUP_CANCELLED로 구분한다. 빈 비밀번호 줄이나 길이·형식 위반은 SETUP_INPUT_INVALID다. 같은 입력 함수를 쓰는 auth/team 명령은 빈 stdin에서 "No Password was received on stdin"처럼 누락된 값을 안내한다. 앞서 확인된 세션 만료 등 이미 적용한 변경은 공통 흐름에서 계속 보존한다.
+
+인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택을 연결했으며 현재 중단 단계는 bind_project다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
 
 ```powershell
 # rust 디렉터리에서 인증 통합과 기존 인증 회귀 확인
@@ -207,3 +221,120 @@ cargo test --offline --locked -p devlink-cli --test setup_authentication --test 
 개별 테스트 수는 전체 221개에 포함되며 합산하지 않는다. 제외된 2개는 Node 24 이상·현재 MCP 빌드와 별도 실행 조건이 필요한 기존 MCP 통합 검사다. 실제 운영 중앙/DB·Host 전체 왕복 및 실제 대화형 콘솔의 숨김 입력 수동 검증은 수행하지 않았다.
 
 인증 오류 분류·입력 재개·동시 로그인·중앙 origin 변경·저장/출력 경계를 검토했다. 작업 04의 완료 기준은 위 자동 검증 범위에서 충족하며, 인증 후 팀 선택은 후속 작업이다. 변경 파일은 모두 rust 내부이고 실명을 추가하지 않았다.
+
+## 작업 05: 팀 조회·선택과 재사용
+
+select_team은 인증 단계에서 확인한 사용자 ID와 중앙 origin을 고정한다. 기존 사용자 클라이언트의 account.lock 안에서 로컬 세션과 서버 `/users/me`를 다시 확인하고 가입 팀 목록을 조회한다. 입력 중 다른 사용자로 로그인하거나 서버가 바뀌면 추가 서버 요청 전에 SESSION_CONFLICT로 중단한다.
+
+선택 우선순위는 명시한 `--team-id` → 같은 origin/사용자의 유효한 기존 선택 → 가입 팀이 하나일 때 자동 선택이다. 이전 사용자/서버의 선택이나 현재 목록에서 사라진 팀은 재사용하지 않는다. 가입 팀이 여러 개면 TeamInput 어댑터에 선택을 요청하며, 대화형 입력이 없으면 종료 2와 `team.id/selection/false/verified_team_list` descriptor, 공개 `teamChoices`를 반환한다. ID는 정규 양의 십진수이고 최댓값은 9223372036854775807이다. machine 응답의 ID는 문자열로 유지한다.
+
+팀이 없으면 종료 3과 `devlink team create --name <NAME>` / `devlink team join` 안내를 반환한다. setup이 팀 생성·참여나 초대코드 입력을 자동 수행하지 않는다. 이전 선택은 삭제하지 않는다.
+
+선택한 ID가 현재 목록에 있어야 하고 기존 team select와 같은 상세·멤버 목록 검사로 현재 사용자·역할을 확인한다. 목록의 중복/잘못된 ID, 상세의 ID/역할 불일치도 거부한다. 입력 후에는 account.lock을 다시 얻고 목록·상세·멤버십을 재조회하므로 화면에 보였던 후보만으로 진행하지 않는다. 서버 장애와 프로토콜 오류는 빈 팀 목록이나 세션 만료로 바꾸지 않는다. 서버가 확인한 401은 기존 인증 로직대로 쿠키를 제거하며 setup을 명시적으로 다시 실행하도록 안내한다.
+
+선택 저장 직전 control.lock 안에서 설정을 다시 읽어 중앙 origin을 대조한 뒤 기존 Agent 프로필을 검사한다. 멤버십 응답 대기 중 config set으로 서버가 변경되면 SESSION_CONFLICT/종료 6으로 중단하고 config 위치를 표시한다. 이 잠금은 새 선택 저장과 기존 선택 재사용 성공 반환까지 유지한다. ready·token_required·생성 미확정 상태가 다른 origin/사용자/팀에 묶여 있으면 충돌로 중단한다. 같은 바인딩과 vacant 상태는 허용한다. Agent/MCP 자격 발급·회전·삭제, 브로커 중지/재시작은 하지 않는다. 개별 team select 명령의 기존 동작은 유지한다.
+
+새 선택은 기존 private writer로 selected-team.json에 origin/userId/teamId만 원자 저장한다. 정상 선택 재사용은 파일 내용과 수정 시각을 보존하며 `reused:true/outcome:not_applied`다. 새 선택은 `reused:false/outcome:applied`이고 저장 결과가 불확실하면 unknown으로 멈춘다. 손상된 선택·Agent 파일은 자동 삭제하거나 덮어쓰지 않는다.
+
+대화형 선택은 waiting_input 진행 이벤트에 descriptor와 teamChoices만 전달하고 해당 단계만 재개한다. 후보 이름은 기존 출력 어댑터의 제어/bidi 문자 escape를 적용한다. 입력 취소는 종료 130이며 인증 단계의 완료 상태를 보존한다. 후속 단계에 검증한 Team을 보관하고 결과의 known.userId/teamId를 전달한다. 현재 팀 선택 완료 후에는 미구현 bind_project에서 종료 3이다.
+
+| 코드 | 종료 | 복구 action |
+| --- | --- | --- |
+| SETUP_TEAM_REQUIRED | 2 | select_verified_team: --team-id 또는 터미널 선택 |
+| SETUP_TEAM_MEMBERSHIP_REQUIRED | 3 | create_or_join_team_then_retry |
+| SETUP_TEAM_FORBIDDEN | 4 | select_verified_team: 현재 가입 팀과 멤버십 확인 |
+| SETUP_TEAM_LIST_RESOURCE_NOT_FOUND | 7 | inspect_central_team_data: 서버 관리자에게 팀·가입 정보 확인 요청 |
+| SETUP_TEAM_BINDING_CONFLICT | 6 | inspect_agent_binding: 기존 Agent 확인 후 명시적 바인딩 또는 별도 프로필 선택 |
+| SETUP_TEAM_STORAGE_FAILED | 5 | inspect_team_selection: 선택/Agent 파일·권한·저장 결과 확인 |
+
+네트워크·프로토콜·인증·계정/프로필 잠금 오류는 기존 setup 코드를 재사용한다. 다음은 여러 팀 중 선택이 필요한 오류의 필드 발췌다.
+
+팀 목록 `GET /api/v1/teams`의 `404 RESOURCE_NOT_FOUND`는 가입 정보에 연결된 팀을 찾을 수 없는 응답이므로 `SETUP_TEAM_LIST_RESOURCE_NOT_FOUND`로 구분한다. 서버 관리자에게 팀·가입 데이터 확인을 안내하며 권한 오류나 빈 목록으로 바꾸지 않는다. 종료 코드는 7, outcome은 not_applied, retryable과 automatic은 false다. 로컬 파일 오류가 아니므로 location은 생략하고 기존 선택과 인증 상태를 보존한다. 상세·멤버 조회에서 발생한 403/404의 기존 멤버십 미확인 처리는 유지한다. 중앙 API 응답 형식과 개별 `team list`의 `RESOURCE_NOT_FOUND` 출력은 유지한다.
+
+```json
+{
+  "code": "SETUP_TEAM_REQUIRED",
+  "step": "select_team",
+  "requiredInputs": [
+    {"field": "team.id", "kind": "selection", "secret": false, "source": "verified_team_list"}
+  ],
+  "teamChoices": [
+    {"id": "71", "name": "Team A"},
+    {"id": "72", "name": "Team B"}
+  ]
+}
+```
+
+### 작업 05 검증 결과
+
+2026-11-02, Windows stable MSVC·합성 중앙 서버·임시 비공개 프로필 기준이다. 실제 CLI 자식 프로세스와 주입한 TeamInput 어댑터를 사용했다.
+
+| 검사 | 결과 |
+| --- | --- |
+| 새 setup 팀 조회·선택·재사용 | 15 passed |
+| setup 로그인 통합 / 기존 인증 CLI / 기존 팀 CLI | 각각 18 / 8 / 5 passed |
+| setup CLI / 설정 / 공통 흐름 / 출력 | 각각 6 / 12 / 10 / 5 passed |
+| 기존 Agent 팀 전환 / 사용자 전환 / 실행 중 브로커 보존 | 각각 1 passed |
+| 위 관련 회귀 합계 | 82 passed / 0 failed, 중복 실행 제외 |
+| 최종 fmt / workspace/all-targets Clippy `-D warnings` | 종료 0 |
+| help / 변경 공백 / 수정 범위 / 로컬 문서 링크 | 정상, 변경은 rust 내부 |
+
+팀 검사에는 단일 팀 자동 선택·정상 선택 파일/수정 시각 보존·이전 사용자/서버/탈퇴 팀 선택 배제·다중 팀 입력 반환·명시 선택·팀 없음 안내·상세/멤버십 미확인 차단·입력 중 가입 해제/사용자/서버 변경·취소·계정/프로필 잠금·손상 선택 보존·정규 ID와 signed-long 최댓값·서버 장애/중복 응답/401·Agent ready/생성 미확정 충돌과 자격 보존을 포함한다.
+
+초기 검사에서 테스트용 미확정 Agent 프로필의 필드명이 실제 저장 형식과 다르던 부분과 이전 도움말을 기대하던 검사를 수정했다. 최종 검토에서 가입 팀이 없으면 명시 team ID가 있어도 생성/참여를 안내하도록 보완하고 해당 1개를 다시 실행했다. 이 재실행은 82개에 더하지 않는다. 관련 실행 로그는 rust/target/setup05-*.log에 보관하며 빌드 산출물이므로 Git에 추가하지 않는다.
+
+이번에는 전체 workspace 테스트를 재실행하지 않았으며 변경 경로의 위 회귀와 전체 타깃 정적 검사를 수행했다. 실제 운영 중앙/DB·Host 전체 왕복·실제 대화형 콘솔 수동 검증은 포함하지 않는다. 검증 범위에서 작업 05 완료 기준을 충족하며 프로젝트·도구·Agent 준비와 MCP 연동은 후속 작업이다. 실명을 추가하지 않았다.
+
+### 작업 05 후속 검토: 멤버십 응답 대기 중 서버 변경
+
+기존 검사는 입력 대기 중 서버 변경을 확인했지만, 멤버십 HTTP 응답을 기다리는 동안의 변경을 놓쳤다. account.lock은 유지돼도 config set은 별도 control.lock으로 설정을 변경할 수 있었다. 이전 구현은 응답 이후 현재 서버를 다시 확인하지 않아 이전 서버의 선택 파일을 저장하거나 재사용 성공을 반환했다.
+
+합성 중앙의 멤버십 응답을 Notify로 대기시키고 실제 config set 명령으로 서버를 변경해 재현했다. 수정 전에는 선택 파일이 없던 프로필에 이전 서버의 선택이 생성돼 테스트가 실패했다. 이제 control.lock 획득 후 설정과 정규화한 중앙 origin을 다시 확인하고, 달라졌으면 SETUP_AUTH_SESSION_CONFLICT/종료 6·outcome:not_applied·config 파일 위치를 반환한다. 해당 잠금은 저장과 재사용 성공 반환까지 유지한다.
+
+수정 후 신규 선택 파일 미생성과 기존 선택 파일 보존을 같은 경합 테스트의 두 사례로 확인했다. 팀 회귀 전체는 16 passed / 0 failed이며 fmt와 workspace/all-targets Clippy `-D warnings`도 종료 0이다. 앞선 82개와 합산하지 않는다. 이번 검토에서는 전체 workspace 테스트를 재실행하지 않았다. 재현 전후와 회귀 로그는 rust/target/setup05-server-race-*.log에 보관한다.
+
+### 작업 05 후속 수정: 팀 목록 404 분류
+
+목록 조회의 404를 선택한 팀의 멤버십 오류와 구분했다. Mock 중앙에서 목록·상세·멤버 조회 각각의 404를 반환해 오류 코드와 복구 안내, 기존 선택·인증 상태 보존을 검증했다. 개별 team list는 RESOURCE_NOT_FOUND를 유지하고 setup 목록 404는 관리자 확인 안내를 반환한다. 명세의 HTTP 500도 서버 장애로 분류되는지 검사했다.
+
+2026-11-02 Windows MSVC 기준 팀 선택 17건·기존 팀 CLI 5건·setup 흐름 10건·출력 5건으로 총 37건이 통과했다. fmt·workspace/all-targets Clippy `-D warnings`·변경 공백 검사는 통과했다. 전체 workspace 테스트와 실제 운영 서버 검증은 이번에 실행하지 않았다. 테스트 로그는 `rust/target/setup05-list-404-validation.log`에 보관한다.
+
+### PR 리뷰 보완 검증
+
+2026-11-02 Windows MSVC에서 로그인 브로커 충돌·입력 중 config 손상·비밀번호 EOF/빈 줄 구분·일반 권한 config 재사용·persist 전후 실패·입력 I/O 분류 회귀를 보강했다. 기존 init의 symlink 허용은 복원하고 setup의 상위 링크 거부 정책은 유지했다. 설정 필드 검증·스냅샷 읽기·잠금 판별의 중복도 정리했으며 broker_running은 준비 시점의 값임을 명시했다.
+
+관련 회귀는 broker 라이브러리 56건, CLI 라이브러리 2건, setup 설정/인증/팀 선택 13/21/17건, 공통 흐름/출력 10/5건, 기존 setup/auth/team/Agent CLI 6/8/5/12건, 실행 중 브로커 보존 1건으로 **156 passed / 0 failed**다. 재실행한 항목은 중복 합산하지 않았다. 전체 fmt, workspace/all-targets Clippy `-D warnings`, 변경 공백 검사도 통과했다. 처음 샌드박스에서는 파일 persist가 차단돼 저장 후 실패 검사가 실행되지 않았고, 샌드박스 밖의 임시 프로필에서 통과를 확인했다. 기존 auth CLI의 HTTPS 진단이 가려지는 회귀를 발견해 문구를 유지하도록 보완한 뒤 인증 회귀를 재실행했다.
+
+전체 workspace 테스트·운영 중앙/DB·실제 콘솔 숨김 입력·Unix 전용 symlink 테스트는 이번 검증에 포함하지 않았다.
+
+### 코드 리뷰 후속 보완
+
+2026-11-02 리뷰에서 config의 쓰기 권한 검사 누락을 보완했다. 읽기 공개는 유지하고 소유자·쓰기 권한만 검사하며, Windows는 기존 ACL 검사기에 읽기 허용 모드를 추가해 공유한다. 인증 중 config 읽기 실패·잠금 파일 오류·검증 필드를 각각 구분하고, init의 config 존재 확인은 링크를 따라가지 않으며 검사 오류를 전파한다. 입력 오류 match의 unreachable 분기와 auth 오류 위치 분기를 정리했다.
+
+회귀: 인증 중 config 변경 4종(잘못된 URL·원격 ws·authTimeoutMs·삭제), 사용자 전환 중 broker.lock 오류, 다른 주체 쓰기 config 거부(Windows Everyone:M, Unix 0o664/0o646), 빈 stdin 안내, 끊긴 링크 init(Unix 전용)을 추가했다. Windows MSVC에서 fmt·Clippy `-D warnings`가 통과했고 setup 설정 14건·인증 22건·cli_auth 9건이 통과했다. 기존 테스트의 %TEMP%는 이 PC에서 다른 그룹에 Modify를 상속하므로 init 테스트는 상위 디렉터리를 비공개로 준비한다. Unix 전용 테스트는 이번에 실행하지 않았다.
+
+기존 HEAD에서도 나타나던 병렬 테스트 두 건의 타이밍 가정을 수정했다. 제품 실행 로직은 변경하지 않았다.
+
+- `central::tests::completed_storage_from_an_old_generation_cannot_ack_or_replace_new_identity`: 합성 서버가 하트비트 세 번 이후 PONG 응답을 중단했다. 병렬 디스크·ACL 처리가 500ms를 넘으면 저장 완료에 따른 세대 검증보다 하트비트 만료가 먼저 연결을 종료하고, 분리된 저장 작업이 끝나기 전에 파일을 검사해 0건을 읽을 수 있었다. 재현에서도 기대 1건/실제 0건으로 실패했다. 이제 하트비트 횟수와 함께 `has_pending_write()`로 실제 저장 접수를 확인한 뒤 세대를 교체하고, 저장 완료로 연결이 끝날 때까지 PONG을 계속 응답한다. 하트비트·소켓·runner timeout은 늘리지 않았다.
+- `cli_creates_tasks_with_agent_bearer_and_reuses_request_key_after_restart`: 테스트가 영속 키 저장·중앙 REST 확인을 포함하는 작업 생성에도 `Runtime::client()`의 1초 health/control timeout을 사용했다. 병렬 묶음 반복 중 `/v1/tasks/create`에서 클라이언트 `TimedOut`을 재현했다. 요청별 timeout을 실제 서버의 `LOCAL_BUDGET`(8초)과 응답 수신 여유 1초로 설정해 서버가 정한 처리 결과를 기다리도록 했다. 재시도나 제품의 timeout 변경은 추가하지 않았고, 실패 시 HTTP 상태와 로컬 오류 본문을 함께 검사한다.
+
+2026-11-02, Rust 1.99.1 `x86_64-pc-windows-msvc`에서 검증했다. 반복과 전체 실행 모두 기본 병렬 설정을 사용했으며 `--test-threads=1`이나 테스트 재시도를 사용하지 않았다.
+
+| 검사 | 결과 |
+| --- | --- |
+| `cargo test --offline --locked -p devlink-broker --lib` | 56개씩 5회 연속 통과 |
+| `cargo test --offline --locked -p devlink-cli --test cli_broker` | 35개씩 5회 연속 통과 |
+| `cargo test --workspace` | 259 passed / 0 failed / 기존 opt-in 2 ignored |
+| `cargo fmt --all -- --check` | 종료 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 종료 0 |
+| `git diff --check` | 통과 |
+
+로그는 `rust/target/parallel-stability/`의 `broker-lib-1.log`~`broker-lib-5.log`, `cli-broker-1.log`~`cli-broker-5.log`, `workspace.log`에 보관한다. 해당 폴더는 빌드 산출물이므로 Git에 추가하지 않는다. 기존 setup 변경 중 문서를 제외한 14개 파일은 작업 시작 시점과 SHA256이 동일하며, 문서는 이 절에 원인·해결·검증 결과만 반영했다.
+
+#### Windows config의 Administrators 소유 허용
+
+사용자가 선택한 정책에 따라 config의 Windows 소유자는 현재 사용자 SID 또는 BUILTIN\Administrators(S-1-5-32-544)를 허용한다. 관리자 셸에서 init으로 만든 config를 소유자 때문에 거부하던 문제를 해결한다. SYSTEM이나 다른 사용자/그룹 소유의 config는 계속 거부한다. 일반 다른 사용자의 쓰기·삭제·권한 변경 허용 및 부모 디렉터리의 같은 권한도 계속 거부한다. 세션·Agent·팀 선택·MCP 자격 파일은 현재 사용자 소유만 허용하며, Unix 정책도 유지한다.
+
+Windows ACL 판정 함수를 실제 검사와 회귀 테스트에서 공유한다. 새 테스트는 실제 .NET FileSecurity 객체의 소유자를 현재 사용자·Administrators·SYSTEM·Everyone으로 바꿔 config와 비공개 파일의 허용/거부를 대조하고, 관리자 소유 config에서도 Everyone 쓰기 및 부모 쓰기를 거부하는지 검사한다. 관리자 권한 없이 메모리의 ACL 객체로 검사하므로 실제 파일 소유자나 사용자 환경의 권한을 변경하지 않는다. 기존 정책에서는 config 소유자 검사에서 실패하고 정책 변경 후 통과했다.
+
+2026-11-02 Windows MSVC에서 새 정책 회귀와 기본 병렬 `cargo test --workspace`가 **260 passed / 0 failed / 기존 opt-in 2 ignored**로 통과했다. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, 변경 공백 검사도 통과했다. 전체 실행 로그는 `rust/target/admin-owner-verification/workspace.log`에 보관한다. 이번 수정은 credentials.rs의 Windows ACL 정책·회귀와 이 문서에 한정하며 기존 setup 변경을 보존했다. 실제 관리자 셸에서의 init 수동 실행과 Unix 전용 테스트는 이번 검증에 포함하지 않았다.

@@ -24,17 +24,25 @@ pub fn read_bytes(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     }
     verify_snapshot_path(path, limit)?;
     credentials::verify_private_permissions(path)?;
+    read_bounded(path, limit).map(Some)
+}
+
+/// Bound both the opened file's metadata and the actual read. Callers apply their own
+/// path and permission policy before calling this.
+pub(crate) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let file = fs::File::open(path).context("Cannot open private snapshot")?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "Private snapshot is not a regular file");
     ensure!(
-        file.metadata()?.is_file(),
-        "Private snapshot is not a regular file"
+        metadata.len() <= limit as u64,
+        "Private snapshot exceeds size limit"
     );
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .context("Cannot read private snapshot")?;
     ensure!(bytes.len() <= limit, "Private snapshot exceeds size limit");
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 pub fn write<T: Serialize>(path: &Path, value: &T, limit: usize) -> Result<()> {

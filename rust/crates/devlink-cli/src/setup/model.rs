@@ -116,6 +116,18 @@ pub enum ErrorCode {
     AuthBusy,
     #[serde(rename = "SETUP_CANCELLED")]
     Cancelled,
+    #[serde(rename = "SETUP_TEAM_REQUIRED")]
+    TeamRequired,
+    #[serde(rename = "SETUP_TEAM_MEMBERSHIP_REQUIRED")]
+    TeamMembershipRequired,
+    #[serde(rename = "SETUP_TEAM_FORBIDDEN")]
+    TeamForbidden,
+    #[serde(rename = "SETUP_TEAM_LIST_RESOURCE_NOT_FOUND")]
+    TeamListResourceNotFound,
+    #[serde(rename = "SETUP_TEAM_BINDING_CONFLICT")]
+    TeamBindingConflict,
+    #[serde(rename = "SETUP_TEAM_STORAGE_FAILED")]
+    TeamStorageFailed,
 }
 
 impl ErrorCode {
@@ -134,6 +146,12 @@ impl ErrorCode {
             Self::AuthSessionConflict | Self::AuthBusy => 6,
             Self::AuthStorageFailed => 5,
             Self::Cancelled => 130,
+            Self::TeamRequired => 2,
+            Self::TeamMembershipRequired => 3,
+            Self::TeamForbidden => 4,
+            Self::TeamListResourceNotFound => 7,
+            Self::TeamBindingConflict => 6,
+            Self::TeamStorageFailed => 5,
         }
     }
 
@@ -162,7 +180,7 @@ impl ErrorCode {
                 "Another configuration operation holds the control lock. Wait for it to finish, then rerun setup."
             }
             Self::BrokerBusy => {
-                "The broker is running or starting. Stop this profile's broker before creating its missing configuration."
+                "The broker is running or starting. Stop this profile's broker before creating configuration or changing Agent credentials."
             }
             Self::ConfigStorageFailed => {
                 "Configuration storage failed. Inspect the indicated path and existing file before retrying; setup did not remove it."
@@ -191,6 +209,22 @@ impl ErrorCode {
             Self::Cancelled => {
                 "Setup input was cancelled. Inspect the completed stages before resuming."
             }
+            Self::TeamRequired => "Choose a joined team using --team-id or the terminal selection.",
+            Self::TeamMembershipRequired => {
+                "No joined teams were found. Use devlink team create --name <NAME> or devlink team join, then rerun setup."
+            }
+            Self::TeamForbidden => {
+                "Current team membership could not be confirmed. Choose a joined team and retry explicitly."
+            }
+            Self::TeamListResourceNotFound => {
+                "The central service could not find a team referenced by your membership records while listing teams (HTTP 404). Ask the server administrator to check the team and membership data, then rerun setup."
+            }
+            Self::TeamBindingConflict => {
+                "The existing Agent binding conflicts with the selected server, user, or team. Inspect devlink agent status and explicitly bind an owned Agent, or choose a separate profile before rerunning setup."
+            }
+            Self::TeamStorageFailed => {
+                "The team selection or Agent binding could not be read or saved. Inspect private profile files before retrying."
+            }
         }
     }
 
@@ -216,6 +250,12 @@ impl ErrorCode {
             Self::AuthStorageFailed => "inspect_private_session",
             Self::AuthBusy => "wait_for_auth_operation",
             Self::Cancelled => "inspect_status_before_resume",
+            Self::TeamRequired => "select_verified_team",
+            Self::TeamMembershipRequired => "create_or_join_team_then_retry",
+            Self::TeamForbidden => "select_verified_team",
+            Self::TeamListResourceNotFound => "inspect_central_team_data",
+            Self::TeamBindingConflict => "inspect_agent_binding",
+            Self::TeamStorageFailed => "inspect_team_selection",
         }
     }
 }
@@ -243,6 +283,12 @@ pub struct RequiredInput {
     pub kind: InputKind,
     pub secret: bool,
     pub source: InputSource,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TeamChoice {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -282,6 +328,8 @@ pub struct SetupError {
     pub step: Step,
     pub outcome: Outcome,
     pub required_inputs: Vec<RequiredInput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub team_choices: Vec<TeamChoice>,
     pub known: KnownIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ErrorLocation>,
@@ -297,6 +345,7 @@ impl SetupError {
             step,
             outcome,
             required_inputs: Vec::new(),
+            team_choices: Vec::new(),
             known: KnownIdentity::default(),
             location: None,
             message: code.message(),
@@ -311,6 +360,8 @@ impl SetupError {
                     | ErrorCode::AuthRequired
                     | ErrorCode::AuthRejected
                     | ErrorCode::CentralUnavailable
+                    | ErrorCode::TeamRequired
+                    | ErrorCode::TeamForbidden
             ),
             recovery: Recovery {
                 action: code.recovery(),
@@ -349,6 +400,8 @@ pub struct ProgressEvent {
     pub outcome: Outcome,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_inputs: Vec<RequiredInput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub team_choices: Vec<TeamChoice>,
 }
 
 /// Flattened variants enforce exactly one of data/error in a final result.
@@ -356,7 +409,7 @@ pub struct ProgressEvent {
 #[serde(untagged)]
 pub enum Completion<D> {
     Success { data: D },
-    Failure { error: SetupError },
+    Failure { error: Box<SetupError> },
 }
 
 #[derive(Debug, Serialize)]

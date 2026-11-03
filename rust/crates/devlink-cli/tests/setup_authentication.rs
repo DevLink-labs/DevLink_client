@@ -2,6 +2,7 @@
 mod account_server;
 use account_server::{COOKIE, CSRF, Fixture, PASSWORD, assert_no_secrets, text};
 use devlink_broker::{
+    agent_profile,
     config::{self, Config},
     credentials, private_file, user_auth,
 };
@@ -80,9 +81,12 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
     let value = parsed(&child.wait_with_output().unwrap(), 3);
     assert_eq!(value["stages"][1]["status"], "succeeded");
     assert_eq!(value["stages"][1]["reused"], true);
-    assert_eq!(value["error"]["step"], "select_team");
+    assert_eq!(value["error"]["step"], "bind_project");
     assert_eq!(value["error"]["known"]["userId"], "51");
-    assert_eq!(*f.state.calls.lock().unwrap(), ["me"]);
+    assert_eq!(
+        *f.state.calls.lock().unwrap(),
+        ["me", "me", "team_list", "team_detail", "team_members"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -94,7 +98,16 @@ async fn missing_session_logs_in_with_csrf_verifies_me_and_stores_only_the_sessi
     assert_eq!(value["error"]["known"]["userId"], "51");
     assert_eq!(
         *f.state.calls.lock().unwrap(),
-        ["csrf", "login", "me", "csrf"]
+        [
+            "csrf",
+            "login",
+            "me",
+            "csrf",
+            "me",
+            "team_list",
+            "team_detail",
+            "team_members"
+        ]
     );
     let saved: Value = private_file::read(&user_auth::session_path(&f.path), 16_384)
         .unwrap()
@@ -118,7 +131,17 @@ async fn confirmed_expiry_allows_explicit_login_without_retrying_the_expired_coo
     assert_eq!(value["stages"][1]["reused"], false);
     assert_eq!(
         *f.state.calls.lock().unwrap(),
-        ["me", "csrf", "login", "me", "csrf"]
+        [
+            "me",
+            "csrf",
+            "login",
+            "me",
+            "csrf",
+            "me",
+            "team_list",
+            "team_detail",
+            "team_members"
+        ]
     );
 }
 
@@ -441,6 +464,175 @@ async fn account_lock_contention_is_not_misclassified_as_expiry() {
     let _guard = config::lock(&config::state_directory(&f.path).join("account.lock")).unwrap();
     let value = parsed(&sign_in(&f, PASSWORD), 6);
     assert_eq!(value["error"]["code"], "SETUP_AUTH_BUSY");
+    assert!(f.state.calls.lock().unwrap().is_empty());
+    assert!(!user_auth::session_path(&f.path).exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_broker_during_user_switch_is_reported_without_publishing_a_session() {
+    let f = fixture().await;
+    let profile = agent_profile::path(&f.path);
+    private_file::write(&profile, &json!({
+        "schemaVersion":1,"origin":user_auth::origin(&Config::load(&f.path).unwrap()).unwrap().as_str(),
+        "userId":999,"teamId":71,"projectRoot":f.path.parent().unwrap(),
+        "state":{"kind":"create_pending","name":"Pending","tool":"CODEX","project_name":"Project"}
+    }), 16_384).unwrap();
+    let before = std::fs::read(&profile).unwrap();
+    let broker = config::state_directory(&f.path).join("broker.lock");
+    let _guard = config::lock(&broker).unwrap();
+    let value = parsed(&sign_in(&f, PASSWORD), 6);
+    assert_eq!(value["error"]["code"], "SETUP_BROKER_BUSY");
+    assert_eq!(value["error"]["outcome"], "not_applied");
+    assert_eq!(value["error"]["location"]["file"], broker.to_str().unwrap());
+    assert_eq!(std::fs::read(&profile).unwrap(), before);
+    assert!(!user_auth::session_path(&f.path).exists());
+    assert!(
+        f.state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "login")
+    );
+}
+
+/// Changes local state while setup waits for credentials, after validate has passed.
+struct MutatingInput {
+    path: std::path::PathBuf,
+    mutate: fn(&std::path::Path),
+}
+impl LoginInput for MutatingInput {
+    fn available(&self) -> bool {
+        true
+    }
+    fn interactive(&self) -> bool {
+        true
+    }
+    async fn request(&mut self) -> Result<LoginCredentials, LoginInputError> {
+        (self.mutate)(&self.path);
+        LoginCredentials::new("input@example.test".into(), PASSWORD.into())
+    }
+}
+
+async fn run_with_mutation(f: &Fixture, mutate: fn(&std::path::Path)) -> Box<setup::SetupError> {
+    let input = MutatingInput {
+        path: f.path.clone(),
+        mutate,
+    };
+    let result = setup::run(
+        &SetupContext {
+            config_path: f.path.clone(),
+        },
+        SetupStages::new(input),
+        |_| Ok(()),
+    )
+    .await;
+    let Completion::Failure { error } = result.completion else {
+        panic!("expected a setup failure")
+    };
+    assert_eq!(result.exit_code, error.code.exit_code());
+    error
+}
+
+fn rewrite_config(path: &std::path::Path, edit: fn(&mut Config)) {
+    let mut config = Config::load(path).unwrap();
+    edit(&mut config);
+    config::atomic_json(path, &config).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_changed_during_input_is_reported_as_config_instead_of_session_storage() {
+    type Mutation = fn(&std::path::Path);
+    let cases: [(Mutation, setup::ErrorCode, Option<&str>); 4] = [
+        (
+            |path| {
+                rewrite_config(path, |c| {
+                    c.server_url = "invalid-private-config-marker".into()
+                })
+            },
+            setup::ErrorCode::ConfigInvalid,
+            Some("serverUrl"),
+        ),
+        (
+            |path| rewrite_config(path, |c| c.server_url = "ws://central.example.test".into()),
+            setup::ErrorCode::ConfigInvalid,
+            Some("serverUrl"),
+        ),
+        (
+            |path| rewrite_config(path, |c| c.auth_timeout_ms = 5),
+            setup::ErrorCode::ConfigInvalid,
+            Some("authTimeoutMs"),
+        ),
+        (
+            |path| std::fs::remove_file(path).unwrap(),
+            setup::ErrorCode::ConfigStorageFailed,
+            None,
+        ),
+    ];
+    for (mutate, code, field) in cases {
+        let f = fixture().await;
+        let error = run_with_mutation(&f, mutate).await;
+        assert_eq!(error.code, code);
+        assert_eq!(error.step, Step::Authenticate);
+        assert_eq!(error.outcome, Outcome::NotApplied);
+        let location = error.location.unwrap();
+        assert_eq!(location.file, f.path);
+        assert_eq!(location.field, field);
+        assert!(f.state.calls.lock().unwrap().is_empty());
+        assert!(!user_auth::session_path(&f.path).exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsafe_broker_lock_during_user_switch_points_at_the_lock_not_the_session() {
+    let f = fixture().await;
+    let profile = agent_profile::path(&f.path);
+    private_file::write(&profile, &json!({
+        "schemaVersion":1,"origin":user_auth::origin(&Config::load(&f.path).unwrap()).unwrap().as_str(),
+        "userId":999,"teamId":71,"projectRoot":f.path.parent().unwrap(),
+        "state":{"kind":"create_pending","name":"Pending","tool":"CODEX","project_name":"Project"}
+    }), 16_384).unwrap();
+    let before = std::fs::read(&profile).unwrap();
+    let error = run_with_mutation(&f, |path| {
+        let lock = config::state_directory(path).join("broker.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::create_dir(&lock).unwrap();
+    })
+    .await;
+    assert_eq!(error.code, setup::ErrorCode::UnsafeFile);
+    assert_eq!(error.outcome, Outcome::NotApplied);
+    assert_eq!(
+        error.location.unwrap().file,
+        config::state_directory(&f.path).join("broker.lock")
+    );
+    assert_eq!(std::fs::read(&profile).unwrap(), before);
+    assert!(!user_auth::session_path(&f.path).exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn password_stdin_eof_cancels_but_an_empty_line_is_invalid_input() {
+    let f = fixture().await;
+    for (input, exit, code) in [
+        ("", 130, "SETUP_CANCELLED"),
+        ("\n", 2, "SETUP_INPUT_INVALID"),
+    ] {
+        let value = parsed(
+            &f.run(
+                &[
+                    "setup",
+                    "--email",
+                    "input@example.test",
+                    "--password-stdin",
+                    "--output",
+                    "json",
+                ],
+                Some(input),
+            ),
+            exit,
+        );
+        assert_eq!(value["error"]["code"], code);
+        assert_eq!(value["error"]["outcome"], "not_applied");
+    }
     assert!(f.state.calls.lock().unwrap().is_empty());
     assert!(!user_auth::session_path(&f.path).exists());
 }

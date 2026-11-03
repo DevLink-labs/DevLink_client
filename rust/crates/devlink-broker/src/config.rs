@@ -3,7 +3,7 @@
 //! DevLink의 설정 파일(`config.json`) 로드, 저장, 원자적 쓰기(atomic write), 파일 락(lock),
 //! 유효성 검사 및 동적 수정을 담당하는 모듈입니다.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -49,6 +49,24 @@ fn auth_timeout() -> u64 {
     5000
 }
 
+/// Safe field diagnostics, shared by config commands and setup.
+#[derive(Debug)]
+pub struct ConfigValidationError {
+    pub field: &'static str,
+    message: &'static str,
+}
+
+impl std::fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for ConfigValidationError {}
+
+pub(crate) fn invalid(field: &'static str, message: &'static str) -> anyhow::Error {
+    ConfigValidationError { field, message }.into()
+}
+
 impl Default for Config {
     /// 기본 권장 설정값 반환
     fn default() -> Self {
@@ -72,7 +90,7 @@ impl Config {
     /// - `auth_timeout_ms`: 100ms ~ 60000ms 범위 확인
     pub fn validate(&self) -> Result<()> {
         let url = url::Url::parse(&self.server_url)
-            .map_err(|_| anyhow::anyhow!("serverUrl must be a valid ws:// or wss:// URL"))?;
+            .map_err(|_| invalid("serverUrl", "serverUrl must be a valid ws:// or wss:// URL"))?;
         if !matches!(url.scheme(), "ws" | "wss")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -80,12 +98,16 @@ impl Config {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            bail!(
-                "serverUrl requires ws/wss and a host; credentials, query and fragment are forbidden"
-            );
+            return Err(invalid(
+                "serverUrl",
+                "serverUrl requires ws/wss and a host; credentials, query and fragment are forbidden",
+            ));
         }
         if !matches!(url.path(), "" | "/" | "/ws/broker") {
-            bail!("serverUrl path must be empty, '/', or '/ws/broker'");
+            return Err(invalid(
+                "serverUrl",
+                "serverUrl path must be empty, '/', or '/ws/broker'",
+            ));
         }
         if self.agent.is_empty()
             || self.agent.len() > 64
@@ -94,21 +116,31 @@ impl Config {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
         {
-            bail!("agent must contain 1-64 letters, digits, hyphens or underscores");
+            return Err(invalid(
+                "agent",
+                "agent must contain 1-64 letters, digits, hyphens or underscores",
+            ));
         }
         if self.reconnect_initial_ms < 50
             || self.reconnect_max_ms < self.reconnect_initial_ms
             || self.reconnect_max_ms > 300000
         {
-            bail!("reconnectInitialMs must be >= 50 and <= reconnectMaxMs (maximum 300000)");
+            return Err(invalid(
+                "reconnectInitialMs/reconnectMaxMs",
+                "reconnectInitialMs must be >= 50 and <= reconnectMaxMs (maximum 300000)",
+            ));
         }
         if !(100..=60000).contains(&self.auth_timeout_ms) {
-            bail!("authTimeoutMs must be between 100 and 60000");
+            return Err(invalid(
+                "authTimeoutMs",
+                "authTimeoutMs must be between 100 and 60000",
+            ));
         }
         if self.local_port == 80 {
-            bail!(
-                "localPort cannot be 80 because HTTP default port is rejected by MCP endpoint validation"
-            );
+            return Err(invalid(
+                "localPort",
+                "localPort cannot be 80 because HTTP default port is rejected by MCP endpoint validation",
+            ));
         }
         Ok(())
     }
@@ -118,7 +150,10 @@ impl Config {
         let bytes = fs::read(path).context("Cannot read config; run devlink init first")?;
         // 보안상 사용자 입력 값이 포함될 수 있는 serde 에러 원문은 외부에 노출하지 않음
         let config: Self = serde_json::from_slice(&bytes).map_err(|_| {
-            anyhow::anyhow!("Invalid config JSON, unknown field or incorrect value type")
+            invalid(
+                "$",
+                "Invalid config JSON, unknown field or incorrect value type",
+            )
         })?;
         config.validate()?;
         Ok(config)
@@ -210,20 +245,74 @@ fn prepare_json(
     Ok(file)
 }
 
+#[derive(Debug)]
+pub(crate) struct InitializeError {
+    source: anyhow::Error,
+    /// Only a failure after persist can leave the config publication uncertain.
+    pub published: bool,
+}
+
+impl From<anyhow::Error> for InitializeError {
+    fn from(source: anyhow::Error) -> Self {
+        Self {
+            source,
+            published: false,
+        }
+    }
+}
+impl std::fmt::Display for InitializeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
+    }
+}
+impl std::error::Error for InitializeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// Shared init implementation. Caller holds control.lock; never clobber a raced file.
-pub(crate) fn initialize_missing(path: &Path, private: bool) -> Result<bool> {
-    if crate::credentials::ensure_safe_target_if_exists(path)? {
-        return Ok(false);
+/// Setup validates links separately; init preserves its existing symlink behavior.
+pub(crate) fn initialize_missing(
+    path: &Path,
+    private: bool,
+) -> std::result::Result<bool, InitializeError> {
+    initialize_missing_with_sync(path, private, |parent| {
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = parent;
+        Ok(())
+    })
+}
+
+fn initialize_missing_with_sync(
+    path: &Path,
+    private: bool,
+    sync_parent: impl FnOnce(&Path) -> Result<()>,
+) -> std::result::Result<bool, InitializeError> {
+    // Any entry, including a dangling link, is an existing config. Propagate
+    // inspection errors instead of treating them as a missing file.
+    match fs::symlink_metadata(path) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::from(error)
+                .context("Cannot inspect config")
+                .into());
+        }
     }
     let file = prepare_json(path, &Config::default(), private)?;
     match file.persist_noclobber(path) {
         Ok(_) => {
-            #[cfg(unix)]
-            File::open(directory(path))?.sync_all()?;
+            sync_parent(directory(path)).map_err(|source| InitializeError {
+                source,
+                published: true,
+            })?;
             Ok(true)
         }
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(_) => bail!("Cannot create configuration file"),
+        Err(_) => Err(anyhow::anyhow!("Cannot create configuration file").into()),
     }
 }
 
@@ -259,4 +348,42 @@ pub fn set(path: &Path, key: &str, raw: &str) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Incorrect config value type or range"))?;
     config.validate()?;
     atomic_json(path, &config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialization_failure_before_persist_does_not_publish_config() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("missing/config.json");
+        let error = initialize_missing(&path, false).unwrap_err();
+        assert!(!error.published);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn parent_sync_failure_reports_the_already_persisted_config() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let error = initialize_missing_with_sync(&path, false, |_| {
+            anyhow::bail!("injected parent sync failure")
+        })
+        .unwrap_err();
+        assert!(error.published);
+        Config::load(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_link_is_an_existing_entry_and_its_target_is_not_created() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("missing-target.json");
+        let path = root.path().join("config.json");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(!initialize_missing(&path, false).unwrap());
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }

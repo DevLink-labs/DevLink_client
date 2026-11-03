@@ -61,6 +61,24 @@ async fn failed_login_preserves_previous_session_and_never_echoes_server_reflect
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_password_stdin_reports_the_missing_value_instead_of_a_cancellation() {
+    let f = Fixture::new().await;
+    let output = f.run(
+        &[
+            "auth",
+            "login",
+            "--email",
+            "empty@example.test",
+            "--password-stdin",
+        ],
+        Some(""),
+    );
+    assert!(!output.status.success());
+    assert!(text(&output).contains("No Password was received on stdin"));
+    assert!(f.state.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expiry_clears_secret_and_future_user_commands_require_reauthentication() {
     let f = Fixture::new().await;
     assert!(f.login().status.success());

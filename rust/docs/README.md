@@ -13,7 +13,7 @@
 | 영역 | 기준 문서 |
 | --- | --- |
 | 간편설정 입력·출력·단계·오류·협업 경계 (후속 구현 규격) | [setup v1](../../contracts/setup/v1/README.md) |
-| setup 실행 흐름·설정 자동 초기화·로그인 통합 (작업 02·03·04) | [setup.md](setup.md) |
+| setup 실행 흐름·설정 자동 초기화·로그인·팀 선택 (작업 02·03·04·05) | [setup.md](setup.md) |
 | 사용자 로그인·세션 | [user-auth.md](user-auth.md) |
 | 팀 생성·가입·선택 | [team-setup.md](team-setup.md) |
 | Agent 생성·선택·토큰·로컬 바인딩 | [agent-bootstrap.md](agent-bootstrap.md) |

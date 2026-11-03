@@ -92,24 +92,42 @@ pub enum AuthFaultKind {
     Protocol,
     IdentityMismatch,
     Busy,
+    ConfigBusy,
+    BrokerBusy,
+    ConfigInvalid,
+    /// config.json could not be read; storage, not content, failed.
+    ConfigUnreadable,
+    /// control.lock or broker.lock is unsafe or could not be opened/locked.
+    ControlLockFailed,
+    BrokerLockFailed,
     SessionConflict,
 }
 
 #[derive(Debug)]
 pub struct AuthFault {
     pub kind: AuthFaultKind,
-    message: &'static str,
+    message: String,
 }
 
 impl std::fmt::Display for AuthFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for AuthFault {}
 
-fn fault(kind: AuthFaultKind, message: &'static str) -> anyhow::Error {
-    AuthFault { kind, message }.into()
+pub(crate) fn fault(kind: AuthFaultKind, message: &'static str) -> anyhow::Error {
+    AuthFault {
+        kind,
+        message: message.into(),
+    }
+    .into()
+}
+
+/// Type a local failure for setup while keeping its value-free top-level message.
+pub(crate) fn classify(error: anyhow::Error, kind: AuthFaultKind) -> anyhow::Error {
+    let message = error.to_string();
+    error.context(AuthFault { kind, message })
 }
 
 /// Public state only. Cookies and CSRF credentials stay inside UserClient.
@@ -152,28 +170,45 @@ pub fn session_path(config_path: &Path) -> PathBuf {
 }
 
 pub fn validate_config(config_path: &Path) -> Result<()> {
-    origin(&Config::load(config_path)?).map(|_| ())
+    config_origin(config_path).map(|_| ())
+}
+
+pub(crate) fn config_origin(config_path: &Path) -> Result<Url> {
+    Config::load(config_path)
+        .and_then(|config| origin(&config))
+        .map_err(|error| {
+            // Only Config::load's read fails with io::Error; parse and value errors
+            // carry ConfigValidationError with the field to report.
+            let kind = if error.chain().any(|cause| cause.is::<std::io::Error>()) {
+                AuthFaultKind::ConfigUnreadable
+            } else {
+                AuthFaultKind::ConfigInvalid
+            };
+            classify(error, kind)
+        })
 }
 
 pub fn origin(config: &Config) -> Result<Url> {
     config.validate()?;
-    let mut url =
-        Url::parse(&config.server_url).map_err(|_| anyhow::anyhow!("Invalid central origin"))?;
+    let mut url = Url::parse(&config.server_url)
+        .map_err(|_| config::invalid("serverUrl", "Invalid central origin"))?;
     let scheme = if url.scheme() == "wss" {
         "https"
     } else {
         "http"
     };
     url.set_scheme(scheme)
-        .map_err(|_| anyhow::anyhow!("Invalid central origin"))?;
+        .map_err(|_| config::invalid("serverUrl", "Invalid central origin"))?;
     url.set_path("/");
     let local = url
         .host_str()
         .is_some_and(|h| matches!(h, "localhost" | "127.0.0.1" | "[::1]" | "::1"));
-    ensure!(
-        url.scheme() == "https" || local,
-        "User authentication requires HTTPS (HTTP is allowed only on loopback)"
-    );
+    if url.scheme() != "https" && !local {
+        return Err(config::invalid(
+            "serverUrl",
+            "User authentication requires HTTPS (HTTP is allowed only on loopback)",
+        ));
+    }
     Ok(url)
 }
 
@@ -203,7 +238,7 @@ fn transport(jar: Arc<Jar>) -> Result<Client> {
 
 impl UserClient {
     fn load(config_path: &Path) -> Result<Self> {
-        let origin = origin(&Config::load(config_path)?)?;
+        let origin = config_origin(config_path)?;
         let parent = config::state_directory(config_path);
         credentials::ensure_safe_parent_directory(&parent)?;
         credentials::set_private_permissions(&parent)?;
@@ -267,6 +302,26 @@ impl UserClient {
 
     pub async fn authenticated(config_path: &Path) -> Result<Self> {
         let mut this = Self::load(config_path)?;
+        this.verify_session().await?;
+        Ok(this)
+    }
+
+    /// Pin the setup principal before sending requests, including after UI input.
+    pub async fn authenticated_for_setup(
+        config_path: &Path,
+        expected_origin: &str,
+        expected_user: u64,
+    ) -> Result<Self> {
+        let mut this = Self::load(config_path)?;
+        require_setup_origin(&this, expected_origin)?;
+        if this.local_problem.is_some()
+            || !matches!(&this.snapshot.state, SessionState::Authenticated { user, .. } if user.user_id == expected_user)
+        {
+            return Err(fault(
+                AuthFaultKind::SessionConflict,
+                "The setup user session changed; restart setup",
+            ));
+        }
         this.verify_session().await?;
         Ok(this)
     }

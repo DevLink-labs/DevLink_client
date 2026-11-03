@@ -5,6 +5,58 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupTeamFaultKind {
+    Forbidden,
+    ListResourceNotFound,
+    Protocol,
+    Storage,
+    BindingConflict,
+    Busy,
+    SessionConflict,
+}
+
+#[derive(Debug)]
+pub struct SetupTeamFault {
+    pub kind: SetupTeamFaultKind,
+    pub mutation_uncertain: bool,
+    pub file: Option<PathBuf>,
+    message: &'static str,
+}
+
+impl std::fmt::Display for SetupTeamFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for SetupTeamFault {}
+
+fn setup_fault(kind: SetupTeamFaultKind, message: &'static str) -> anyhow::Error {
+    SetupTeamFault {
+        kind,
+        mutation_uncertain: false,
+        file: None,
+        message,
+    }
+    .into()
+}
+
+fn storage_fault(file: PathBuf, message: &'static str) -> anyhow::Error {
+    SetupTeamFault {
+        kind: SetupTeamFaultKind::Storage,
+        mutation_uncertain: false,
+        file: Some(file),
+        message,
+    }
+    .into()
+}
+
+pub enum SetupSelection {
+    Selected { team: Team, reused: bool },
+    Choose(Vec<Team>),
+    NoTeams,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Role {
@@ -79,10 +131,12 @@ fn valid_id(id: u64) -> bool {
     id > 0 && id <= i64::MAX as u64
 }
 fn validate_team(team: &Team) -> Result<()> {
-    ensure!(
-        valid_id(team.team_id) && !team.name.is_empty(),
-        "Invalid central team response"
-    );
+    if !valid_id(team.team_id) || team.name.trim().is_empty() {
+        return Err(setup_fault(
+            SetupTeamFaultKind::Protocol,
+            "Invalid central team response",
+        ));
+    }
     Ok(())
 }
 
@@ -90,19 +144,33 @@ async fn member_team(client: &mut UserClient, id: u64) -> Result<Team> {
     ensure!(valid_id(id), "Invalid team ID");
     let team: Team = client.get(&format!("/api/v1/teams/{id}")).await?;
     validate_team(&team)?;
-    ensure!(team.team_id == id, "Central team identity mismatch");
+    if team.team_id != id {
+        return Err(setup_fault(
+            SetupTeamFaultKind::Protocol,
+            "Central team identity mismatch",
+        ));
+    }
     let members: Vec<Member> = client.get(&format!("/api/v1/teams/{id}/members")).await?;
     let user = client.user()?.user_id;
-    ensure!(
-        members.iter().all(|m| valid_id(m.user_id)),
-        "Invalid central membership response"
-    );
-    ensure!(
-        members
-            .iter()
-            .any(|m| m.user_id == user && m.role == team.my_role),
-        "ACCESS_DENIED: verified current user is not a member of this team"
-    );
+    let mut identities = std::collections::HashSet::new();
+    if !members
+        .iter()
+        .all(|m| valid_id(m.user_id) && identities.insert(m.user_id))
+    {
+        return Err(setup_fault(
+            SetupTeamFaultKind::Protocol,
+            "Invalid central membership response",
+        ));
+    }
+    if !members
+        .iter()
+        .any(|m| m.user_id == user && m.role == team.my_role)
+    {
+        return Err(setup_fault(
+            SetupTeamFaultKind::Forbidden,
+            "ACCESS_DENIED: verified current user is not a member of this team",
+        ));
+    }
     Ok(team)
 }
 
@@ -197,4 +265,146 @@ pub async fn current(config_path: &Path) -> Result<Option<Team>> {
         return Ok(None);
     }
     require_selected(config_path, &mut client).await.map(Some)
+}
+
+/// Resolve and publish a selector under the same account lock as existing team
+/// commands. Cached choices never authorize a selection after input resumes.
+pub async fn select_for_setup(
+    config_path: &Path,
+    expected_origin: &str,
+    expected_user: u64,
+    requested: Option<u64>,
+) -> Result<SetupSelection> {
+    let mut client =
+        UserClient::authenticated_for_setup(config_path, expected_origin, expected_user).await?;
+    let previous = stored_selection(config_path).map_err(|_| {
+        storage_fault(
+            selection_path(config_path),
+            "Cannot read the selected team snapshot",
+        )
+    })?;
+    let teams: Vec<Team> = client.get("/api/v1/teams").await.map_err(|error| {
+        // List 404 means a membership references a missing team, not that the
+        // selected team's membership was denied. Preserve other auth/HTTP faults.
+        if crate::user_auth::rejection_status(&error) == Some(404) {
+            setup_fault(
+                SetupTeamFaultKind::ListResourceNotFound,
+                "The team list references a missing central resource",
+            )
+        } else {
+            error
+        }
+    })?;
+    let mut ids = std::collections::HashSet::new();
+    for team in &teams {
+        validate_team(team)?;
+        if !ids.insert(team.team_id) {
+            return Err(setup_fault(
+                SetupTeamFaultKind::Protocol,
+                "Duplicate central team identity",
+            ));
+        }
+    }
+    let previous_id = previous
+        .as_ref()
+        .filter(|s| s.origin == expected_origin && s.user_id == expected_user)
+        .map(|s| s.team_id);
+    if teams.is_empty() {
+        return Ok(SetupSelection::NoTeams);
+    }
+    let id = if let Some(id) = requested {
+        id
+    } else if let Some(id) = previous_id.filter(|id| ids.contains(id)) {
+        id
+    } else if teams.len() == 1 {
+        teams[0].team_id
+    } else {
+        return Ok(SetupSelection::Choose(teams));
+    };
+    if !valid_id(id) || !ids.contains(&id) {
+        return Err(setup_fault(
+            SetupTeamFaultKind::Forbidden,
+            "Choose a current joined team",
+        ));
+    }
+    let team = member_team(&mut client, id).await?;
+    let listed = teams
+        .iter()
+        .find(|t| t.team_id == id)
+        .expect("validated team ID");
+    if listed.my_role != team.my_role {
+        return Err(setup_fault(
+            SetupTeamFaultKind::Protocol,
+            "Central team membership changed",
+        ));
+    }
+    let lock = config::state_directory(config_path).join("control.lock");
+    if std::fs::symlink_metadata(&lock).is_ok() {
+        crate::credentials::verify_path_safety(&lock)
+            .map_err(|_| storage_fault(lock.clone(), "Cannot inspect the team control lock"))?;
+    }
+    let _control = config::try_lock(&lock)
+        .map_err(|_| storage_fault(lock.clone(), "Cannot acquire the team control lock"))?
+        .ok_or_else(|| {
+            setup_fault(
+                SetupTeamFaultKind::Busy,
+                "Another profile operation is running",
+            )
+        })?;
+    // config set uses control.lock, not account.lock. Membership may have been
+    // verified on the old server while the current profile's origin changed.
+    // Keep this guard through both selector publication and reuse success.
+    let current_config = config::Config::load(config_path).map_err(|_| {
+        storage_fault(
+            config_path.to_path_buf(),
+            "Cannot reload the setup configuration",
+        )
+    })?;
+    let current_origin = crate::user_auth::origin(&current_config).map_err(|_| {
+        storage_fault(
+            config_path.to_path_buf(),
+            "Cannot verify the current central origin",
+        )
+    })?;
+    if current_origin.as_str() != expected_origin {
+        return Err(SetupTeamFault {
+            kind: SetupTeamFaultKind::SessionConflict,
+            mutation_uncertain: false,
+            file: Some(config_path.to_path_buf()),
+            message: "The central origin changed during team verification; restart setup",
+        }
+        .into());
+    }
+    if crate::agent_profile::setup_team_conflicts(config_path, expected_origin, expected_user, id)
+        .map_err(|_| {
+        storage_fault(
+            crate::agent_profile::path(config_path),
+            "Cannot inspect the Agent binding",
+        )
+    })? {
+        return Err(setup_fault(
+            SetupTeamFaultKind::BindingConflict,
+            "The existing Agent is bound to another server, user, or team",
+        ));
+    }
+    let reused = previous_id == Some(id);
+    if !reused {
+        private_file::write(
+            &selection_path(config_path),
+            &Selection {
+                schema_version: 1,
+                origin: expected_origin.to_owned(),
+                user_id: expected_user,
+                team_id: id,
+            },
+            16_384,
+        )
+        .map_err(|_| SetupTeamFault {
+            kind: SetupTeamFaultKind::Storage,
+            mutation_uncertain: true,
+            file: Some(selection_path(config_path)),
+            message: "Cannot publish the selected team snapshot",
+        })?;
+    }
+    Ok(SetupSelection::Selected { team, reused })
 }

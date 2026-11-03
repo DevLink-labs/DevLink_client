@@ -1,7 +1,7 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
 use super::{
     Completion, LoginCredentials, LoginInput, LoginInputError, ProgressEvent, ProgressUnavailable,
-    RunResult, SetupContext, SetupStages,
+    RunResult, SetupContext, SetupStages, TeamChoice, TeamInput, TeamInputError, parse_team_id,
 };
 use clap::{Args, ValueEnum};
 use serde::Serialize;
@@ -13,7 +13,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes settings and reuses a server-verified user session.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nTeam selection and remaining stage integrations will be added in subsequent work."
+    after_help = "Setup initializes settings, verifies your user session, and selects a joined team.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection. Project and remaining stages follow."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
@@ -25,6 +25,9 @@ pub struct SetupArgs {
     /// Read one password line only when sign-in is required (never an argument/env secret)
     #[arg(long)]
     pub password_stdin: bool,
+    /// Select a current joined team by ID; otherwise reuse or choose a team
+    #[arg(long, value_name = "ID", value_parser = parse_team_id)]
+    pub team_id: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -57,15 +60,60 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
         email: args.email,
         password_stdin: args.password_stdin,
     };
-    let result = super::run(&context, SetupStages::new(input), |event| {
-        output.progress(event)
-    })
-    .await;
+    let stages = SetupStages::new(input)
+        .with_team_input(TerminalTeamInput)
+        .with_team_id(args.team_id);
+    let result = super::run(&context, stages, |event| output.progress(event)).await;
     output.result(&result).map_err(|_| SetupExit(1))?;
     if result.exit_code != 0 {
         return Err(SetupExit(result.exit_code).into());
     }
     Ok(())
+}
+
+struct TerminalTeamInput;
+impl TeamInput for TerminalTeamInput {
+    fn available(&self) -> bool {
+        self.interactive()
+    }
+    fn interactive(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+    async fn request(&mut self, choices: &[TeamChoice]) -> Result<u64, TeamInputError> {
+        if !self.interactive() {
+            return Err(TeamInputError::Unavailable);
+        }
+        let choices = choices.to_vec();
+        tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Read};
+            let stderr = std::io::stderr();
+            let mut renderer = Renderer::new(stderr.lock(), OutputFormat::Json);
+            for choice in choices {
+                write!(renderer.writer, "{}: ", choice.id)
+                    .map_err(|_| TeamInputError::ReadFailed)?;
+                renderer
+                    .json(&choice.name)
+                    .map_err(|_| TeamInputError::ReadFailed)?;
+            }
+            write!(renderer.writer, "Team ID: ")
+                .and_then(|_| renderer.writer.flush())
+                .map_err(|_| TeamInputError::ReadFailed)?;
+            let mut bytes = Vec::new();
+            if std::io::stdin()
+                .lock()
+                .take(128)
+                .read_until(b'\n', &mut bytes)
+                .map_err(|_| TeamInputError::ReadFailed)?
+                == 0
+            {
+                return Err(TeamInputError::Cancelled);
+            }
+            let value = String::from_utf8(bytes).map_err(|_| TeamInputError::Invalid)?;
+            parse_team_id(value.trim()).map_err(|_| TeamInputError::Invalid)
+        })
+        .await
+        .map_err(|_| TeamInputError::ReadFailed)?
+    }
 }
 
 struct TerminalLoginInput {
@@ -118,11 +166,24 @@ impl LoginInput for TerminalLoginInput {
                 return Err(LoginInputError::Unavailable);
             }
             let password = crate::terminal_input::secret_input("Password", 72, password_stdin)
-                .map_err(|_| LoginInputError::Invalid)?;
+                .map_err(secret_input_error)?;
             LoginCredentials::new(email, password)
         })
         .await
         .map_err(|_| LoginInputError::ReadFailed)?
+    }
+}
+
+fn secret_input_error(error: anyhow::Error) -> LoginInputError {
+    match error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+    {
+        Some(std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::Interrupted) => {
+            LoginInputError::Cancelled
+        }
+        Some(_) => LoginInputError::ReadFailed,
+        None => LoginInputError::Invalid,
     }
 }
 
@@ -199,5 +260,33 @@ impl<W: Write> Renderer<W> {
         writeln!(self.writer)
             .and_then(|_| self.writer.flush())
             .map_err(|_| ProgressUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_input_distinguishes_cancellation_io_and_invalid_values() {
+        for kind in [
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            let error =
+                anyhow::Error::from(std::io::Error::from(kind)).context("hidden input failed");
+            assert!(matches!(
+                secret_input_error(error),
+                LoginInputError::Cancelled
+            ));
+        }
+        assert!(matches!(
+            secret_input_error(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into()),
+            LoginInputError::ReadFailed
+        ));
+        assert!(matches!(
+            secret_input_error(anyhow::anyhow!("invalid length")),
+            LoginInputError::Invalid
+        ));
     }
 }

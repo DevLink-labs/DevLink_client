@@ -36,7 +36,9 @@ fn setup_help_documents_usage_output_and_global_config() {
         "--output",
         "human",
         "jsonl",
-        "subsequent work",
+        "--team-id <ID>",
+        "single joined team",
+        "remaining stages follow",
     ] {
         assert!(help.contains(expected), "missing {expected}: {help}");
     }
