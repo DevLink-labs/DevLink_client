@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비를 구현했다.
+작업 02·03·04·05·06·07. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택을 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -15,13 +15,16 @@ devlink setup --email user@example.test --password-stdin --output json
 devlink setup --team-id 71 --output json
 # 생략하면 현재 작업 폴더 사용. 공백·한글 경로는 따옴표로 묶는다.
 devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝트 표시명" --agent-name "개발 Agent"
+# 도구 선택. PATH 밖 설치는 실행 파일을 함께 지정할 수 있다.
+devlink setup --tool codex
+devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비**다. 도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비·도구 탐지/선택**이다. Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 프로젝트 경로·메타데이터를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한다. 완료되면 아직 미연결인 select_tool에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로·메타데이터를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한다. select_tool에서 설치된 도구를 탐지·선택한다. 완료되면 아직 미연결인 register_agent에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -35,6 +38,7 @@ devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝�
 | `devlink-cli/src/setup/stages.rs` | 설정 준비·세션 확인·로그인 연결, 검증한 설정/사용자를 후속 단계용으로 보관 |
 | `devlink-cli/src/setup/login_input.rs` | 비밀을 직렬화/Debug하지 않는 입력 DTO와 주입 가능한 입력 인터페이스 |
 | `devlink-cli/src/setup/team_input.rs` | 팀 ID 검증과 주입 가능한 팀 선택 입력 인터페이스 |
+| `devlink-cli/src/setup/tool_input.rs` | 탐지된 도구 선택 입력 인터페이스 |
 | `devlink-cli/src/setup/terminal.rs` | clap 옵션·human/JSON/JSONL 렌더링·프로세스 종료 코드 전달 |
 | `devlink-cli/src/terminal_input.rs` | 기존 auth/team 명령과 setup이 공유하는 숨김/전용 stdin 입력 |
 | `devlink-broker/src/user_auth.rs` | 기존 로그인·CSRF·세션 저장과 typed session check·장애 분류 |
@@ -42,6 +46,8 @@ devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝�
 | `devlink-broker/src/agent_profile.rs` | 기존/미확정 Agent 바인딩의 사용자·서버·팀 충돌 확인 |
 | `devlink-broker/src/setup_config.rs` | 설정 경로·형식·값·자격 파일 안전성·브로커 잠금 검사 |
 | `devlink-broker/src/setup_project.rs` | 프로젝트 경로 정규화·표시명 기본값·기존 프로젝트 비교, 등록 메타데이터와 로컬 경로 분리 |
+| `devlink-broker/src/tool_discovery.rs` | 설치 위치 탐색·버전 전용 실행·재사용 가능한 실행 정보·MCP 제공자 연결 |
+| `devlink-broker/src/setup_tools.rs` | 사용자/팀/프로젝트에 묶인 비공개 도구 선택 저장·재사용·경합 검사 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
 
@@ -198,7 +204,7 @@ LoginCredentials에는 Debug/Serialize를 구현하지 않는다. 비밀번호�
 
 브로커/제어 잠금 충돌·잠금 파일 오류와 config 재읽기 실패는 세션 저장 오류로 분류하지 않고 해당 파일 위치와 not_applied를 반환한다. config 값 오류는 Config 검증의 필드(JSON 오류는 `$`)를, 읽기 I/O 오류는 SETUP_CONFIG_STORAGE_FAILED를 반환한다. 로그인·팀 선택 입력의 I/O 실패는 SETUP_INTERNAL_ERROR로, 비밀번호 입력의 EOF·입력 중단은 SETUP_CANCELLED로 구분한다. 빈 비밀번호 줄이나 길이·형식 위반은 SETUP_INPUT_INVALID다. 같은 입력 함수를 쓰는 auth/team 명령은 빈 stdin에서 "No Password was received on stdin"처럼 누락된 값을 안내한다. 앞서 확인된 세션 만료 등 이미 적용한 변경은 공통 흐름에서 계속 보존한다.
 
-인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택, 작업 06에서 프로젝트 준비를 연결했으며 현재 중단 단계는 select_tool이다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
+인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택, 작업 06에서 프로젝트 준비, 작업 07에서 도구 선택을 연결했으며 현재 중단 단계는 register_agent다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
 
 ```powershell
 # rust 디렉터리에서 인증 통합과 기존 인증 회귀 확인
@@ -360,7 +366,7 @@ validate는 설정 생성·로그인·팀 조회 전에 경로와 명시한 메�
 
 bind_project는 프로필·Agent/MCP 자격을 쓰거나 토큰을 발급/회전하지 않는다. 성공은 `outcome:not_applied`이며 기존 프로젝트를 재사용하면 `reused:true`다. 결과는 `SetupStages::project()`의 PreparedProject에 보관해 후속 도구·등록 단계에서 사용한다. 실제 프로필 저장은 후속 register_agent의 역할이다. 로컬 root를 가진 PreparedProject는 Serialize를 구현하지 않고, AgentMetadata는 이름·프로젝트 표시명·역할만 직렬화한다. 기존 create 요청도 이 공개 필드와 toolType만 중앙에 보내고 projectRoot는 로컬 비공개 프로필에만 저장한다.
 
-없는 경로/파일은 `SETUP_PROJECT_PATH_INVALID`/종료 2, 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`/종료 5다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 프로젝트 준비까지 완료한 setup은 현재 미구현 select_tool에서 종료 3이다.
+없는 경로/파일은 `SETUP_PROJECT_PATH_INVALID`/종료 2, 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`/종료 5다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 작업 06 종료 당시에는 select_tool에서 종료 3이었으며 작업 07에서 도구 선택을 연결했다.
 
 ### 작업 06 검증 결과
 
@@ -369,3 +375,47 @@ bind_project는 프로필·Agent/MCP 자격을 쓰거나 토큰을 발급/회전
 한글·공백·상대/절대 경로·현재 폴더 기본값·없는 경로/파일 거부·설정 생성 전 거부·프로젝트 단계 전 디렉터리 삭제·이름과 역할의 UTF-16 경계·같은 프로젝트 이름 재사용·모든 기존 프로필 상태의 프로젝트 충돌·손상 파일과 자격 보존·control.lock 경합을 검사했다. 중앙의 실제 생성 요청은 합성 서버가 허용한 name/projectName/roleDescription/toolType 네 필드만 받는지 검사하고 로컬 projectRoot 저장과 구분했다. 프로필 재사용/거부 시 파일 바이트와 수정 시각도 보존됐다.
 
 fmt·변경 공백 검사는 통과했다. 전체 workspace/all-targets Clippy `-D warnings`는 이번에 수정하지 않은 mcp_config.rs:201, sessions.rs:558의 기존 collapsible_if 두 건으로 실패했다. 해당 lint만 제외한 전체 타깃 검사와 최종 보강한 두 테스트 타깃의 Clippy는 통과했다. 최초 샌드박스에서는 임시 파일 교체가 차단됐으며 이후 허용된 샌드박스 밖 테스트에서 위 회귀를 확인했다. 전체 workspace 테스트·실제 운영 중앙·Unix 전용 경로·실제 대화형 콘솔 검증은 이번에 수행하지 않았다.
+
+## 작업 07: Codex·Claude Code 탐지와 선택
+
+`--tool codex|claude-code`로 선택하고 `--tool-path <FILE>`로 PATH 밖 설치를 지정할 수 있다. 경로 옵션은 도구 종류와 함께 사용한다. 명시 선택 → 기존 Agent 프로필의 도구 → 같은 중앙 origin/사용자/팀/프로젝트에 저장된 유효한 선택 순으로 사용한다. 선택이 없고 사용 가능한 도구가 하나면 그 도구를 선택한다. 여러 개면 ToolInput 어댑터에 요청하며 TTY가 없으면 `SETUP_TOOL_REQUIRED`/종료 2와 `tool.type/selection/detected_tool_list` descriptor 및 탐지 목록을 반환한다. 기존 Agent와 다른 도구를 명시하면 종료 6으로 중단한다. 기존 Agent의 도구가 없을 때도 다른 도구로 자동 전환하지 않는다. Agent에 묶이지 않은 저장 선택이 무효일 때는 현재 설치 목록에서 다시 선택한다.
+
+탐색은 절대 PATH 항목과 사용자 `.local/bin`, `.cargo/bin`, Windows APPDATA/npm을 사용한다. Windows는 codex.exe/codex.cmd와 claude.exe/claude.cmd, Unix는 codex/claude를 찾는다. 상대/빈 PATH 항목을 현재 프로젝트에서 실행하지 않는다. 첫 PATH 명령이 실행 불가면 뒤의 같은 이름으로 조용히 우회하지 않는다. 명시한 실행 경로와 저장 경로를 우선 검사하며 canonical 실행 파일과 검증한 절대 경로 argv를 보관한다. Windows npm .cmd는 배치 문자열을 실행하지 않고 같은 설치의 알려진 패키지 진입점과 Node 실행 파일로 변환한다. Node 스크립트 인자는 일반 드라이브/UNC 경로로 전달하고 canonicalize 왕복으로 같은 파일인지 확인한다. 이전 빌드에서 저장한 verbatim 스크립트 인자도 재사용 전에 변환한다. 셸 명령 문자열이나 임의 저장 argv는 실행하지 않는다.
+
+Windows pnpm·yarn 전역 설치 중 shim 옆의 `node_modules`에 패키지가 없는 배치는 현재 지원하지 않으며 `not_executable`로 표시된다. 같은 `.cmd`를 `--tool-path`로 지정해도 해결되지 않는다. 패키지의 실제 네이티브 `.exe`를 `--tool codex|claude-code --tool-path <FILE>`로 지정하거나 지원하는 npm/네이티브 설치를 사용한다. 임의 shim의 내용을 해석하거나 실행해 우회하지 않는다.
+
+실행 가능 여부는 stdin을 닫고 임시 작업 폴더에서 버전 명령만 호출해 검사한다. 네이티브 도구에는 `--version` 하나, npm 도구에는 Node의 패키지 진입점과 `--version`만 전달한다. 탐지 과정은 프롬프트·exec·print 모드·로그인·설치·업데이트·모델 호출을 사용하지 않는다. 각 probe의 기본 timeout은 5초이며 stdout/stderr 각각 8 KiB를 넘으면 실패한다. timeout/출력 초과에서는 자식 프로세스를 종료·수거하고 원문 출력을 사용자 오류에 전달하지 않는다. Node preload 환경 NODE_OPTIONS/NODE_PATH는 probe에서 제외한다. 버전은 Codex의 codex-cli 접두사, Claude Code의 도구 접미사 및 숫자 버전 형식으로 확인한다.
+
+탐지 DTO의 상태는 available/missing/not_executable/version_check_failed/timed_out/invalid_version이다. `tools` 목록은 두 도구의 상태·공식 설치 URL·available 도구의 installation(toolType/executable/version)·mcpAutomaticSupported를 제공한다. 선택 요청의 waiting_input progress에도 같은 목록을 전달한다. 도구가 없거나 명시한 도구가 실행 불가면 `SETUP_TOOL_UNAVAILABLE`/종료 5와 설치 링크, 터미널 재실행, `setup --tool` 및 `--tool-path` 안내를 반환한다. 입력 취소는 종료 130, 입력 I/O 실패는 종료 1이며 인증·팀·프로젝트의 완료 상태를 보존한다. 선택 후 실제 probe를 다시 수행하므로 입력 중 삭제된 실행 파일을 선택 완료로 처리하지 않는다.
+
+선택은 `.devlink-runtime/selected-tool.json`에 schemaVersion/binding/selected로 비공개 원자 저장한다. binding은 origin/userId/teamId/projectRoot, selected는 toolType/executable{command,args}/version이다. 이 파일은 중앙 요청에 포함하지 않는다. 경로·버전을 실제 재검사한 뒤 내용이 같으면 파일 바이트·수정 시각을 보존하고 reused:true/not_applied를 반환한다. 첫 저장이나 선택 갱신은 applied다. 기존 Agent 선택 재사용은 새 캐시 파일을 저장해도 reused:true다. Agent/MCP 자격은 변경하지 않는다.
+
+읽기와 저장은 account.lock → control.lock 순서로 보호한다. 버전 실행과 사용자 입력 중에는 잠금을 유지하지 않으며 저장 전에 로컬 세션·현재 서버·팀·프로젝트·Agent 도구·선택 스냅샷을 다시 대조한다. 다른 선택이 저장됐으면 `SETUP_TOOL_SELECTION_CONFLICT`/종료 6, 기존 Agent 도구 충돌은 `SETUP_TOOL_BINDING_CONFLICT`/종료 6, 잘못된 선택 파일은 `SETUP_TOOL_STORAGE_FAILED`/종료 5로 보존한다. 저장 결과가 불확실하면 unknown으로 멈춘다. 세션·서버 변경과 잠금 오류는 기존 setup 오류를 재사용한다.
+
+`SetupStages::tool()`은 SelectedTool을 후속 모듈에 전달한다. 재실행할 때 command와 args를 그대로 재사용할 수 있고, 자동 설정 제공자는 `McpConfig::new(selected.verified_host()?)`로 만들 수 있다. 탐지 단계의 mcpAutomaticSupported도 이 VerifiedHost API의 결과다. 도구를 실행할 수 있는 것과 해당 버전의 자동 Host 설정을 지원하는 것은 별개다. 알 수 없는 버전도 available일 수 있지만 자동 설정 지원 여부는 제공자가 결정한다. Host 설정 위치·TOML/JSON 형식·지원 버전 판단은 [기존 MCP 설정 제공자](../../contracts/setup/v1/mcp-config-provider.md)에 위임한다. 이 단계는 Host 설정 파일을 고르거나 쓰지 않는다. Host 실행 정보와 MCP 서버용 Node/스크립트 실행 정보도 구분하며, 후자의 Node >=24·빌드 결과 검사는 후속 MCP 연동 작업이다.
+
+버전 확인과 설치 안내 근거: [OpenAI 공식 CLI 문서](https://learn.chatgpt.com/docs/codex/cli), [Codex 버전 확인 예시](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex), [Claude Code 설치](https://code.claude.com/docs/en/setup), [Claude CLI 참조](https://code.claude.com/docs/en/cli-reference). 자동 설치를 실행하지 않는다.
+
+### 작업 07 검증 결과
+
+2026-11-03 Windows MSVC에서 신규 도구 회귀 13건, 기존 setup CLI 6건·설정 14건·인증 22건·팀 선택 17건·프로젝트 10건·흐름 10건·출력 5건·Agent CLI 12건이 통과했다. 중복을 제외한 관련 회귀는 **109 passed / 0 failed**다. 합성 도구는 Rust로 빌드한 실행 파일이며 받은 argv를 기록하고 허용된 버전 인자 외에는 실패한다. 설치 탐지는 AI 프롬프트나 작업 명령을 실행하지 않는다. 기존 setup 회귀는 명시한 합성 Codex 경로를 사용해 사용자 설치의 선택 상태에 의존하지 않도록 보완했다.
+
+탐지 없음·두 도구 탐지·명시 한글/공백 경로·Node/npm shim·실행 불가/실패/잘못된 출력/출력 초과/timeout·PATH 우선순위·알 수 없는 버전의 제공자 판단·단일 선택 저장·다중 선택 입력/재개·저장 경로의 PATH 외 재사용·오래된 선택 교체·파일 바이트/수정 시각/비공개 권한 보존·기존 Agent 도구 우선/전환 거부·손상 argv 보존·계정/프로필 잠금·입력 취소/I/O 오류·입력 중 도구 삭제/서버/사용자/선택 변경을 검사했다. 자동 Host 설정 파일을 생성하지 않았으며 Agent 토큰을 발급/회전하지 않았다.
+
+전체 타깃 check, fmt, 변경 공백 검사와 기존 collapsible_if lint만 제외한 workspace/all-targets Clippy `-D warnings`가 통과했다. lint 제외 없이 실행한 Clippy는 기존 mcp_config.rs:201, sessions.rs:558의 두 진단이 남아 있다. 전체 workspace 테스트, 운영 중앙/DB, 실제 AI 작업·모델 호출, 실제 콘솔 대화형 입력, Unix 전용 실행 권한 분기는 이번 검증에 포함하지 않았다. Agent 등록 및 실제 Host/MCP 연결은 후속 작업이다.
+
+### 작업 07 리뷰: Windows npm 경로·테스트 timeout·전역 shim 범위
+
+2026-11-03 Windows의 실제 Node 24.18.0에서 버전만 출력하는 ESM 파일을 검사했다. 일반 절대 경로는 종료 0, canonicalize의 verbatim 경로는 EISDIR/lstat C:와 종료 1이었다. 새 실제 Node 회귀도 수정 전에는 version_check_failed로 실패했다. 이전 npm 회귀는 Node 역할을 Rust 합성 실행 파일로 대체해 모듈 로딩 오류를 발견하지 못했다.
+
+이제 파일 검사는 canonical 경로로 유지하고 Node 스크립트 argv만 일반 드라이브/UNC 경로로 변환한다. 변환 결과를 다시 canonicalize해 같은 대상인지 확인하므로 접두사 제거로 다른 파일을 실행하지 않는다. Node 실행 파일의 canonical 경로는 유지한다. 이전 선택 파일에 저장한 verbatim 스크립트 argv도 재사용 시 변환한다. 실제 Node·임시 ESM 패키지로 Codex/Claude 두 형식의 PATH 탐지·명시 .cmd 선택·PATH 밖 저장 경로 재사용과 한글/공백/&/#/% 경로가 수정 후 통과했다. 이 회귀는 Node 설치가 Rust 테스트의 필수 조건이 되지 않도록 opt-in ignored 테스트로 두고 다음 명령으로 별도 실행했다.
+
+```powershell
+cargo test --offline --locked -p devlink-cli --test setup_tools real_node_loads_npm_esm_entries_for_both_hosts_and_reuses_saved_paths -- --ignored
+```
+
+정상 탐지 검사에 공통 적용되던 800ms 제한을 제품 기본 5초와 통일했다. 의도적으로 30초 멈추는 합성 도구의 종료 검사만 별도 테스트에서 800ms를 사용한다. 짧은 제한과 실패 가능성은 코드에서 확인했지만, 이번 검토에서 기존 간헐 실패 자체를 재현한 것은 아니다. 제품 probe timeout은 변경하지 않았다.
+
+shim 옆에 node_modules가 없는 전역 pnpm/yarn 배치는 코드 및 합성 배치 회귀에서 not_executable임을 확인했다. 이 구조의 자동 해석은 추가하지 않았으며, 실제 네이티브 실행 파일을 --tool-path로 지정하거나 지원하는 설치를 사용하라는 내용을 오류 안내와 문서에 추가했다. 같은 .cmd를 다시 지정하는 것으로 해결되지 않음을 명시했다. 실제 패키지 매니저 설치/변경과 AI 작업·모델 호출은 하지 않았다. 실제 네트워크 UNC 공유는 이번에 검증하지 않았다.
+
+기본 병렬 `cargo test --workspace --offline --locked`는 **318 passed / 0 failed / 3 ignored**로 종료 0이다. ignored는 기존 opt-in 2건과 새 실제 Node 회귀 1건이며, 새 Node 회귀는 위 명령으로 따로 실행해 **1 passed**를 확인했다. 정상 탐지·전역 shim 제한·전용 timeout을 포함한 setup_tools는 전체 실행 안에서 15 passed / 1 ignored다. 재시도와 --test-threads=1은 사용하지 않았다. fmt·변경 공백 검사 및 기존 collapsible_if만 제외한 전체 타깃 Clippy가 통과했다. 전체 실행 로그는 빌드 산출물 `rust/target/setup07-review-workspace.log`에 보관한다. 이 결과는 이번 병렬 실행의 통과이며 모든 CI 부하에서 간헐 실패가 사라졌음을 보장하는 검증은 아니다.

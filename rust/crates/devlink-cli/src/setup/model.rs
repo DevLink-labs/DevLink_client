@@ -134,6 +134,16 @@ pub enum ErrorCode {
     ProjectBindingConflict,
     #[serde(rename = "SETUP_PROJECT_STORAGE_FAILED")]
     ProjectStorageFailed,
+    #[serde(rename = "SETUP_TOOL_REQUIRED")]
+    ToolRequired,
+    #[serde(rename = "SETUP_TOOL_UNAVAILABLE")]
+    ToolUnavailable,
+    #[serde(rename = "SETUP_TOOL_BINDING_CONFLICT")]
+    ToolBindingConflict,
+    #[serde(rename = "SETUP_TOOL_STORAGE_FAILED")]
+    ToolStorageFailed,
+    #[serde(rename = "SETUP_TOOL_SELECTION_CONFLICT")]
+    ToolSelectionConflict,
 }
 
 impl ErrorCode {
@@ -161,6 +171,9 @@ impl ErrorCode {
             Self::ProjectPathInvalid => 2,
             Self::ProjectBindingConflict => 6,
             Self::ProjectStorageFailed => 5,
+            Self::ToolRequired => 2,
+            Self::ToolUnavailable | Self::ToolStorageFailed => 5,
+            Self::ToolBindingConflict | Self::ToolSelectionConflict => 6,
         }
     }
 
@@ -243,6 +256,21 @@ impl ErrorCode {
             Self::ProjectStorageFailed => {
                 "The existing project binding could not be read. Inspect the private Agent profile before retrying; it was preserved."
             }
+            Self::ToolRequired => {
+                "Choose an available tool using --tool codex or --tool claude-code, or the terminal selection."
+            }
+            Self::ToolUnavailable => {
+                "The requested tool is unavailable. Install Codex or Claude Code using the reported official installation link, reopen the terminal, then rerun setup --tool codex or setup --tool claude-code. Use --tool-path for an installation outside PATH. For unsupported pnpm/yarn shim layouts, specify the package's native executable or use a native installation. No AI session was started."
+            }
+            Self::ToolBindingConflict => {
+                "The selected tool conflicts with the existing Agent binding. Inspect devlink agent status and explicitly bind an owned Agent, or use a separate profile."
+            }
+            Self::ToolStorageFailed => {
+                "The private tool selection could not be read or saved. Inspect the indicated file before retrying."
+            }
+            Self::ToolSelectionConflict => {
+                "The profile or tool selection changed while selecting a tool. Inspect the current selection and rerun setup explicitly."
+            }
         }
     }
 
@@ -277,6 +305,11 @@ impl ErrorCode {
             Self::ProjectPathInvalid => "choose_existing_project_directory",
             Self::ProjectBindingConflict => "inspect_project_binding",
             Self::ProjectStorageFailed => "inspect_agent_profile",
+            Self::ToolRequired => "select_detected_tool",
+            Self::ToolUnavailable => "install_or_select_tool",
+            Self::ToolBindingConflict => "inspect_agent_binding",
+            Self::ToolStorageFailed => "inspect_tool_selection",
+            Self::ToolSelectionConflict => "inspect_tool_selection_then_retry",
         }
     }
 }
@@ -296,6 +329,7 @@ pub enum InputSource {
     HiddenPromptOrStdin,
     VerifiedTeamList,
     OwnedAgentList,
+    DetectedToolList,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -315,6 +349,8 @@ pub struct TeamChoice {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnownIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<devlink_broker::sessions::ToolType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,6 +387,8 @@ pub struct SetupError {
     pub required_inputs: Vec<RequiredInput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub team_choices: Vec<TeamChoice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<devlink_broker::tool_discovery::ToolDetection>,
     pub known: KnownIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ErrorLocation>,
@@ -367,6 +405,7 @@ impl SetupError {
             outcome,
             required_inputs: Vec::new(),
             team_choices: Vec::new(),
+            tools: Vec::new(),
             known: KnownIdentity::default(),
             location: None,
             message: code.message(),
@@ -384,6 +423,8 @@ impl SetupError {
                     | ErrorCode::TeamRequired
                     | ErrorCode::TeamForbidden
                     | ErrorCode::ProjectPathInvalid
+                    | ErrorCode::ToolRequired
+                    | ErrorCode::ToolUnavailable
             ),
             recovery: Recovery {
                 action: code.recovery(),
@@ -424,6 +465,8 @@ pub struct ProgressEvent {
     pub required_inputs: Vec<RequiredInput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub team_choices: Vec<TeamChoice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<devlink_broker::tool_discovery::ToolDetection>,
 }
 
 /// Flattened variants enforce exactly one of data/error in a final result.

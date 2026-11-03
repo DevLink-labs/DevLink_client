@@ -5,9 +5,11 @@ mod model;
 mod stages;
 mod team_input;
 pub mod terminal;
+mod tool_input;
 
 pub use flow::{ProgressUnavailable, StepExecutor, run};
 pub use login_input::{LoginCredentials, LoginInput, LoginInputError, NoLoginInput};
 pub use model::*;
 pub use stages::SetupStages;
 pub use team_input::{NoTeamInput, TeamInput, TeamInputError, parse_team_id};
+pub use tool_input::{NoToolInput, ToolInput, ToolInputError};

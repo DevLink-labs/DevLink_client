@@ -56,7 +56,7 @@ async fn a_single_team_is_verified_saved_privately_and_then_reused_without_rewri
     let value = parsed(&f, &["setup", "--output", "json"], 3);
     assert_eq!(value["stages"][2]["status"], "succeeded");
     assert_eq!(value["stages"][2]["reused"], false);
-    assert_eq!(value["error"]["step"], "select_tool");
+    assert_eq!(value["error"]["step"], "register_agent");
     assert_eq!(value["error"]["known"]["teamId"], "71");
     assert_eq!(
         *f.state.calls.lock().unwrap(),
@@ -480,7 +480,12 @@ async fn injected(f: &Fixture, mode: u8) -> (setup::RunResult<()>, Vec<setup::Pr
         &SetupContext {
             config_path: f.path.clone(),
         },
-        SetupStages::new(NoLoginInput).with_team_input(input),
+        SetupStages::new(NoLoginInput)
+            .with_team_input(input)
+            .with_tool(
+                Some(devlink_broker::sessions::ToolType::Codex),
+                Some(account_server::test_tool().to_path_buf()),
+            ),
         |event| {
             events.push(event.clone());
             Ok(())

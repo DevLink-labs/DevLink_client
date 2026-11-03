@@ -40,6 +40,8 @@ fn setup_help_documents_usage_output_and_global_config() {
         "--project <DIRECTORY>",
         "--project-name <NAME>",
         "--agent-name <NAME>",
+        "--tool <TYPE>",
+        "--tool-path <FILE>",
         "current directory",
         "single joined team",
         "remaining stages follow",

@@ -227,6 +227,10 @@ fn load(config_path: &Path) -> Result<Option<Profile>> {
 pub(crate) struct ProjectBinding {
     pub root: String,
     pub metadata: Option<crate::setup_project::AgentMetadata>,
+    pub tool: Option<crate::sessions::ToolType>,
+    pub origin: String,
+    pub user_id: u64,
+    pub team_id: u64,
 }
 
 /// Local comparison only; never exposes the private state or Agent token.
@@ -251,6 +255,18 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
         ProjectBinding {
             root: profile.project_root,
             metadata,
+            tool: match &profile.state {
+                State::Ready { agent, .. } | State::NeedsToken { agent } => Some(&agent.tool_type),
+                State::CreatePending { tool, .. } => Some(tool),
+                State::Vacant => None,
+            }
+            .map(|tool| match tool {
+                Tool::Codex => crate::sessions::ToolType::Codex,
+                Tool::ClaudeCode => crate::sessions::ToolType::ClaudeCode,
+            }),
+            origin: profile.origin,
+            user_id: profile.user_id,
+            team_id: profile.team_id,
         }
     }))
 }

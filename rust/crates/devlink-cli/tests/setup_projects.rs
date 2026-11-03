@@ -38,6 +38,8 @@ fn run(f: &Fixture, cwd: &Path, args: &[&str], exit: i32) -> Value {
         .arg(&f.path)
         .args(["setup", "--output", "json"])
         .args(args)
+        .args(["--tool", "codex", "--tool-path"])
+        .arg(account_server::test_tool())
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()
@@ -78,7 +80,7 @@ async fn cli_defaults_to_cwd_and_accepts_explicit_relative_korean_paths_with_spa
         let value = run(&f, &cwd, &args, 3);
         assert_eq!(value["stages"][3]["status"], "succeeded");
         assert_eq!(value["stages"][3]["outcome"], "not_applied");
-        assert_eq!(value["error"]["step"], "select_tool");
+        assert_eq!(value["error"]["step"], "register_agent");
     }
     let value = run(&f, &cwd, &["--project-path", target.to_str().unwrap()], 3);
     assert_eq!(value["stages"][3]["status"], "succeeded");
