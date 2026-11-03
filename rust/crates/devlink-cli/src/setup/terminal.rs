@@ -8,12 +8,12 @@ use serde::Serialize;
 use std::{
     fmt,
     io::{IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes settings, verifies your user session, and selects a joined team.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection. Project and remaining stages follow."
+    after_help = "Setup initializes settings, verifies your user session, selects a joined team, and prepares the local project.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTool selection and remaining stages follow."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
@@ -28,6 +28,18 @@ pub struct SetupArgs {
     /// Select a current joined team by ID; otherwise reuse or choose a team
     #[arg(long, value_name = "ID", value_parser = parse_team_id)]
     pub team_id: Option<u64>,
+    /// Existing project directory (default: current working directory)
+    #[arg(long, alias = "project-path", value_name = "DIRECTORY")]
+    pub project: Option<PathBuf>,
+    /// Central project display name (default: folder name, or saved profile name)
+    #[arg(long, value_name = "NAME")]
+    pub project_name: Option<String>,
+    /// Agent display name (default: folder name, or saved profile name)
+    #[arg(long, value_name = "NAME")]
+    pub agent_name: Option<String>,
+    /// Optional Agent role description
+    #[arg(long, value_name = "DESCRIPTION")]
+    pub role_description: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -62,7 +74,13 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     };
     let stages = SetupStages::new(input)
         .with_team_input(TerminalTeamInput)
-        .with_team_id(args.team_id);
+        .with_team_id(args.team_id)
+        .with_project(devlink_broker::setup_project::ProjectOptions {
+            path: args.project,
+            project_name: args.project_name,
+            agent_name: args.agent_name,
+            role_description: args.role_description,
+        });
     let result = super::run(&context, stages, |event| output.progress(event)).await;
     output.result(&result).map_err(|_| SetupExit(1))?;
     if result.exit_code != 0 {

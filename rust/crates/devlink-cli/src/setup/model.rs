@@ -128,6 +128,12 @@ pub enum ErrorCode {
     TeamBindingConflict,
     #[serde(rename = "SETUP_TEAM_STORAGE_FAILED")]
     TeamStorageFailed,
+    #[serde(rename = "SETUP_PROJECT_PATH_INVALID")]
+    ProjectPathInvalid,
+    #[serde(rename = "SETUP_PROJECT_BINDING_CONFLICT")]
+    ProjectBindingConflict,
+    #[serde(rename = "SETUP_PROJECT_STORAGE_FAILED")]
+    ProjectStorageFailed,
 }
 
 impl ErrorCode {
@@ -152,6 +158,9 @@ impl ErrorCode {
             Self::TeamListResourceNotFound => 7,
             Self::TeamBindingConflict => 6,
             Self::TeamStorageFailed => 5,
+            Self::ProjectPathInvalid => 2,
+            Self::ProjectBindingConflict => 6,
+            Self::ProjectStorageFailed => 5,
         }
     }
 
@@ -225,6 +234,15 @@ impl ErrorCode {
             Self::TeamStorageFailed => {
                 "The team selection or Agent binding could not be read or saved. Inspect private profile files before retrying."
             }
+            Self::ProjectPathInvalid => {
+                "Choose an existing project directory with --project. File paths and missing directories are not accepted."
+            }
+            Self::ProjectBindingConflict => {
+                "The profile belongs to another local project. Inspect devlink agent status and explicitly bind an owned Agent, or choose a separate --config profile. The existing profile was preserved."
+            }
+            Self::ProjectStorageFailed => {
+                "The existing project binding could not be read. Inspect the private Agent profile before retrying; it was preserved."
+            }
         }
     }
 
@@ -256,6 +274,9 @@ impl ErrorCode {
             Self::TeamListResourceNotFound => "inspect_central_team_data",
             Self::TeamBindingConflict => "inspect_agent_binding",
             Self::TeamStorageFailed => "inspect_team_selection",
+            Self::ProjectPathInvalid => "choose_existing_project_directory",
+            Self::ProjectBindingConflict => "inspect_project_binding",
+            Self::ProjectStorageFailed => "inspect_agent_profile",
         }
     }
 }
@@ -362,6 +383,7 @@ impl SetupError {
                     | ErrorCode::CentralUnavailable
                     | ErrorCode::TeamRequired
                     | ErrorCode::TeamForbidden
+                    | ErrorCode::ProjectPathInvalid
             ),
             recovery: Recovery {
                 action: code.recovery(),

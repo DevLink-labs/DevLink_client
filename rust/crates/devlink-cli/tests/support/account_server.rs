@@ -203,6 +203,14 @@ async fn agent_create(
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
     }
     assert!(body.get("ownerUserId").is_none() && body.get("agentId").is_none());
+    assert_eq!(
+        body.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["name", "projectName", "roleDescription", "toolType"]
+    );
     let count = state.agents.lock().unwrap().len();
     let id = 201 + count as u64;
     let user = user(&state)["userId"].as_u64().unwrap();

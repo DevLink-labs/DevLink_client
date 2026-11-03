@@ -5,6 +5,7 @@ use super::{
 };
 use devlink_broker::{
     setup_config::{self, FailureKind, PreparedConfig},
+    setup_project::{self, PreparedProject, ProjectOptions},
     teams::{self, SetupSelection, SetupTeamFault, SetupTeamFaultKind, Team},
     user_auth::{self, AuthFault, AuthFaultKind, SessionCheck, User},
 };
@@ -20,6 +21,8 @@ pub struct SetupStages<I = NoLoginInput, T = NoTeamInput> {
     team_choices: Vec<TeamChoice>,
     waiting_team: bool,
     team: Option<Team>,
+    project_options: ProjectOptions,
+    project: Option<PreparedProject>,
 }
 
 impl Default for SetupStages<NoLoginInput> {
@@ -40,6 +43,8 @@ impl<I> SetupStages<I, NoTeamInput> {
             team_choices: Vec::new(),
             waiting_team: false,
             team: None,
+            project_options: ProjectOptions::default(),
+            project: None,
         }
     }
 }
@@ -56,12 +61,23 @@ impl<I, T> SetupStages<I, T> {
             team_choices: self.team_choices,
             waiting_team: self.waiting_team,
             team: self.team,
+            project_options: self.project_options,
+            project: self.project,
         }
     }
 
     pub fn with_team_id(mut self, id: Option<u64>) -> Self {
         self.requested_team = id;
         self
+    }
+
+    pub fn with_project(mut self, options: ProjectOptions) -> Self {
+        self.project_options = options;
+        self
+    }
+
+    pub fn project(&self) -> Option<&PreparedProject> {
+        self.project.as_ref()
     }
 
     pub fn team(&self) -> Option<&Team> {
@@ -87,6 +103,35 @@ impl<I: LoginInput, T: TeamInput> StepExecutor for SetupStages<I, T> {
         if step == Step::SelectTeam {
             return self.select_team(context).await;
         }
+        if step == Step::BindProject {
+            let path = context.config_path.clone();
+            let options = self.project_options.clone();
+            return match tokio::task::spawn_blocking(move || {
+                setup_project::prepare(&path, &options)
+            })
+            .await
+            {
+                Ok(Ok(project)) => {
+                    let reused = project.reused;
+                    self.project = Some(project);
+                    StepResult::Complete {
+                        outcome: Outcome::NotApplied,
+                        reused,
+                    }
+                }
+                Ok(Err(failure)) => {
+                    let mut error = project_error(step, failure);
+                    error.known.user_id = self.user.as_ref().map(|u| u.user_id.to_string());
+                    error.known.team_id = self.team.as_ref().map(|t| t.team_id.to_string());
+                    StepResult::Failed(error)
+                }
+                Err(_) => StepResult::Failed(SetupError::new(
+                    ErrorCode::InternalError,
+                    step,
+                    Outcome::NotApplied,
+                )),
+            };
+        }
         if step != Step::Validate {
             let mut error = SetupError::new(ErrorCode::StepUnavailable, step, Outcome::NotApplied);
             if let Some(user) = &self.user {
@@ -96,6 +141,22 @@ impl<I: LoginInput, T: TeamInput> StepExecutor for SetupStages<I, T> {
                 error.known.team_id = Some(team.team_id.to_string());
             }
             return StepResult::Failed(error);
+        }
+        // Reject invalid local input before initializing settings or contacting central.
+        let options = self.project_options.clone();
+        match tokio::task::spawn_blocking(move || setup_project::resolve(&options)).await {
+            Ok(Ok(project)) => {
+                // Freeze cwd now; later stages must not resolve a relative path again.
+                self.project_options.path = Some(project.root.clone());
+            }
+            Ok(Err(failure)) => return StepResult::Failed(project_error(step, failure)),
+            Err(_) => {
+                return StepResult::Failed(SetupError::new(
+                    ErrorCode::InternalError,
+                    step,
+                    Outcome::NotApplied,
+                ));
+            }
         }
         let path = context.config_path.clone();
         match tokio::task::spawn_blocking(move || setup_config::prepare(&path)).await {
@@ -191,6 +252,30 @@ impl<I: LoginInput, T: TeamInput> StepExecutor for SetupStages<I, T> {
     }
 
     fn finish(self) {}
+}
+
+fn project_error(step: Step, failure: setup_project::Failure) -> SetupError {
+    let code = match failure.kind {
+        setup_project::FailureKind::InvalidPath => ErrorCode::ProjectPathInvalid,
+        setup_project::FailureKind::InvalidMetadata => ErrorCode::InputInvalid,
+        setup_project::FailureKind::BindingConflict => ErrorCode::ProjectBindingConflict,
+        setup_project::FailureKind::Storage => ErrorCode::ProjectStorageFailed,
+        setup_project::FailureKind::Busy => ErrorCode::ConfigBusy,
+    };
+    let mut error = SetupError::new(code, step, Outcome::NotApplied);
+    error.location = failure.file.map(|file| ErrorLocation {
+        file,
+        field: Some(failure.field),
+    });
+    if code == ErrorCode::InputInvalid {
+        error.required_inputs.push(RequiredInput {
+            field: failure.field,
+            kind: InputKind::Value,
+            secret: false,
+            source: InputSource::Input,
+        });
+    }
+    error
 }
 
 impl<I: LoginInput, T: TeamInput> SetupStages<I, T> {

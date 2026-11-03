@@ -206,7 +206,7 @@ fn valid_token(token: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b))
 }
-fn project(path: &Path) -> Result<String> {
+pub(crate) fn project(path: &Path) -> Result<String> {
     let canonical = path
         .canonicalize()
         .map_err(|_| anyhow::anyhow!("Local project directory does not exist"))?;
@@ -222,6 +222,37 @@ fn load(config_path: &Path) -> Result<Option<Profile>> {
         p.validate()?;
     }
     Ok(value)
+}
+
+pub(crate) struct ProjectBinding {
+    pub root: String,
+    pub metadata: Option<crate::setup_project::AgentMetadata>,
+}
+
+/// Local comparison only; never exposes the private state or Agent token.
+pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<ProjectBinding>> {
+    use crate::setup_project::AgentMetadata;
+    Ok(load(config_path)?.map(|profile| {
+        let metadata = match &profile.state {
+            State::Ready { agent, .. } | State::NeedsToken { agent } => Some(AgentMetadata {
+                project_name: agent.project_name.clone(),
+                agent_name: agent.name.clone(),
+                role_description: agent.role_description.clone(),
+            }),
+            State::CreatePending {
+                name, project_name, ..
+            } => Some(AgentMetadata {
+                project_name: project_name.clone(),
+                agent_name: name.clone(),
+                role_description: None,
+            }),
+            State::Vacant => None,
+        };
+        ProjectBinding {
+            root: profile.project_root,
+            metadata,
+        }
+    }))
 }
 fn load_for_explicit_use(config_path: &Path) -> Result<Option<Profile>> {
     let Some(bytes) = private_file::read_bytes(&path(config_path), LIMIT)? else {

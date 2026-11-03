@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05. 2026-11-02 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택을 구현했다.
+작업 02·03·04·05·06. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비를 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -13,13 +13,15 @@ devlink setup --output jsonl
 devlink setup --email user@example.test --password-stdin --output json
 # 가입 팀이 여러 개이거나 기존 선택을 변경할 때
 devlink setup --team-id 71 --output json
+# 생략하면 현재 작업 폴더 사용. 공백·한글 경로는 따옴표로 묶는다.
+devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝트 표시명" --agent-name "개발 Agent"
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용**이다. 프로젝트·도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 경로 및 Agent 기본 정보 준비**다. 도구·Agent 선택과 등록/기동/MCP 설정/상태 조회 연결은 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. 완료되면 아직 미연결인 bind_project에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로·메타데이터를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한다. 완료되면 아직 미연결인 select_tool에서 `SETUP_STEP_UNAVAILABLE`과 종료 코드 3을 반환한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -39,6 +41,7 @@ devlink setup --team-id 71 --output json
 | `devlink-broker/src/teams.rs` | 현재 사용자·목록·상세·멤버십 검증과 선택 저장 |
 | `devlink-broker/src/agent_profile.rs` | 기존/미확정 Agent 바인딩의 사용자·서버·팀 충돌 확인 |
 | `devlink-broker/src/setup_config.rs` | 설정 경로·형식·값·자격 파일 안전성·브로커 잠금 검사 |
+| `devlink-broker/src/setup_project.rs` | 프로젝트 경로 정규화·표시명 기본값·기존 프로젝트 비교, 등록 메타데이터와 로컬 경로 분리 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
 
@@ -195,7 +198,7 @@ LoginCredentials에는 Debug/Serialize를 구현하지 않는다. 비밀번호�
 
 브로커/제어 잠금 충돌·잠금 파일 오류와 config 재읽기 실패는 세션 저장 오류로 분류하지 않고 해당 파일 위치와 not_applied를 반환한다. config 값 오류는 Config 검증의 필드(JSON 오류는 `$`)를, 읽기 I/O 오류는 SETUP_CONFIG_STORAGE_FAILED를 반환한다. 로그인·팀 선택 입력의 I/O 실패는 SETUP_INTERNAL_ERROR로, 비밀번호 입력의 EOF·입력 중단은 SETUP_CANCELLED로 구분한다. 빈 비밀번호 줄이나 길이·형식 위반은 SETUP_INPUT_INVALID다. 같은 입력 함수를 쓰는 auth/team 명령은 빈 stdin에서 "No Password was received on stdin"처럼 누락된 값을 안내한다. 앞서 확인된 세션 만료 등 이미 적용한 변경은 공통 흐름에서 계속 보존한다.
 
-인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택을 연결했으며 현재 중단 단계는 bind_project다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
+인증 성공 시 검증한 User를 후속 단계용으로 보관한다. 작업 04 종료 당시에는 select_team이 STEP_UNAVAILABLE/종료 3이었다. 작업 05에서 팀 선택, 작업 06에서 프로젝트 준비를 연결했으며 현재 중단 단계는 select_tool이다. 회원가입·Agent 등록·Host 전체 연결은 후속 작업이다.
 
 ```powershell
 # rust 디렉터리에서 인증 통합과 기존 인증 회귀 확인
@@ -236,7 +239,7 @@ select_team은 인증 단계에서 확인한 사용자 ID와 중앙 origin을 �
 
 새 선택은 기존 private writer로 selected-team.json에 origin/userId/teamId만 원자 저장한다. 정상 선택 재사용은 파일 내용과 수정 시각을 보존하며 `reused:true/outcome:not_applied`다. 새 선택은 `reused:false/outcome:applied`이고 저장 결과가 불확실하면 unknown으로 멈춘다. 손상된 선택·Agent 파일은 자동 삭제하거나 덮어쓰지 않는다.
 
-대화형 선택은 waiting_input 진행 이벤트에 descriptor와 teamChoices만 전달하고 해당 단계만 재개한다. 후보 이름은 기존 출력 어댑터의 제어/bidi 문자 escape를 적용한다. 입력 취소는 종료 130이며 인증 단계의 완료 상태를 보존한다. 후속 단계에 검증한 Team을 보관하고 결과의 known.userId/teamId를 전달한다. 현재 팀 선택 완료 후에는 미구현 bind_project에서 종료 3이다.
+대화형 선택은 waiting_input 진행 이벤트에 descriptor와 teamChoices만 전달하고 해당 단계만 재개한다. 후보 이름은 기존 출력 어댑터의 제어/bidi 문자 escape를 적용한다. 입력 취소는 종료 130이며 인증 단계의 완료 상태를 보존한다. 후속 단계에 검증한 Team을 보관하고 결과의 known.userId/teamId를 전달한다. 작업 05 종료 당시에는 bind_project에서 종료 3이었으며 작업 06에서 프로젝트 준비를 연결했다.
 
 | 코드 | 종료 | 복구 action |
 | --- | --- | --- |
@@ -338,3 +341,31 @@ select_team은 인증 단계에서 확인한 사용자 ID와 중앙 origin을 �
 Windows ACL 판정 함수를 실제 검사와 회귀 테스트에서 공유한다. 새 테스트는 실제 .NET FileSecurity 객체의 소유자를 현재 사용자·Administrators·SYSTEM·Everyone으로 바꿔 config와 비공개 파일의 허용/거부를 대조하고, 관리자 소유 config에서도 Everyone 쓰기 및 부모 쓰기를 거부하는지 검사한다. 관리자 권한 없이 메모리의 ACL 객체로 검사하므로 실제 파일 소유자나 사용자 환경의 권한을 변경하지 않는다. 기존 정책에서는 config 소유자 검사에서 실패하고 정책 변경 후 통과했다.
 
 2026-11-02 Windows MSVC에서 새 정책 회귀와 기본 병렬 `cargo test --workspace`가 **260 passed / 0 failed / 기존 opt-in 2 ignored**로 통과했다. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, 변경 공백 검사도 통과했다. 전체 실행 로그는 `rust/target/admin-owner-verification/workspace.log`에 보관한다. 이번 수정은 credentials.rs의 Windows ACL 정책·회귀와 이 문서에 한정하며 기존 setup 변경을 보존했다. 실제 관리자 셸에서의 init 수동 실행과 Unix 전용 테스트는 이번 검증에 포함하지 않았다.
+
+#### P3 리뷰 수정: config와 시스템 파일 소유자 정책 분리
+
+2026-11-03 리뷰에서 실제 config 검사에 실행 파일용 정책이 적용돼 SYSTEM·TrustedInstaller 소유까지 허용하던 불일치를 수정했다. config 소유자는 현재 사용자·Administrators만 허용한다. 실행 파일·상태 상위 디렉터리의 시스템 소유 허용은 별도 정책으로 구분한다.
+
+테스트 전용으로 중복돼 있던 ACL 판정 함수를 실제 파일 검사와 공유하도록 옮겼다. 공통 함수에 이전 정책을 적용하면 SYSTEM 소유 config 사례가 실패하는 것을 확인한 뒤 수정했다. 메모리 ACL로 현재 사용자·Administrators·SYSTEM·TrustedInstaller·Everyone 소유를 검사하며, config의 공개 읽기 허용과 비신뢰 주체의 파일·부모 쓰기 거부도 검증한다. 실제 파일 소유자를 변경하지 않는다.
+
+Windows MSVC에서 `cargo test --workspace --offline --locked`는 **293 passed / 0 failed / 기존 opt-in 2 ignored**다. 이후 보강한 TrustedInstaller 파일·부모 쓰기 검사도 해당 소유자 정책 테스트를 다시 실행해 통과했다. fmt·변경 공백 검사는 통과했다. 전체 Clippy `-D warnings`는 이번에 수정하지 않은 `mcp_config.rs:201`, `sessions.rs:558`의 기존 `collapsible_if` 진단으로 실패했으며, 해당 lint만 제외한 전체 타깃 검사는 통과했다. Unix와 실제 관리자 셸 수동 검증은 포함하지 않았다.
+
+## 작업 06: 프로젝트 경로와 Agent 기본 정보
+
+`--project <DIRECTORY>`는 기존 디렉터리를 받으며 `--project-path`도 같은 옵션이다. 생략하면 실행 시 현재 작업 폴더를 사용한다. 상대 경로·공백·한글을 지원하고 기존 Agent bootstrap과 같은 canonicalize 검사로 절대 경로를 확정한다. 없는 경로와 파일은 거부하며 프로젝트 폴더를 자동 생성하지 않는다.
+
+validate는 설정 생성·로그인·팀 조회 전에 경로와 명시한 메타데이터를 검사한다. 이때 확정한 절대 경로를 보관해 후속 단계에서 상대 경로나 현재 작업 폴더를 다시 해석하지 않는다. bind_project는 디렉터리 존재 여부를 재검사하고 control.lock 안에서 Agent 프로필을 읽어 프로젝트를 비교한다. 다른 디렉터리이거나 기존 디렉터리가 사라졌으면 `SETUP_PROJECT_BINDING_CONFLICT`/종료 6으로 중단한다. ready·needs_token·create_pending·vacant 모두 다른 프로젝트로 조용히 바꾸지 않는다. 별도 `--config` 프로필 또는 기존 `agent status` 확인 후 명시적 `agent use --project`로 복구하도록 안내한다.
+
+프로젝트명·Agent명은 폴더명에서 각각 UTF-16 120·100 단위까지 기본 구성한다. 경계의 이모지를 자르지 않는다. `--project-name`·`--agent-name`·`--role-description`으로 명시할 수 있고, 이름은 공백만으로 구성할 수 없으며 역할은 255 단위 이하다. 명시값이 제한을 넘으면 자동 절단하지 않고 `SETUP_INPUT_INVALID`/종료 2와 해당 필드 descriptor를 반환한다. 폴더명이 없는 파일시스템 루트는 두 이름을 명시해야 한다. 같은 프로젝트의 기존 프로필에서는 생략한 이름·역할을 저장된 값으로 채우며, create_pending은 저장돼 있는 이름·프로젝트명만 재사용한다.
+
+bind_project는 프로필·Agent/MCP 자격을 쓰거나 토큰을 발급/회전하지 않는다. 성공은 `outcome:not_applied`이며 기존 프로젝트를 재사용하면 `reused:true`다. 결과는 `SetupStages::project()`의 PreparedProject에 보관해 후속 도구·등록 단계에서 사용한다. 실제 프로필 저장은 후속 register_agent의 역할이다. 로컬 root를 가진 PreparedProject는 Serialize를 구현하지 않고, AgentMetadata는 이름·프로젝트 표시명·역할만 직렬화한다. 기존 create 요청도 이 공개 필드와 toolType만 중앙에 보내고 projectRoot는 로컬 비공개 프로필에만 저장한다.
+
+없는 경로/파일은 `SETUP_PROJECT_PATH_INVALID`/종료 2, 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`/종료 5다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 프로젝트 준비까지 완료한 setup은 현재 미구현 select_tool에서 종료 3이다.
+
+### 작업 06 검증 결과
+
+2026-11-03 Windows MSVC에서 합성 중앙 서버·임시 로컬 프로필로 새 프로젝트 검사 10건과 기존 Agent CLI 12건, setup CLI 6건, 인증 22건, 설정 14건, 흐름 10건, 출력 5건, 팀 선택 17건이 통과했다. 최종 관련 회귀는 중복을 제외해 **96 passed / 0 failed**다. 프로젝트 테스트의 UTF-16 이모지 경계·신규 config 미생성 입력을 보강한 뒤 10건을 재실행했고, 기존 팀 테스트에도 연결된 프로젝트 단계를 통과하도록 같은 프로젝트 경로를 명시한 뒤 17건을 재실행했다. 이 재실행을 합계에 더하지 않는다.
+
+한글·공백·상대/절대 경로·현재 폴더 기본값·없는 경로/파일 거부·설정 생성 전 거부·프로젝트 단계 전 디렉터리 삭제·이름과 역할의 UTF-16 경계·같은 프로젝트 이름 재사용·모든 기존 프로필 상태의 프로젝트 충돌·손상 파일과 자격 보존·control.lock 경합을 검사했다. 중앙의 실제 생성 요청은 합성 서버가 허용한 name/projectName/roleDescription/toolType 네 필드만 받는지 검사하고 로컬 projectRoot 저장과 구분했다. 프로필 재사용/거부 시 파일 바이트와 수정 시각도 보존됐다.
+
+fmt·변경 공백 검사는 통과했다. 전체 workspace/all-targets Clippy `-D warnings`는 이번에 수정하지 않은 mcp_config.rs:201, sessions.rs:558의 기존 collapsible_if 두 건으로 실패했다. 해당 lint만 제외한 전체 타깃 검사와 최종 보강한 두 테스트 타깃의 Clippy는 통과했다. 최초 샌드박스에서는 임시 파일 교체가 차단됐으며 이후 허용된 샌드박스 밖 테스트에서 위 회귀를 확인했다. 전체 workspace 테스트·실제 운영 중앙·Unix 전용 경로·실제 대화형 콘솔 검증은 이번에 수행하지 않았다.

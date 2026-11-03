@@ -19,6 +19,7 @@ pub mod protocol;
 pub mod session_api;
 pub mod sessions;
 pub mod setup_config;
+pub mod setup_project;
 pub mod task_api;
 pub mod task_client;
 pub mod task_operations;

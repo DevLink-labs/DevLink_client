@@ -81,7 +81,7 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
     let value = parsed(&child.wait_with_output().unwrap(), 3);
     assert_eq!(value["stages"][1]["status"], "succeeded");
     assert_eq!(value["stages"][1]["reused"], true);
-    assert_eq!(value["error"]["step"], "bind_project");
+    assert_eq!(value["error"]["step"], "select_tool");
     assert_eq!(value["error"]["known"]["userId"], "51");
     assert_eq!(
         *f.state.calls.lock().unwrap(),
