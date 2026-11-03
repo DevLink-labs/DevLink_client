@@ -93,20 +93,27 @@ impl Feed {
         })
     }
 
+    /// Digest of the actor scope and every consumed eventId, so a cleared store that
+    /// later re-delivers the same last event at the same position cannot pass.
     fn tag(&self, at: Position) -> String {
-        let received = at
-            .received
-            .checked_sub(1)
-            .map_or("", |i| self.received[i].event_id.as_str());
-        let sent = at
-            .sent
-            .checked_sub(1)
-            .map_or("", |i| self.sent[i].event_id());
-        let digest = Sha256::digest(format!(
-            "{}\n{}\n{received}\n{}\n{sent}",
-            self.scope, at.received, at.sent
-        ));
-        digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+        let mut digest = Sha256::new();
+        let mut field = |value: &str| {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        };
+        field(&self.scope);
+        field(&at.received.to_string());
+        for message in &self.received[..at.received] {
+            field(&message.event_id);
+        }
+        field(&at.sent.to_string());
+        for event in &self.sent[..at.sent] {
+            field(event.event_id());
+        }
+        digest.finalize()[..16]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     fn cursor(&self, at: Position) -> String {
@@ -251,9 +258,10 @@ async fn updates(State(api): State<Api>, request: Request) -> Response {
             None => None,
         };
         let expected = body.context.principal();
+        // Local data only: never requires a live central connection or central IO.
         let actor = api
             .sessions
-            .authorize(&body.context.session_id, &expected)
+            .authorize_local_read(&body.context.session_id, &expected)
             .await
             .map_err(session_error)?;
         if actor.agent_id.is_none() {
@@ -269,7 +277,7 @@ async fn updates(State(api): State<Api>, request: Request) -> Response {
         .ok_or_else(|| TaskError::rejected("LOCAL_UPDATES_UNAVAILABLE", 503))?;
         // Reads may not publish data to an owner replaced during storage IO.
         api.sessions
-            .authorize(&body.context.session_id, &actor)
+            .authorize_local_read(&body.context.session_id, &actor)
             .await
             .map_err(session_error)?;
         Ok(data)

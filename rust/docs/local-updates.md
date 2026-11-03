@@ -4,7 +4,11 @@
 
 ## 계약
 
-MCP `get_updates`가 기존 업무 요청 envelope로 호출한다. localToken·Origin 거부·세션 소유자 확인은 [업무 adapter](task-operations.md)와 같다. 중앙은 호출하지 않는다.
+MCP `get_updates`가 기존 업무 요청 envelope로 호출한다. localToken·Origin 거부는 [업무 adapter](task-operations.md)와 같다. 세션 확인은 로컬 읽기 전용 `SessionManager::authorize_local_read`를 읽기 전후 두 번 사용하며 중앙은 호출하지 않는다.
+
+- 유지하는 검증: 세션 만료·대체·소유권, 요청 context와 세션 principal 일치, 주체 변경·인증 거부 시 올라가는 subject epoch에 따른 세션 무효화.
+- 거부: 중앙 `AuthFailed`(503 `CENTRAL_UNAUTHENTICATED`), `Connected` 상태에서 중앙이 밝힌 Agent·user·team이 세션과 다른 경우.
+- 허용: 연결 중·재연결 중·단절 같은 일시 상태, 같은 Agent의 legacy READY(user/team 없음). 일반 업무 `authorize`와 달리 live READY를 요구하거나 `GET /api/v1/agents/me`로 신원을 해석하지 않는다. presence는 기존 규칙대로 확인되지 않은 legacy 재접속에서 ONLINE을 다시 알리지 않는다.
 
 ```json
 {"requestId":"UUID","operation":"get_updates","arguments":{"cursor":"v1.1.2.<32 hex>","limit":20},"context":{"sessionId":"...","userId":"3","teamId":"1","agentId":"12"}}
@@ -40,7 +44,7 @@ JSON Schema는 [updates.schema.json](../../contracts/local-broker/v1/updates.sch
 
 ## cursor
 
-`v1.<수신 위치>.<송신 위치>.<tag>` 형식이다. tag는 actor 범위(origin·user·team·Agent), 두 위치, 각 위치 직전 eventId의 SHA-256 앞 16바이트다.
+`v1.<수신 위치>.<송신 위치>.<tag>` 형식이다. tag는 actor 범위(origin·user·team·Agent), 두 위치, 각 출처에서 이미 소비한 모든 eventId를 길이 접두어와 함께 넣은 SHA-256의 앞 16바이트다. 마지막 eventId만 보면 저장소를 정리한 뒤 같은 위치에 같은 이벤트가 다시 저장될 때(`[A, B]` 소비 → 정리 → `[C, B]`) 이전 cursor가 통과해 C를 건너뛰므로, 소비한 앞부분 전체를 대조한다.
 
 - 조회는 아무것도 삭제·ACK·읽음 처리하지 않는다. 같은 cursor는 같은 결과를 돌려준다.
 - 위치가 보관 범위를 넘거나 tag가 현재 이력과 맞지 않으면(정리된 저장소, 다른 actor의 cursor, 변조) 처음부터 다시 주고 `cursorReset: true`를 표시한다. 건너뛰거나 추정하지 않는다.
@@ -52,6 +56,6 @@ JSON Schema는 [updates.schema.json](../../contracts/local-broker/v1/updates.sch
 
 ## 검증
 
-- `cargo test -p devlink-broker --test task_updates`: 범위 격리, 저장 순서, 본문 미포함, 같은 cursor 재조회, 페이지 이어 읽기, 정리·변조·범위 초과 cursor 재시작, 입력 검증, 미바인딩 세션, 손상된 저장소 503.
+- `cargo test -p devlink-broker --test task_updates`: 범위 격리, 저장 순서, 본문 미포함, 같은 cursor 재조회, 페이지 이어 읽기, 정리·변조·범위 초과 cursor 재시작, 정리 후 같은 마지막 이벤트 재저장 시 재시작, 입력 검증, 미바인딩 세션, 손상된 저장소 503, 중앙 단절 중 조회·AuthFailed 거부, legacy 재접속 시 중앙 요청 0회, 다른 주체 재접속 시 세션 무효화.
 - `updates::tests`: cursor 형식과 limit 경계.
 - MCP `test/updates.test.mjs`: 읽기 전용 annotation, 전달 인자, 본문 누출·상태 불일치·형식 위반 응답의 BROKER_PROTOCOL_ERROR 처리, 저장소 오류 매핑.

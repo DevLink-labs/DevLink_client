@@ -1,5 +1,7 @@
+use axum::{Json, Router, extract::State, routing::get};
 use devlink_broker::{
-    central::{CentralIdentity, CentralState, ConnectionStatus},
+    agent_context::ContextClient,
+    central::{CentralIdentity, CentralState, ConnectionStatus, SessionHandle},
     inbox::Inbox,
     notifications::{Notifications, TaskNotification},
     private_file,
@@ -11,7 +13,10 @@ use devlink_broker::{
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{net::TcpListener, sync::RwLock, task::JoinHandle};
@@ -29,25 +34,56 @@ struct Fixture {
     client: reqwest::Client,
     cancel: CancellationToken,
     local: JoinHandle<()>,
+    central: CentralState,
+    current: SessionHandle,
+    remote: Option<(Arc<AtomicUsize>, JoinHandle<()>)>,
+}
+fn identity(connection: &str, legacy: bool) -> CentralIdentity {
+    CentralIdentity {
+        connection_id: connection.into(),
+        agent_id: 12,
+        user_id: (!legacy).then_some(3),
+        team_id: (!legacy).then_some(1),
+    }
+}
+async fn agent_context(State(calls): State<Arc<AtomicUsize>>) -> Json<Value> {
+    calls.fetch_add(1, Ordering::SeqCst);
+    Json(
+        json!({"success":true,"data":{"agentId":12,"ownerUserId":3,"teamId":1,"toolType":"CODEX"}}),
+    )
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::build(false).await
+    }
+    /// Legacy READY without user/team, resolved through a counted central context API.
+    async fn legacy() -> Self {
+        Self::build(true).await
+    }
+    async fn build(legacy: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let central = CentralState::new(Arc::new(RwLock::new(ConnectionStatus::Connecting)));
+        let mut central = CentralState::new(Arc::new(RwLock::new(ConnectionStatus::Connecting)));
+        let mut remote = None;
+        if legacy {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let context_url = format!("ws://{}", listener.local_addr().unwrap());
+            let app = Router::new()
+                .route("/api/v1/agents/me", get(agent_context))
+                .with_state(calls.clone());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            central = central.with_context_client(
+                ContextClient::new(&context_url, "synthetic-agent-token").unwrap(),
+            );
+            remote = Some((calls, server));
+        }
         let current = central.begin_session().await;
-        current
-            .set_identity(CentralIdentity {
-                connection_id: "fixture".into(),
-                agent_id: 12,
-                user_id: Some(3),
-                team_id: Some(1),
-            })
-            .await;
+        current.set_identity(identity("fixture", legacy)).await;
         current.set_status(ConnectionStatus::Connected).await;
         let sessions = SessionManager::new(
             Arc::new(ReadyIdentityProvider::new(central.clone())),
-            central,
+            central.clone(),
         );
         let cancel = CancellationToken::new();
         let router = session_api::router(Arc::new(LOCAL.into()), sessions.clone()).merge(
@@ -76,7 +112,26 @@ impl Fixture {
                 .unwrap(),
             cancel,
             local,
+            central,
+            current,
+            remote,
         }
+    }
+    fn central_calls(&self) -> usize {
+        self.remote
+            .as_ref()
+            .map_or(0, |(calls, _)| calls.load(Ordering::SeqCst))
+    }
+    fn reset_central_calls(&self) {
+        if let Some((calls, _)) = &self.remote {
+            calls.store(0, Ordering::SeqCst);
+        }
+    }
+    /// Start a new central connection generation with the given READY identity.
+    async fn reconnect(&mut self, identity: CentralIdentity) {
+        self.current = self.central.begin_session().await;
+        self.current.set_identity(identity).await;
+        self.current.set_status(ConnectionStatus::Connected).await;
     }
     async fn post(&self, path: &str, body: &Value) -> (u16, Value) {
         let r = self
@@ -121,6 +176,9 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.local.abort();
+        if let Some((_, server)) = &self.remote {
+            server.abort();
+        }
     }
 }
 
@@ -332,4 +390,100 @@ async fn unbound_sessions_cannot_read_updates() {
     let (status, data) = f.updates(&session, json!({})).await;
     assert_eq!(status, 409, "{data}");
     assert_eq!(data["error"]["code"], "AGENT_UNREGISTERED");
+}
+
+#[tokio::test]
+async fn cleared_store_redelivering_the_last_event_still_resets_the_cursor() {
+    // Review regression: [A, B] consumed, store cleared, then [C, B] stored. The old
+    // tag matched position 2 and last B, so C was silently skipped.
+    let f = Fixture::new().await;
+    let session = f.claim(true).await;
+    let (a, b) = (notice(701, 1, "IN_PROGRESS"), notice(702, 1, "IN_PROGRESS"));
+    notify(&f.path, ORIGIN, 12, a).await;
+    notify(&f.path, ORIGIN, 12, b.clone()).await;
+    let consumed = f.page(&session, json!({})).await;
+    assert_eq!(consumed["updates"].as_array().unwrap().len(), 2);
+
+    Notifications::clear_config(&f.path).unwrap();
+    let c = notice(703, 1, "IN_PROGRESS");
+    notify(&f.path, ORIGIN, 12, c.clone()).await;
+    notify(&f.path, ORIGIN, 12, b.clone()).await;
+    let page = f
+        .page(&session, json!({"cursor": consumed["nextCursor"]}))
+        .await;
+    assert_eq!(page["cursorReset"], true);
+    let ids: Vec<_> = page["updates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["eventId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, [c.event_id().to_owned(), b.event_id().to_owned()]);
+
+    // The same holds for the received side.
+    let first = created(801, 1, 12);
+    receive(&f.path, ORIGIN, 12, first.clone()).await;
+    let caught_up = f
+        .page(&session, json!({"cursor": page["nextCursor"]}))
+        .await;
+    assert_eq!(caught_up["updates"].as_array().unwrap().len(), 1);
+    Inbox::clear_config(&f.path).unwrap();
+    let replacement = created(802, 1, 12);
+    receive(&f.path, ORIGIN, 12, replacement.clone()).await;
+    let reset = f
+        .page(&session, json!({"cursor": caught_up["nextCursor"]}))
+        .await;
+    assert_eq!(reset["cursorReset"], true);
+    assert_eq!(reset["updates"][0]["eventId"], replacement.event_id);
+}
+
+#[tokio::test]
+async fn local_reads_survive_a_central_disconnect_without_central_io() {
+    let f = Fixture::new().await;
+    let session = f.claim(true).await;
+    receive(&f.path, ORIGIN, 12, created(901, 1, 12)).await;
+    for status in [
+        ConnectionStatus::Reconnecting,
+        ConnectionStatus::Connecting,
+        ConnectionStatus::Disconnected,
+    ] {
+        f.current.set_status(status).await;
+        let page = f.page(&session, json!({})).await;
+        assert_eq!(page["updates"][0]["taskId"], "901", "{status:?}");
+    }
+    // Authentication failure is not a transient disconnect.
+    f.current.set_status(ConnectionStatus::AuthFailed).await;
+    let (status, data) = f.updates(&session, json!({})).await;
+    assert_eq!(status, 503, "{data}");
+    assert_eq!(data["error"]["code"], "CENTRAL_UNAUTHENTICATED");
+}
+
+#[tokio::test]
+async fn legacy_reconnect_of_the_same_agent_serves_local_reads_without_central_requests() {
+    let mut f = Fixture::legacy().await;
+    let session = f.claim(true).await;
+    assert_eq!(session["principal"]["userId"], "3");
+    receive(&f.path, ORIGIN, 12, created(911, 1, 12)).await;
+    f.reconnect(identity("legacy-reconnect", true)).await;
+    f.reset_central_calls();
+    let page = f.page(&session, json!({})).await;
+    assert_eq!(page["updates"][0]["taskId"], "911");
+    assert_eq!(f.central_calls(), 0);
+}
+
+#[tokio::test]
+async fn a_different_connected_subject_invalidates_local_reads() {
+    let mut f = Fixture::new().await;
+    let session = f.claim(true).await;
+    receive(&f.path, ORIGIN, 12, created(921, 1, 12)).await;
+    f.reconnect(CentralIdentity {
+        connection_id: "other-subject".into(),
+        agent_id: 13,
+        user_id: Some(4),
+        team_id: Some(1),
+    })
+    .await;
+    let (status, data) = f.updates(&session, json!({})).await;
+    assert_eq!(status, 409, "{data}");
+    assert_eq!(data["error"]["code"], "SESSION_EXPIRED");
 }
