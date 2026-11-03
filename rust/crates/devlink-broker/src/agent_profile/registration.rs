@@ -81,7 +81,7 @@ fn failure(kind: FailureKind) -> Failure {
         agent_id: None,
     }
 }
-fn central(error: anyhow::Error) -> Failure {
+pub(super) fn central(error: anyhow::Error) -> Failure {
     if let Some(fault) = error.downcast_ref::<teams::SetupTeamFault>() {
         return failure(match fault.kind {
             teams::SetupTeamFaultKind::Forbidden => FailureKind::Forbidden,
@@ -117,7 +117,7 @@ fn central(error: anyhow::Error) -> Failure {
     failure(kind)
 }
 
-fn check_binding(path: &Path, expected: &RegistrationContext) -> Result<(), Failure> {
+pub(super) fn check_binding(path: &Path, expected: &RegistrationContext) -> Result<(), Failure> {
     let current = Config::load(path)
         .and_then(|c| user_auth::origin(&c))
         .map_err(|_| failure(FailureKind::Storage))?;
@@ -173,7 +173,7 @@ fn matches_metadata(agent: &Agent, expected: &RegistrationContext) -> bool {
         && agent.role_description == expected.project.metadata.role_description
         && agent.tool_type == tool(expected)
 }
-fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), Failure> {
+pub(super) fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), Failure> {
     if !valid_id(agent.agent_id) || !valid_id(agent.owner_user_id) || !valid_id(agent.team_id) {
         return Err(failure(FailureKind::Protocol));
     }
@@ -196,7 +196,7 @@ fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), F
     }
     Ok(())
 }
-fn summary(profile: &Profile, reused: bool) -> Registration {
+pub(super) fn summary(profile: &Profile, reused: bool) -> Registration {
     Registration {
         state: match profile.state {
             State::Vacant => RegistrationState::Vacant,
@@ -456,7 +456,11 @@ pub async fn ensure(
     })
 }
 
-fn require_mutation(path: &Path, origin: &str, user: u64) -> Result<(File, File), Failure> {
+pub(super) fn require_mutation(
+    path: &Path,
+    origin: &str,
+    user: u64,
+) -> Result<(File, File), Failure> {
     // Keep the broker lock, rather than only probing it: a foreground broker must
     // not start between the stopped check and durable profile publication.
     let lock = config::state_directory(path).join("broker.lock");

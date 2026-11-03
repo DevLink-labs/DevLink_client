@@ -14,7 +14,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nUse --create-agent for explicit creation or --agent-id for an owned existing Agent.\nCreation stores the Agent ID without issuing a token; token preparation and remaining stages follow."
+    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nUse --create-agent for explicit creation or --agent-id for an owned existing Agent.\nA newly created Agent receives its first token once. Existing Agents require --issue-token when their token is missing or rejected.\nValid tokens are reused. Stop this profile's broker before issuance; MCP configuration and remaining stages follow."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
@@ -54,6 +54,9 @@ pub struct SetupArgs {
     #[arg(long, value_name = "ID", value_parser = parse_team_id,
         conflicts_with_all = ["agent_name", "project_name", "role_description"])]
     pub agent_id: Option<u64>,
+    /// Permit one issuance only when the existing Agent token is missing or rejected
+    #[arg(long, conflicts_with = "create_agent")]
+    pub issue_token: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -87,6 +90,7 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
         password_stdin: args.password_stdin,
     };
     let stages = SetupStages::new(input)
+        .with_issue_token(args.issue_token)
         .with_agent_input(TerminalAgentInput)
         .with_agent(if args.create_agent {
             Some(devlink_broker::agent_profile::registration::Selection::Create)

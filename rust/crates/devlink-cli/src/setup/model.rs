@@ -198,7 +198,7 @@ impl ErrorCode {
                 "Agent registration outcome is unknown. Run devlink agent list, then recover with setup --agent-id <ID>. Creation was not retried."
             }
             Self::TokenRequired => {
-                "The known Agent requires explicit token issuance. Use devlink agent token, then rerun setup. No token was issued by registration."
+                "The known Agent requires explicit token preparation. Rerun setup --issue-token (or use devlink agent token) after inspecting the saved ID. An uncertain issuance is never replayed automatically."
             }
             Self::StepUnavailable => {
                 "This setup stage is not available in this build. Use the existing individual commands."

@@ -50,12 +50,15 @@ pub struct MockState {
     pub tokens: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
     pub create_calls: Arc<AtomicUsize>,
     pub token_calls: Arc<AtomicUsize>,
+    pub token_requests: Arc<AtomicUsize>,
     pub create_mode: Arc<AtomicU8>,
     pub pause_create: Arc<AtomicBool>,
     pub create_entered: Arc<tokio::sync::Notify>,
     pub create_resume: Arc<tokio::sync::Notify>,
     pub token_mode: Arc<AtomicU8>,
     pub wrong_context: Arc<AtomicBool>,
+    pub agent_context_mode: Arc<AtomicU8>,
+    pub agent_context_calls: Arc<AtomicUsize>,
     pub csrf_failure: Arc<AtomicBool>,
     pub csrf_mode: Arc<AtomicU8>,
     pub pause_token: Arc<AtomicBool>,
@@ -278,6 +281,7 @@ async fn agent_token(
     headers: HeaderMap,
 ) -> Response {
     assert!(authorized(&state, &headers, true));
+    state.token_requests.fetch_add(1, Ordering::SeqCst);
     if state.pause_token.load(Ordering::SeqCst) {
         state.token_entered.notify_one();
         state.token_resume.notified().await;
@@ -288,6 +292,9 @@ async fn agent_token(
     if agent["ownerUserId"] != user(&state)["userId"] {
         return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
     }
+    if state.token_mode.load(Ordering::SeqCst) == 3 {
+        return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
+    }
     let count = state.token_calls.fetch_add(1, Ordering::SeqCst) + 1;
     let token = format!("{AGENT_SECRET}-{id}-{count}");
     let mut tokens = state.tokens.lock().unwrap();
@@ -296,6 +303,12 @@ async fn agent_token(
     drop(tokens);
     if state.token_mode.load(Ordering::SeqCst) == 1 {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
+    }
+    if state.token_mode.load(Ordering::SeqCst) == 2 {
+        return success(json!({"agentId":301,"token":token}));
+    }
+    if state.token_mode.load(Ordering::SeqCst) == 4 {
+        return success(json!({"agentId":id,"token":format!("{AGENT_SECRET}\ninvalid")}));
     }
     success(json!({"agentId":id,"token":token}))
 }
@@ -309,6 +322,13 @@ fn token_agent(state: &MockState, headers: &HeaderMap) -> Option<u64> {
 }
 async fn agent_context(State(state): State<MockState>, headers: HeaderMap) -> Response {
     assert!(!headers.contains_key("cookie"));
+    state.agent_context_calls.fetch_add(1, Ordering::SeqCst);
+    match state.agent_context_mode.load(Ordering::SeqCst) {
+        1 => return failure(StatusCode::SERVICE_UNAVAILABLE, "PRIVATE_CONTEXT_FAILURE"),
+        2 => return (StatusCode::OK, "private-invalid-json").into_response(),
+        3 => return (StatusCode::FOUND, [("location", "/sink")]).into_response(),
+        _ => {}
+    }
     let Some(mut id) = token_agent(&state, &headers) else {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
     };

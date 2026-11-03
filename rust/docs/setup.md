@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06·07·08·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·공통 브로커 제어 실행부를 구현했다.
+작업 02·03·04·05·06·07·08·09·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·공통 브로커 제어 실행부를 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -18,17 +18,19 @@ devlink setup --project "C:\work\한글 프로젝트" --project-name "프로젝�
 # 도구 선택. PATH 밖 설치는 실행 파일을 함께 지정할 수 있다.
 devlink setup --tool codex
 devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
-# 신규 생성은 명시적으로 요청한다. 토큰 발급은 별도 단계다.
+# 신규 생성 요청은 최초 토큰 발급 1회까지 포함한다.
 devlink setup --tool codex --create-agent
 # 기존 본인 Agent 선택 또는 생성 결과 불명 복구
 devlink setup --tool codex --agent-id 34
+# 기존 ID의 토큰이 없거나 인증 거부된 경우에만 1회 발급 허용
+devlink setup --tool codex --agent-id 34 --issue-token
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 실행 흐름·출력 어댑터·설정 준비·사용자 세션 확인/로그인·팀 조회/선택/재사용·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·공통 브로커 제어와 start_broker 어댑터**다. 08 등록은 기존 API와 pending 보호 정책을 연결하며 토큰을 발급하지 않는다. 새 Agent 및 토큰 없는 기존 Agent는 알려진 ID를 반환하고 register_agent에서 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 저장된 ready 프로필을 중앙 소유권·메타데이터로 재확인하면 다음 단계로 진행하며 start_broker의 기존 토큰 검증을 유지한다. 09 토큰 단계와 MCP 설정/최종 연결 상태 집계는 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어**다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. MCP 설정/최종 연결 집계는 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 토큰이 필요하면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker로 진행한 뒤 아직 미연결인 configure_mcp에서 SETUP_STEP_UNAVAILABLE/종료 3으로 멈춘다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker로 진행한 뒤 아직 미연결인 configure_mcp에서 SETUP_STEP_UNAVAILABLE/종료 3으로 멈춘다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -473,6 +475,8 @@ Windows MSVC에서 `devlink-broker --lib` **102 passed**(기동 중 분류·제�
 
 ## 작업 08: Agent 생성·재사용 및 pending 복구 연결
 
+이 절과 08 검증 수치는 당시 구현 기록이다. 토큰 통합 이후의 현재 setup 동작은 아래 작업 09를 따른다.
+
 2026-11-03 (Asia/Seoul). `agent_profile::registration`은 기존 프로필·private 저장·사용자 세션·중앙 Agent API를 재사용하는 내부 provider다. `inspect`는 Agent를 만들거나 바인딩/발급하지 않는다. `ensure`는 명시적 Create/Use(ID), 또는 저장 프로필 재확인을 처리한다. 공통 실행기·provider는 터미널 입출력을 직접 수행하지 않고 AgentInput 어댑터를 사용한다.
 
 - 새 프로필은 `--create-agent` 또는 대화형 create 입력이 있어야 생성한다. 이름·프로젝트명·역할·도구만 중앙 DTO에 넣고 로컬 경로·setup runId·추측한 등록키는 보내지 않는다.
@@ -513,7 +517,41 @@ Agent 소유권/팀 불일치와 HTTP 403은 계약의 SETUP_AGENT_FORBIDDEN(4),
 
 웹 등에서 같은 Agent의 이름·프로젝트 표시명·역할이 변경되면 일반 재실행/inspect/create는 기존 메타데이터를 보존하고 충돌을 반환한다. 브로커를 중지한 뒤 `setup --agent-id <동일 ID>`로 명시적으로 선택하면 중앙 소유권·팀·도구·프로젝트 경로를 다시 확인하고 최신 표시 메타데이터를 로컬 프로필과 후속 단계 컨텍스트에 반영한다. 기존 ready 토큰과 MCP 자격은 그대로 보존하며 생성·토큰 발급 API를 호출하지 않는다. 같은 메타데이터의 반복 선택은 다시 저장하지 않는다.
 
-09 이전의 알려진 제한: 08의 ready 재사용은 저장 토큰의 현재 유효성을 검사하지 않는다. 토큰이 폐기/만료되어 있으면 자식 브로커의 기동 중 검증에서 실패하므로 현재 `start_broker`의 SETUP_BROKER_START_FAILED/종료 5로 끝날 수 있다. `devlink agent token` 후 재실행으로 복구하며, Agent 인증 거부를 SETUP_TOKEN_REQUIRED/종료 3으로 분류하는 검증·발급 통합은 09에서 처리한다. 이 실패를 08에서 정상 토큰으로 확인한 것으로 표시하지 않는다.
+08 리뷰 당시에는 ready 토큰을 검사하지 않아 무효 토큰이 start_broker의 SETUP_BROKER_START_FAILED/종료 5로 끝났다. 아래 09 구현에서 register_agent가 먼저 토큰을 검증하고, 확인된 인증 거부는 SETUP_TOKEN_REQUIRED/종료 3과 명시적 발급 안내로 처리하도록 해소했다. 검증 이후 기동 사이의 서버/토큰 변경 경합과 실제 기동 실패는 별도의 브로커 오류로 남는다.
 
 
 2026-11-03 리뷰 보완 검증: 수정 전 새 소유권·메타데이터 복구 회귀 2건이 모두 실패해 지적을 재현했다. 수정 후 등록 15건·도구 17건·setup CLI 6건·공통 흐름 10건·출력 5건으로 **53 passed / 0 failed / 기존 opt-in 1 ignored**다. 기본 병렬 설정으로 실행했으며 중복 재실행을 합산하지 않았다. workspace/all-targets Clippy `-D warnings`, rustfmt, 변경 공백 검사도 통과했다. 로그는 `rust/target/setup08-review-before.log`, `setup08-review-regression.log`, `setup08-review-clippy.log`에 보관한다. 운영 서버·전체 workspace 테스트는 이번에 다시 실행하지 않았다.
+
+
+## 작업 09: 토큰 검증·재사용·명시적 발급 통합
+
+2026-11-03 (Asia/Seoul). `agent_profile::tokens`가 기존 private 프로필·사용자 인증/CSRF·Agent 발급 API와 Agent Bearer `/api/v1/agents/me`를 재사용한다. 기존 개별 Agent 명령·브로커와 setup은 같은 제한 시간·응답 크기 제한·프록시/리다이렉트/자동 재시도 금지 정책의 typed 검증기를 공유한다. 토큰은 내부에서만 취급하고 공개 결과에는 ID·검증/재사용/발급 여부·outcome·안전한 메타데이터만 담는다.
+
+- 정상 저장 토큰은 현재 user/team/agent/tool 신원을 검증한 후 바이트·수정 시각·MCP 자격을 보존한다. `--issue-token`이 있어도 정상 토큰을 회전하지 않는다. 강제 회전은 기존 `devlink agent token`의 명시적 별도 명령이다.
+- 이번 실행에서 새로 생성된 Agent만 최초 발급 1회를 허용한다. 기존 needs_token 또는 Agent 인증 401/403에는 `--issue-token`이 필요하며, 없으면 register_agent에서 SETUP_TOKEN_REQUIRED/종료 3과 agent.issueToken descriptor를 반환한다. `--create-agent --issue-token`은 입력 충돌이다.
+- 네트워크 장애·5xx·잘못된 JSON·리다이렉트·신원 모순은 토큰 만료로 단정하지 않는다. 각각 CENTRAL_UNAVAILABLE/PROTOCOL_ERROR로 반환하고 명시적 허용이 있어도 자동 발급하지 않는다. 사용자 세션 401과 Agent Bearer 거부, 로컬 MCP 자격 거부를 섞지 않는다.
+- 발급 전 같은 origin/user/team/project/tool 및 중앙 소유권을 다시 확인한다. account → control → broker → owner 잠금을 유지하며 실행 중 브로커가 있으면 SETUP_BROKER_BUSY로 중지를 안내한다. setup은 발급을 위해 다른 프로세스를 자동 중지하지 않는다.
+- CSRF 준비 후 POST 전에 needs_token을 내구 저장해 옛 토큰을 제거한다. 1회 발급 응답의 ID와 토큰의 실신원을 검증하고 MCP 자격 회전/프로필 저장까지 성공해야 ready를 게시한다.
+- 발급 응답 유실/5xx·잘못된 발급 ID·새 토큰 검증 실패·발급 후 저장 결과 불명은 알려진 Agent ID와 SETUP_TOKEN_REQUIRED/outcome:unknown을 보존한다. needs_token에서 새 Agent를 생성하거나 옛 토큰을 복원하지 않는다. 단계의 발급 허용은 1회 소비되므로 같은 실행기를 다시 호출해도 불명한 요청을 자동 반복하지 않는다. 복구 후 새 `setup --issue-token` 요청만 새 발급을 허용한다.
+- 정상 토큰 준비 후 기존 start_broker 어댑터로 진행한다. MCP 통합이 아직 없으므로 전체 setup은 configure_mcp의 SETUP_STEP_UNAVAILABLE/종료 3으로 멈출 수 있다. 이 경우 등록·토큰·브로커 준비는 이미 적용된 상태이며 configure_mcp 오류에 알려진 ID를 유지한다.
+
+09는 기존 API 기반 구현이다. 등록키 기반 Agent 생성 자동 복구 API는 추가하지 않았으며, 토큰 발급 실패를 새 Agent 생성으로 우회하지 않는다. 실제 운영 중앙/DB·배포본·Host 전체 설정 검증은 별도다.
+
+
+### 작업 09 검증 결과
+
+2026-11-03 Windows MSVC, 합성 중앙 서버·실제 CLI 자식 프로세스·임시 비공개 프로필 기준이다. 기본 병렬 설정으로 실행했다.
+
+| 검사 | 결과 |
+| --- | --- |
+| 새 토큰 검증·발급·장애/복구·CLI 연결 | 12 passed (초기 10건 + 권한 경계 2건, 중복 없음) |
+| 기존 Agent 명령 / setup CLI / 등록·복구 | 15 / 6 / 15 passed |
+| 도구 탐지 / 공통 실행 흐름 / 출력 | 17 / 10 / 5 passed, 기존 opt-in 1 ignored |
+| 관련 회귀 합계 | 80 passed / 0 failed / 1 existing opt-in ignored |
+| workspace/all-targets Clippy `-D warnings` / 전체 rustfmt / 변경 공백 | 통과 |
+
+새 검증은 정상 토큰·파일 수정 시각·MCP 자격 보존, 최초/명시 발급, 무효 토큰의 기동 전 차단, 실행 중 브로커 변경 거부, CSRF 선행 실패와 확정 권한 거부 구분, 발급 전 needs_token 내구 저장 및 계정/제어/브로커 잠금 유지, 응답 유실 시 단계 허용 1회 소비, 신원/발급 ID 모순·유효하지 않은 토큰·네트워크/JSON/리다이렉트 오류, 발급 후 private 저장 실패와 ID 보존을 포함한다. 실패 후 새 Agent를 만들지 않으며 공개 결과·CLI 출력에 토큰이 없는지 확인했다.
+
+실제 CLI 통합은 신규 생성 → 최초 토큰 발급/검증 → 브로커 시작 → configure_mcp 미연결 안내까지 통과했다. 같은 프로필 재실행 및 정상 토큰에 --issue-token을 추가한 실행에서 생성/발급 횟수가 각각 1회를 유지하고 기존 브로커를 재사용했으며, 소유 브로커를 정상 중지했다. 이 검증은 Host가 실제 MCP 설정을 소비했다는 증거는 아니다.
+
+로그: `rust/target/setup09-regression.log`, `setup09-permission.log`, `setup09-adapters.log`, `setup09-clippy-final.log`. 전체 workspace 테스트·실제 운영 중앙/DB·Unix·배포본·실제 Host 전체 설정은 이번에 실행하지 않았다.

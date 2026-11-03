@@ -44,6 +44,7 @@ fn setup_help_documents_usage_output_and_global_config() {
         "--tool-path <FILE>",
         "--create-agent",
         "--agent-id <ID>",
+        "--issue-token",
         "current directory",
         "single joined team",
         "remaining stages follow",

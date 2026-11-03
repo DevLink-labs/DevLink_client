@@ -8,6 +8,7 @@ use devlink_broker::{
     agent_profile::registration::{
         self, Registration, RegistrationContext, RegistrationState, Selection,
     },
+    agent_profile::tokens,
     broker_control,
     sessions::ToolType,
     setup_config::{self, FailureKind, PreparedConfig},
@@ -69,6 +70,7 @@ struct ToolState {
 
 #[derive(Default)]
 struct AgentState {
+    issue_token: bool,
     selection: Option<Selection>,
     waiting: bool,
     registration: Option<Registration>,
@@ -153,6 +155,10 @@ impl<I, T, U, A> SetupStages<I, T, U, A> {
     }
     pub fn with_agent(mut self, selection: Option<Selection>) -> Self {
         self.agents.selection = selection;
+        self
+    }
+    pub fn with_issue_token(mut self, allow: bool) -> Self {
+        self.agents.issue_token = allow;
         self
     }
     pub fn registration(&self) -> Option<&Registration> {
@@ -1069,6 +1075,46 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
         };
         let result =
             registration::ensure(&context.config_path, &expected, self.agents.selection).await;
+        let result = match result {
+            Ok(mut registered)
+                if matches!(
+                    registered.state,
+                    RegistrationState::Ready | RegistrationState::TokenRequired
+                ) =>
+            {
+                let mut token_context = expected.clone();
+                if let Some(metadata) = &registered.metadata {
+                    token_context.project.metadata = metadata.clone();
+                }
+                let id = registered.agent_id.unwrap_or(0);
+                // A grant belongs to one attempt, including an unknown outcome.
+                // Retrying this stage cannot silently reuse an issuance grant.
+                let explicit_issue = std::mem::take(&mut self.agents.issue_token);
+                let permission = registered.created || explicit_issue;
+                match tokens::ensure(&context.config_path, &token_context, id, permission).await {
+                    Ok(prepared) => {
+                        registered.state = if prepared.verified {
+                            RegistrationState::Ready
+                        } else {
+                            RegistrationState::TokenRequired
+                        };
+                        registered.outcome =
+                            combine_registration_outcome(registered.outcome, prepared.outcome);
+                        if prepared.metadata.is_some() {
+                            registered.metadata = prepared.metadata;
+                        }
+                        Ok(registered)
+                    }
+                    Err(mut failure) => {
+                        failure.outcome =
+                            combine_registration_outcome(registered.outcome, failure.outcome);
+                        self.agents.registration = Some(registered);
+                        Err(failure)
+                    }
+                }
+            }
+            other => other,
+        };
         let mut error = match result {
             Ok(registration) => {
                 let outcome = registration_outcome(registration.outcome);
@@ -1115,7 +1161,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
                         error
                     }
                     RegistrationState::TokenRequired => {
-                        SetupError::new(ErrorCode::TokenRequired, Step::RegisterAgent, outcome)
+                        let mut error =
+                            SetupError::new(ErrorCode::TokenRequired, Step::RegisterAgent, outcome);
+                        error.required_inputs.push(RequiredInput {
+                            field: "agent.issueToken",
+                            kind: InputKind::Value,
+                            secret: false,
+                            source: InputSource::Input,
+                        });
+                        error
                     }
                 }
             }
@@ -1168,6 +1222,17 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T,
                 .map(|id| id.to_string());
         }
         StepResult::Failed(error)
+    }
+}
+fn combine_registration_outcome(
+    left: registration::Mutation,
+    right: registration::Mutation,
+) -> registration::Mutation {
+    use registration::Mutation::{Applied, NotApplied, Unknown};
+    match (left, right) {
+        (Unknown, _) | (_, Unknown) => Unknown,
+        (Applied, _) | (_, Applied) => Applied,
+        _ => NotApplied,
     }
 }
 fn registration_outcome(outcome: registration::Mutation) -> Outcome {

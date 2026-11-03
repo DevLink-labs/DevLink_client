@@ -1,15 +1,12 @@
 //! Explicit, recoverable Agent bootstrap. Server identity is the authority.
 pub mod registration;
+pub mod tokens;
 use crate::{
     config::{self, Config},
     credentials, private_file, teams,
     user_auth::{self, UserClient},
 };
 use anyhow::{Context, Result, bail, ensure};
-use reqwest::{
-    Client,
-    header::{AUTHORIZATION, HeaderValue},
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -331,56 +328,7 @@ fn rotate_mcp_if_present(config_path: &Path) -> Result<()> {
 }
 
 async fn context(origin: &str, token: &str) -> Result<Agent> {
-    ensure!(valid_token(token), "Invalid private Agent credential");
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
-        .map_err(|_| anyhow::anyhow!("Invalid Agent credential"))?;
-    authorization.set_sensitive(true);
-    let client = Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|_| anyhow::anyhow!("Cannot initialize Agent verifier"))?;
-    let url = reqwest::Url::parse(origin)
-        .and_then(|u| u.join("/api/v1/agents/me"))
-        .map_err(|_| anyhow::anyhow!("Invalid Agent verification origin"))?;
-    let mut response = client
-        .get(url)
-        .header(AUTHORIZATION, authorization)
-        .send()
-        .await
-        .map_err(|_| anyhow::anyhow!("CENTRAL_UNAVAILABLE: cannot verify Agent credential"))?;
-    if matches!(response.status().as_u16(), 401 | 403) {
-        bail!(
-            "CENTRAL_UNAUTHENTICATED: Agent token verification failed; explicit token issue may be required"
-        );
-    }
-    ensure!(
-        response.status().is_success(),
-        "CENTRAL_UNAVAILABLE: Agent verification unavailable; no token was rotated"
-    );
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| anyhow::anyhow!("Incomplete Agent verification response"))?
-    {
-        ensure!(
-            bytes.len() + chunk.len() <= LIMIT,
-            "Agent verification response too large"
-        );
-        bytes.extend_from_slice(&chunk);
-    }
-    #[derive(Deserialize)]
-    struct Envelope {
-        success: bool,
-        data: Agent,
-    }
-    let envelope: Envelope = serde_json::from_slice(&bytes)
-        .map_err(|_| anyhow::anyhow!("Invalid Agent verification response"))?;
-    ensure!(envelope.success, "Agent verification rejected");
-    Ok(envelope.data)
+    tokens::verify(origin, token).await.map_err(Into::into)
 }
 
 async fn owned(client: &mut UserClient, team: u64, id: u64) -> Result<Agent> {

@@ -297,18 +297,21 @@ async fn storage_and_competing_account_locks_fail_without_creating_an_agent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn setup_reports_required_input_known_ids_and_token_boundary_without_starting_broker() {
-    let (f, stages, _) = fixture().await;
+    let (f, stages, expected) = fixture().await;
+    registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
     let context = SetupContext {
         config_path: f.path.clone(),
     };
-    let mut stages = stages.with_agent(Some(Selection::Create));
+    let mut stages = stages;
     let result = stages.execute(Step::RegisterAgent, &context).await;
     let StepResult::Failed(error) = result else {
         panic!("registration should require token preparation")
     };
     assert_eq!(error.code, setup::ErrorCode::TokenRequired);
     assert_eq!(error.known.agent_id.as_deref(), Some("201"));
-    assert_eq!(error.outcome, Outcome::Applied);
+    assert_eq!(error.outcome, Outcome::NotApplied);
     assert!(
         !config::state_directory(&f.path)
             .join("runtime.json")
@@ -357,10 +360,11 @@ async fn injected_agent_selection_resumes_only_registration_and_machine_mode_ret
     assert_eq!(counts(&f), (0, 0));
     let mut stages = stages.with_agent_input(ExplicitCreate);
     stages.resolve_input(&required).await.unwrap();
-    assert!(
-        matches!(stages.execute(Step::RegisterAgent, &context).await, StepResult::Failed(e) if e.code == setup::ErrorCode::TokenRequired)
-    );
-    assert_eq!(counts(&f), (1, 0));
+    assert!(matches!(
+        stages.execute(Step::RegisterAgent, &context).await,
+        StepResult::Complete { .. }
+    ));
+    assert_eq!(counts(&f), (1, 1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -514,9 +518,12 @@ async fn explicit_owned_selection_preserves_java_long_ids_as_public_strings() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_explicit_create_and_use_reach_the_existing_central_contract_without_token_issuance() {
+async fn cli_initial_issue_is_requested_once_and_existing_agent_requires_permission() {
     for (flag, expected_id) in [("--create-agent", "201"), ("--agent-id", "301")] {
         let (f, _, _) = fixture().await;
+        if flag == "--create-agent" {
+            f.state.token_mode.store(1, Ordering::SeqCst);
+        }
         let mut args = vec![
             "setup",
             "--output",
@@ -540,9 +547,22 @@ async fn cli_explicit_create_and_use_reach_the_existing_central_contract_without
         let result = events.last().unwrap();
         assert_eq!(result["error"]["code"], "SETUP_TOKEN_REQUIRED");
         assert_eq!(result["error"]["known"]["agentId"], expected_id);
-        assert_eq!(result["error"]["outcome"], "applied");
+        assert_eq!(
+            result["error"]["outcome"],
+            if flag == "--create-agent" {
+                "unknown"
+            } else {
+                "applied"
+            }
+        );
         assert_eq!(result["stages"][6]["status"], "skipped");
-        assert_eq!(counts(&f), (usize::from(flag == "--create-agent"), 0));
+        assert_eq!(
+            counts(&f),
+            (
+                usize::from(flag == "--create-agent"),
+                usize::from(flag == "--create-agent")
+            )
+        );
     }
 }
 
