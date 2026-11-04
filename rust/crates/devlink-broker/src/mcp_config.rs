@@ -104,6 +104,15 @@ pub struct ConfigInspection {
     pub status: InspectionStatus,
     pub target_path: PathBuf,
 }
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigConflict {
+    pub target_path: PathBuf,
+    /// Only the generated DevLink entry. Existing settings are never included.
+    pub proposed: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigError {
@@ -114,6 +123,8 @@ pub struct ConfigError {
     pub rollback: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<Box<ConfigConflict>>,
 }
 impl ConfigError {
     pub(crate) fn new(code: &'static str) -> Self {
@@ -123,6 +134,7 @@ impl ConfigError {
             rollback: "not_needed",
             backup_path: None,
             recovery_directory: None,
+            conflict: None,
         }
     }
     pub(crate) fn uncertain(rollback: &'static str, backup: Option<PathBuf>) -> Self {
@@ -132,6 +144,7 @@ impl ConfigError {
             rollback,
             backup_path: backup,
             recovery_directory: None,
+            conflict: None,
         }
     }
 }
@@ -166,10 +179,20 @@ pub fn preflight(input: PlanInput, inspect_target: bool) -> Result<()> {
     let input = storage::normalize(input.tool_type, input)?;
     if inspect_target {
         let before = storage::read(&input.target)?;
-        let (change, after) = format::merge(input.tool, before.as_deref(), &format::entry(&input))?;
-        if change == Change::Conflict {
-            return Err(ConfigError::new("SETUP_MCP_CONFIG_CONFLICT"));
-        }
+        let proposed = format::entry(&input);
+        let merged = match format::merge(input.tool, before.as_deref(), &proposed) {
+            Ok((Change::Conflict, _)) => Err(ConfigError::new("SETUP_MCP_CONFIG_CONFLICT")),
+            result => result,
+        };
+        let (_, after) = merged.map_err(|mut error| {
+            if error.code == "SETUP_MCP_CONFIG_CONFLICT" {
+                error.conflict = Some(Box::new(ConfigConflict {
+                    target_path: input.target,
+                    proposed,
+                }));
+            }
+            error
+        })?;
         if after.len() > LIMIT {
             return Err(ConfigError::new("SETUP_MCP_CONFIG_WRITE_FAILED"));
         }
@@ -444,6 +467,7 @@ impl McpConfig {
             rollback: "restored",
             backup_path: backup,
             recovery_directory: None,
+            conflict: None,
         }
     }
 }

@@ -389,8 +389,12 @@ impl<W: Write> Renderer<W> {
                         writeln!(self.writer, "Reopen/restart the trusted Host, then call get_my_context, get_connection_status and register_agent. Host connection has not been verified.").map_err(|_| ProgressUnavailable)?;
                     }
                     if let Some(provider) = &error.mcp_error {
-                        write!(self.writer, "MCP apply/rollback evidence: ")
-                            .map_err(|_| ProgressUnavailable)?;
+                        let label = if provider.conflict.is_some() {
+                            "MCP configuration conflict"
+                        } else {
+                            "MCP apply/rollback evidence"
+                        };
+                        write!(self.writer, "{label}: ").map_err(|_| ProgressUnavailable)?;
                         self.json(provider)?;
                     }
                     writeln!(self.writer, "Recovery: {}", error.recovery_action())

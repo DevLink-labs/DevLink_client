@@ -667,10 +667,14 @@ fn preflight_checks_both_host_formats_without_requiring_or_creating_credentials(
             ToolType::ClaudeCode => br#"{"mcpServers":{"devlink":{"command":"other"}}}"#,
         };
         fs::write(&input.target_path, conflict).unwrap();
+        let error = preflight(input.clone(), true).unwrap_err();
+        assert_eq!(error.code, "SETUP_MCP_CONFIG_CONFLICT");
+        let conflict_details = error.conflict.unwrap();
         assert_eq!(
-            preflight(input.clone(), true).unwrap_err().code,
-            "SETUP_MCP_CONFIG_CONFLICT"
+            conflict_details.target_path,
+            input.target_path.canonicalize().unwrap()
         );
+        assert_ne!(conflict_details.proposed["command"], "other");
         assert_eq!(fs::read(&input.target_path).unwrap(), conflict);
         preflight(input, false).unwrap();
         assert!(!fixture.broker.exists());

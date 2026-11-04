@@ -508,6 +508,31 @@ async fn preflight_rejects_existing_host_conflict_before_agent_or_token_creation
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["step"], "validate");
     assert_eq!(value["error"]["code"], "SETUP_MCP_CONFIG_CONFLICT");
+    assert_eq!(value["error"]["recovery"]["action"], "review_mcp_diff");
+    let conflict = &value["error"]["mcpError"]["conflict"];
+    assert_eq!(
+        conflict["targetPath"],
+        serde_json::json!(target.canonicalize().unwrap())
+    );
+    let proposed = &conflict["proposed"];
+    assert_eq!(proposed["type"], "stdio");
+    assert_eq!(
+        PathBuf::from(proposed["command"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        node.canonicalize().unwrap()
+    );
+    assert_eq!(
+        PathBuf::from(proposed["args"][0].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        entry.canonicalize().unwrap()
+    );
+    let env = proposed["env"].as_object().unwrap();
+    assert_eq!(env.len(), 1);
+    assert!(env["DEVLINK_BROKER_FILE"].is_string());
+    assert!(!text(&output).contains("other-runtime"));
+    assert!(!text(&output).contains("keep-me"));
     assert_eq!(fs::read(target).unwrap(), original);
     assert!(!agent_profile::path(&app.path).exists());
     assert!(!credentials::path(&app.path).exists());
@@ -618,6 +643,9 @@ async fn preflight_checks_a_later_tool_selection_and_rechecks_changes_before_reg
     assert_eq!(error.outcome, Outcome::NotApplied);
     assert_eq!(error.known.user_id.as_deref(), Some("51"));
     assert_eq!(error.known.team_id.as_deref(), Some("71"));
+    let conflict = error.mcp_error.unwrap().conflict.unwrap();
+    assert_eq!(conflict.target_path, target.canonicalize().unwrap());
+    assert_eq!(conflict.proposed["type"], "stdio");
     fs::remove_file(&target).unwrap();
     fs::remove_file(options.entry.unwrap()).unwrap();
     let StepResult::Failed(error) = stages.execute(Step::RegisterAgent, &context).await else {

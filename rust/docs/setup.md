@@ -597,6 +597,8 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 검증 결과: 새 PR #37 회귀 4건과 기존 setup CLI 6건·실행 흐름 10건·출력 5건, 총 25건이 통과했다. 최초 목록 실패 처리 보완 후 해당 본인 목록 회귀 1건도 재실행해 통과했으며 합계에 중복 계산하지 않는다. workspace/all-targets Clippy `-D warnings`, 전체 타깃 컴파일·포맷·변경 공백 검사도 통과했다. 이번 보완에서 전체 workspace 테스트나 실제 서버·Host 검증을 추가 실행한 것은 아니다.
 
+로그: `rust/target/registration37-new-tests.log`, `registration37-owned-final.log`, `registration37-setup-tests.log`, `registration37-clippy.log`.
+
 ## 작업 10: 프로젝트 MCP 설정 통합
 
 2026-11-04 (Asia/Seoul). `setup_mcp`가 선택 도구·Node/MCP 실행 경로·기존 자격 파일 경로를 `McpConfig` 제공자에 전달한다. Host 파일 문법·기본 위치·안전한 병합·백업·롤백은 기존 제공자를 재사용한다. 프로젝트의 Codex `.codex/config.toml`, Claude Code `.mcp.json`만 대상이다. `--mcp-target`도 선택 프로젝트의 해당 위치여야 하며 전역 설정으로 대신 쓰지 않는다. 자격 파일 경로는 프로필에서 가져오므로 사용자가 조합할 필요가 없다.
@@ -622,6 +624,8 @@ devlink setup --tool codex --agent-id 34 --issue-token
 2026-11-04 추가 보완. validate의 사전 검사는 `--tool-path`와 탐색 경로로 Host를 먼저 해석해 탐지된 Host의 Node 실행 경로를 사용한다. 정상 npm 설치처럼 shim 옆에만 Node가 있는 경우도 `--node-path` 없이 통과하며, 탐지에 실패하면 Host 없이 런타임만 검사하고 select_tool이 기존대로 다시 probe해 실패를 보고한다. 기존 Host 설정과의 병합 충돌은 제공자가 자동 적용을 지원하는 Host 버전에서만 검사한다. 미지원 버전은 기존 DevLink 항목이 달라도 차단하지 않고 수동 안내(`SETUP_MANUAL_ACTION_REQUIRED`)에 도달하며, 기존 항목의 병합은 사용자가 직접 수행한다.
 
 ### 결과와 복구
+
+사전 검사에서 충돌하면 `mcpError.conflict.targetPath`에 대상 파일 경로를, `mcpError.conflict.proposed`에 이번 실행의 DevLink 항목을 표시한다. 재실행 시에는 기존 항목과 같은 Node·MCP 진입점 경로가 선택되어야 한다. 자동 탐색 결과가 달라졌다면 `--node-path` 또는 `--mcp-entry`로 기존 경로를 지정한다. 새 경로로 바꾸려면 대상 파일의 DevLink 항목을 직접 검토하고 수정한다. `setup --issue-token`도 토큰 발급 전에 이 검사를 수행한다.
 
 다른 MCP 항목과 설정은 보존한다. 기존 파일 병합은 비공개 원본 백업 후 원자적으로 교체하며, 제공자가 적용 후 검사와 소유 버전만 복원하는 롤백을 담당한다. 공개 출력에는 다른 항목의 환경변수·토큰·백업 내용이 없고 `DEVLINK_BROKER_FILE` 경로만 들어간다. 오류의 `mcpError`에 적용 outcome·rollback 상태·backupPath/recoveryDirectory를 보존한다. 적용 뒤 추가 재검사 실패도 결과 불명으로 처리하고 백업 위치를 남긴다.
 
@@ -665,8 +669,6 @@ Windows stable MSVC, `00a99d7` 기반 작업 트리에서 임시 프로젝트·�
 최초 병렬 회귀에서는 추가 MCP 회귀 1건의 선행 단계 준비 assertion이 실패했다. 단독 재실행이 통과했고, 실패 단계 출력과 합성 Host 버전 검사 제한시간(15초)을 보강한 뒤 해당 회귀가 다시 통과했다. 수정 전 팀 테스트의 중복 실행은 중단하고 수정본 17건을 별도로 재검증했다. 초기 실패·중단 기록은 로그에 남아 있으며 통과 합계에 포함하지 않는다.
 
 근거: `rust/target/setup10-preflight-before.log`(수정 전 재현), `setup10-preflight-after.log`(생성·발급 0회), `setup10-preflight-late-final.log`, `setup10-preflight-provider.log`, `setup10-preflight-regression.log`(초기 실패·중단 및 개별 통과 포함), `setup10-preflight-fixtures-final.log`(인증 22·프로젝트 11), `setup10-preflight-teams-final.log`, `setup10-preflight-tools-final.log`, `setup10-preflight-clippy-final.log`. 최종 rustfmt·workspace/all-targets Clippy `-D warnings`·변경 공백 검사도 통과했다. 검증은 임시 프로필·합성 중앙과 로컬 브로커에서 수행했으며 실제 운영 중앙/Host 전체 연결 검증을 새로 수행한 것은 아니다.
-
-로그: `rust/target/registration37-new-tests.log`, `registration37-owned-final.log`, `registration37-setup-tests.log`, `registration37-clippy.log`.
 
 ### 10 리뷰 보완 2: shim 옆 Node와 미지원 Host의 수동 안내
 

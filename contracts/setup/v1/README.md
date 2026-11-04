@@ -308,6 +308,7 @@ Registration.ensure(context, selection) -> PublicRegistrationState
 `--apply-mcp`는 이번 실행에서 확인한 계획 적용을 허용한다. 수동 모드/미검증 Host는 예시만 반환한다.
 적용 후 최종 연결 집계는 12번 후속 범위이며 현재 `verify_connection`에서 종료 3이다.
 오류의 `mcpConfig`에 앞 단계의 적용 결과를, `mcpError`에는 제공자 outcome/rollback/백업 근거를 보존한다.
+사전 검사 충돌 시 `mcpError.conflict`에 대상 경로(`targetPath`)와 토큰 값이 없는 제안 항목(`proposed`)을 반환한다.
 
 ```text
 McpConfig.plan({toolType, projectPath, targetPath, brokerFile, executable}) -> ConfigPlan

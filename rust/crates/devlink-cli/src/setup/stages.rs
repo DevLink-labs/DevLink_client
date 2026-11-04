@@ -1700,6 +1700,7 @@ mod tests {
                 rollback,
                 backup_path: Some(backup.clone()),
                 recovery_directory: None,
+                conflict: None,
             };
             let public = mcp_error(Step::ConfigureMcp, provider);
             assert_eq!(public.code, ErrorCode::McpConfigWriteFailed);
