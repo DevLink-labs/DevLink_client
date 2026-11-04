@@ -2,6 +2,7 @@
 mod agent_input;
 mod batch;
 mod connection;
+mod control;
 mod flow;
 mod login_input;
 mod mcp_input;

@@ -135,6 +135,93 @@ fn a_single_utf8_signature_from_windows_powershell_is_accepted() {
     assert!(!config.parent().unwrap().exists());
 }
 
+#[test]
+fn a_busy_profile_is_reported_before_reading_the_batch_password() {
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    devlink_broker::credentials::set_private_permissions(root.path()).unwrap();
+    let config = root.path().join("profile/config.json");
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let bin = root.path().join("test-bin");
+    tool_fixture::host(&bin, "codex", "codex-cli 0.166.0");
+    let (node, entry) = tool_fixture::mcp_runtime(&bin);
+    let search_path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let input = root.path().join("input.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&json!({
+            "schemaVersion":1, "serverUrl":"ws://127.0.0.1:9",
+            "user":{"mode":"login","email":"input@example.test"},
+            "team":{"id":"71"}, "project":{"path":project},
+            "tool":{"type":"codex"}, "agent":{"action":"use","id":"201"},
+            "mcp":{"mode":"manual"}, "timeoutMs":300000
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let run = || {
+        let mut cmd = batch(&config, &input, "json");
+        cmd.arg("--password-stdin")
+            .arg("--node-path")
+            .arg(&node)
+            .arg("--mcp-entry")
+            .arg(&entry)
+            .env("PATH", &search_path);
+        cmd
+    };
+    let lock = devlink_broker::config::state_directory(&config).join("setup.lock");
+    let held = devlink_broker::config::lock(&lock).unwrap();
+
+    // An open, silent stdin must not delay the busy result until timeoutMs.
+    let mut waiting = run()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = waiting.stdin.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while waiting.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            waiting.kill().unwrap();
+            waiting.wait().unwrap();
+            panic!("a busy profile waited for the batch password");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let open = waiting.wait_with_output().unwrap();
+    drop(stdin);
+    // A closed stdin must report the same conflict, not a missing password.
+    let closed = run().output().unwrap();
+    for output in [&open, &closed] {
+        assert_eq!(output.status.code(), Some(6), "{}", text(output));
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["error"]["code"], "SETUP_CONFIG_BUSY");
+        assert_eq!(result["error"]["step"], "validate");
+        assert_eq!(result["error"]["location"]["file"], lock.to_str().unwrap());
+        assert!(
+            result["error"]["requiredInputs"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
+    }
+    assert!(!config.exists());
+
+    // Without a competing run the password is still required before the
+    // profile is initialized.
+    drop(held);
+    let missing = run().output().unwrap();
+    assert_eq!(missing.status.code(), Some(2), "{}", text(&missing));
+    let result: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "SETUP_INPUT_REQUIRED");
+    assert_eq!(result["error"]["requiredInputs"][0]["field"], "password");
+    assert!(!config.exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
     let app = Fixture::new().await;
