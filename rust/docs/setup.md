@@ -726,3 +726,23 @@ devlink setup --non-interactive --input .\setup-v1.json --output jsonl
 `setup`은 프로필을 준비할 때 `.devlink-runtime/setup.lock`의 OS 잠금을 획득한다. 같은 설정 디렉터리를 공유하는 실행은 `--config`의 파일명이 달라도 같은 잠금을 사용한다. 후행 실행은 `validate`에서 `SETUP_CONFIG_BUSY`(종료 6)를 반환한다. 잠금은 읽기 전용 사전 검사 직후, 비대화형 `--password-stdin` 비밀번호를 읽거나 설정 파일을 만들기 전에 획득하므로 후행 실행이 비밀번호를 기다리지 않는다. 다른 프로필과 `devlink setup status`는 계속 사용할 수 있다.
 
 선행 실행은 사용자 입력 대기부터 최종 검증까지 잠금을 유지한다. 종료하거나 강제 종료하면 OS가 잠금을 해제하며, 파일은 다음 실행을 위해 남는다. 이후 `setup`을 다시 실행하면 저장된 Agent·토큰 상태를 확인하고 필요한 단계부터 진행한다. 기존 계정·제어·브로커 잠금과 MCP 설정 충돌 검사는 각 변경 지점에서 계속 적용된다.
+
+## 작업 16 (S15P31D108-117) 간편설정 회귀 및 환경 검증
+
+검증 기준은 PR #51이 병합한 `f5cc92d`와 Windows MSVC, Node `v24.18.0`이다. 임시 프로필과 loopback 중앙 fixture를 사용한다. 실제 Node 간편설정 시험은 비대화형 로그인, Agent 생성·발급 각 1회, 저장된 도구 재사용, MCP 설정 적용, `setupReady=true` 및 저장된 도구가 사라졌을 때의 복구 안내를 확인한다. Host 실행 파일의 버전 응답은 fixture를 사용한다.
+
+Windows에서는 MCP 진입점과 상위 디렉터리에 신뢰할 수 있는 쓰기 권한이 필요하다. 이 PC의 빌드 경로는 `BUILTIN\Users`에 수정 권한을 상속해 `SETUP_UNSAFE_FILE`로 거부됐다. 소스 권한을 유지하고, 사용자 전용 디렉터리에 빌드한 `dist`, `package.json`, `node_modules`를 복사해 시험한다. CLI 실행 파일과 MCP는 같은 검증 대상 코드에서 빌드한다.
+
+Rust CLI 라이브러리, `cli_setup`과 `setup_*` 기본 회귀는 167건 통과, 실패 0건이었다. 실제 Node 간편설정 1건과 두 Host의 npm 진입점 형식을 검사하는 1건은 기본 회귀와 별도로 실행해 통과했다. Rust 브로커와 Node MCP SDK의 통합 시험 2건은 도구 호출, 세션 소유권과 실제 90초 만료 후 재연결을 검증했다. MCP 패키지 테스트는 171건 통과했다. 격리된 Windows 콘솔에서도 동시 실행 차단(6), Ctrl+C(130), 기존 프로필 재사용을 확인했다. 전체 타깃 Clippy와 포맷, 변경 공백 검사도 통과했다.
+
+```powershell
+# rust 디렉터리에서 실행
+$env:DEVLINK_TEST_NODE = (Get-Command node.exe).Source
+$env:DEVLINK_TEST_MCP_ENTRY = '<보호된 MCP 설치 디렉터리의 dist/index.js 절대 경로>'
+cargo test --offline --locked -p devlink-cli --test setup_batch unattended_setup_with_real_node_and_mcp_runtime -- --ignored
+
+$env:DEVLINK_MCP_BUILD = (Resolve-Path ../packages/mcp-server/dist).Path
+cargo test --offline --locked -p devlink-broker --test task_creation actual_mcp_ -- --ignored
+```
+
+실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.310` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
