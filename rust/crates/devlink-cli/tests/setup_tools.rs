@@ -337,6 +337,9 @@ async fn interactive_selection_emits_detected_choices_and_resumes_only_the_tool_
     tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
     let mut events = Vec::new();
     let stages = SetupStages::default()
+        .with_mcp(tool_fixture::mcp_options(
+            &f._root.path().join("mcp-runtime"),
+        ))
         .with_project(devlink_broker::setup_project::ProjectOptions {
             path: Some(f._root.path().to_path_buf()),
             ..Default::default()
@@ -417,6 +420,9 @@ async fn a_resumed_interactive_choice_reprobes_only_the_chosen_tool() {
     let codex = tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
     let claude = tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
     let stages = SetupStages::default()
+        .with_mcp(tool_fixture::mcp_options(
+            &f._root.path().join("mcp-runtime"),
+        ))
         .with_project(devlink_broker::setup_project::ProjectOptions {
             path: Some(f._root.path().to_path_buf()),
             ..Default::default()
@@ -486,6 +492,7 @@ async fn no_tools_returns_installation_links_and_next_action_without_saving() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_explicit_path_works_and_invalid_tool_arguments_are_redacted() {
     let f = fixture().await;
+    let runtime = tool_fixture::mcp_options(&f._root.path().join("mcp-runtime"));
     let exe = tool_fixture::host(
         &f._root.path().join("한글 tools"),
         "codex",
@@ -497,6 +504,12 @@ async fn cli_explicit_path_works_and_invalid_tool_arguments_are_redacted() {
         .args(["setup", "--tool", "codex", "--tool-path"])
         .arg(exe)
         .args(["--output", "json"])
+        .arg("--project")
+        .arg(f._root.path())
+        .arg("--node-path")
+        .arg(runtime.node.unwrap())
+        .arg("--mcp-entry")
+        .arg(runtime.entry.unwrap())
         .stdin(Stdio::null())
         .output()
         .unwrap();

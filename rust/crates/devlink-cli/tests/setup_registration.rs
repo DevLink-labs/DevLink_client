@@ -26,6 +26,9 @@ async fn fixture() -> (Fixture, SetupStages, RegistrationContext) {
     credentials::set_private_permissions(&f.path).unwrap();
     assert!(f.login().status.success());
     let mut stages = SetupStages::new(NoLoginInput)
+        .with_mcp(account_server::tool_fixture::mcp_options(
+            &f._root.path().join("mcp-runtime"),
+        ))
         .with_project(ProjectOptions {
             path: Some(f._root.path().to_path_buf()),
             ..Default::default()

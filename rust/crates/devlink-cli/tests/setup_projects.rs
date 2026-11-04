@@ -33,6 +33,7 @@ fn directory(f: &Fixture, name: &str) -> std::path::PathBuf {
 }
 
 fn run(f: &Fixture, cwd: &Path, args: &[&str], exit: i32) -> Value {
+    let runtime = account_server::tool_fixture::default_mcp_options();
     let output = Command::new(env!("CARGO_BIN_EXE_devlink"))
         .arg("--config")
         .arg(&f.path)
@@ -40,6 +41,10 @@ fn run(f: &Fixture, cwd: &Path, args: &[&str], exit: i32) -> Value {
         .args(args)
         .args(["--tool", "codex", "--tool-path"])
         .arg(account_server::test_tool())
+        .arg("--node-path")
+        .arg(runtime.node.unwrap())
+        .arg("--mcp-entry")
+        .arg(runtime.entry.unwrap())
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()

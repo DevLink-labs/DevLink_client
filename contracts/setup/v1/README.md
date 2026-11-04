@@ -304,6 +304,11 @@ Registration.ensure(context, selection) -> PublicRegistrationState
 2026-11-02 구현: [Rust McpConfig 공급부·지원 버전·파일/오류 계약](mcp-config-provider.md).
 모듈은 임효민(-143), CLI 호출·통합은 최준혁(-111) 경계를 유지한다.
 
+2026-11-04 CLI 통합: [작업 10 사용법·실행 경로·확인·복구](../../../rust/docs/setup.md#작업-10-프로젝트-mcp-설정-통합).
+`--apply-mcp`는 이번 실행에서 확인한 계획 적용을 허용한다. 수동 모드/미검증 Host는 예시만 반환한다.
+적용 후 최종 연결 집계는 12번 후속 범위이며 현재 `verify_connection`에서 종료 3이다.
+오류의 `mcpConfig`에 앞 단계의 적용 결과를, `mcpError`에는 제공자 outcome/rollback/백업 근거를 보존한다.
+
 ```text
 McpConfig.plan({toolType, projectPath, targetPath, brokerFile, executable}) -> ConfigPlan
 McpConfig.apply({planId, expectedDigest}) -> ConfigApplyResult

@@ -24,6 +24,9 @@ async fn fixture() -> (Fixture, SetupStages, RegistrationContext) {
     credentials::set_private_permissions(&f.path).unwrap();
     assert!(f.login().status.success());
     let mut stages = SetupStages::new(NoLoginInput)
+        .with_mcp(account_server::tool_fixture::mcp_options(
+            &f._root.path().join("mcp-runtime"),
+        ))
         .with_project(ProjectOptions {
             path: Some(f._root.path().to_path_buf()),
             ..Default::default()
@@ -352,6 +355,8 @@ impl Drop for Stop {
 async fn cli_initial_create_issues_once_and_reuses_a_running_broker_and_verified_token() {
     let (f, _, _) = fixture().await;
     let _stop = Stop(f.path.clone());
+    let (node, entry) =
+        account_server::tool_fixture::mcp_runtime(&f._root.path().join("mcp runtime"));
     for flag in [Some("--create-agent"), None, Some("--issue-token")] {
         let mut args = vec![
             "setup",
@@ -360,6 +365,14 @@ async fn cli_initial_create_issues_once_and_reuses_a_running_broker_and_verified
             "--project",
             f._root.path().to_str().unwrap(),
         ];
+        args.extend([
+            "--mcp-mode",
+            "manual",
+            "--node-path",
+            node.to_str().unwrap(),
+            "--mcp-entry",
+            entry.to_str().unwrap(),
+        ]);
         if let Some(flag) = flag {
             args.push(flag);
         }

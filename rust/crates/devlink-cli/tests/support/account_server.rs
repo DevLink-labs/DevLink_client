@@ -275,7 +275,7 @@ async fn agent_list(
     headers: HeaderMap,
 ) -> Response {
     assert!(authorized(&state, &headers, false));
-    assert_eq!(team, 71);
+    assert!(team_for(&state, team).is_some());
     state.calls.lock().unwrap().push(
         if query.owned_by_me {
             "agents_owned"
@@ -645,6 +645,20 @@ pub fn run_at(path: &std::path::Path, args: &[&str], input: Option<&str>) -> Out
         command
             .args(["--tool", "codex", "--tool-path"])
             .arg(test_tool());
+    }
+    // Setup now checks its MCP runtime before any central mutation. Keep account
+    // tests independent of a developer's Node installation and TypeScript build.
+    if args.contains(&"setup") {
+        // Account fixtures use their own project, never the developer checkout's
+        // Host settings. Project cwd behavior is tested with direct commands.
+        command.current_dir(path.parent().unwrap());
+        let options = tool_fixture::default_mcp_options();
+        if !args.contains(&"--node-path") {
+            command.arg("--node-path").arg(options.node.unwrap());
+        }
+        if !args.contains(&"--mcp-entry") {
+            command.arg("--mcp-entry").arg(options.entry.unwrap());
+        }
     }
     let mut child = command.spawn().unwrap();
     if let Some(input) = input {

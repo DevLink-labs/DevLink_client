@@ -227,6 +227,7 @@ fn emit_with_inputs(
             .map(|error| error.agent_choices.clone())
             .unwrap_or_default(),
         tools: inputs.map(|error| error.tools.clone()).unwrap_or_default(),
+        mcp_plan: inputs.and_then(|error| error.mcp_plan.clone()),
     })
 }
 

@@ -68,7 +68,11 @@ async fn a_single_team_is_verified_saved_privately_and_then_reused_without_rewri
             "team_members",
             "me",
             "team_detail",
-            "team_members"
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
         ]
     );
     let path = teams::selection_path(&f.path);
@@ -491,6 +495,13 @@ async fn injected(f: &Fixture, mode: u8) -> (setup::RunResult<()>, Vec<setup::Pr
         },
         SetupStages::new(NoLoginInput)
             .with_team_input(input)
+            .with_project(devlink_broker::setup_project::ProjectOptions {
+                path: Some(f._root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .with_mcp(account_server::tool_fixture::mcp_options(
+                &f._root.path().join("mcp-runtime"),
+            ))
             .with_tool(
                 Some(devlink_broker::sessions::ToolType::Codex),
                 Some(account_server::test_tool().to_path_buf()),

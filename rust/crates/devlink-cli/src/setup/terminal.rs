@@ -1,8 +1,9 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
 use super::{
     AgentChoice, AgentInput, AgentInputError, Completion, LoginCredentials, LoginInput,
-    LoginInputError, ProgressEvent, ProgressUnavailable, RunResult, SetupContext, SetupStages,
-    TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError, parse_team_id,
+    LoginInputError, McpInput, McpInputError, ProgressEvent, ProgressUnavailable, RunResult,
+    SetupContext, SetupStages, TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError,
+    parse_team_id,
 };
 use clap::{Args, ValueEnum};
 use serde::Serialize;
@@ -14,7 +15,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nUse --create-agent for explicit creation or --agent-id for an owned existing Agent.\nA newly created Agent receives its first token once. Existing Agents require --issue-token when their token is missing or rejected.\nValid tokens are reused. Stop this profile's broker before issuance; MCP configuration and remaining stages follow."
+    after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nUse --create-agent for explicit creation or --agent-id for an owned existing Agent.\nA newly created Agent receives its first token once. Existing Agents require --issue-token when their token is missing or rejected.\nValid tokens are reused. Stop this profile's broker before issuance; MCP config is planned for the selected project. Review it interactively or approve with --apply-mcp.\nUse --mcp-mode manual for a safe snippet. Reopen the trusted Host after changing settings. Final connection verification follows."
 )]
 pub struct SetupArgs {
     /// Output format: final JSON only, JSONL progress, or human-readable messages
@@ -57,6 +58,21 @@ pub struct SetupArgs {
     /// Permit one issuance only when the existing Agent token is missing or rejected
     #[arg(long, conflicts_with = "create_agent")]
     pub issue_token: bool,
+    /// Project MCP configuration mode: apply or manual
+    #[arg(long, default_value = "apply", value_parser = devlink_broker::setup_mcp::parse_mode)]
+    pub mcp_mode: devlink_broker::setup_mcp::Mode,
+    /// Explicit project Host config target; otherwise the provider chooses its fixed project file
+    #[arg(long, value_name = "FILE")]
+    pub mcp_target: Option<PathBuf>,
+    /// Absolute Node >=24 executable; otherwise reuse a Node Host launcher or search PATH
+    #[arg(long, value_name = "FILE")]
+    pub node_path: Option<PathBuf>,
+    /// Absolute built DevLink MCP .js/.mjs entry; otherwise resolve beside the CLI or in its checkout
+    #[arg(long, value_name = "FILE")]
+    pub mcp_entry: Option<PathBuf>,
+    /// Approve applying only the DevLink MCP entry to this project's Host settings
+    #[arg(long)]
+    pub apply_mcp: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -90,6 +106,14 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
         password_stdin: args.password_stdin,
     };
     let stages = SetupStages::new(input)
+        .with_mcp_input(TerminalMcpInput)
+        .with_mcp(devlink_broker::setup_mcp::Options {
+            mode: args.mcp_mode,
+            target: args.mcp_target,
+            node: args.node_path,
+            entry: args.mcp_entry,
+            apply: args.apply_mcp,
+        })
         .with_issue_token(args.issue_token)
         .with_agent_input(TerminalAgentInput)
         .with_agent(if args.create_agent {
@@ -343,6 +367,32 @@ impl<W: Write> Renderer<W> {
                             .map_err(|_| ProgressUnavailable)?;
                         self.json(&code)?;
                     }
+                    if let Some(plan) = &error.mcp_plan {
+                        write!(self.writer, "DevLink MCP plan: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(plan)?;
+                        writeln!(
+                            self.writer,
+                            "Review the project entry; approve with --apply-mcp when ready."
+                        )
+                        .map_err(|_| ProgressUnavailable)?;
+                    }
+                    if let Some(manual) = &error.manual_config {
+                        write!(self.writer, "Manual DevLink MCP configuration: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(manual)?;
+                    }
+                    if let Some(result) = &error.mcp_config {
+                        write!(self.writer, "MCP configuration result: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(result)?;
+                        writeln!(self.writer, "Reopen/restart the trusted Host, then call get_my_context, get_connection_status and register_agent. Host connection has not been verified.").map_err(|_| ProgressUnavailable)?;
+                    }
+                    if let Some(provider) = &error.mcp_error {
+                        write!(self.writer, "MCP apply/rollback evidence: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(provider)?;
+                    }
                     writeln!(self.writer, "Recovery: {}", error.recovery_action())
                         .map_err(|_| ProgressUnavailable)?;
                 }
@@ -426,6 +476,58 @@ impl AgentInput for TerminalAgentInput {
         })
         .await
         .map_err(|_| AgentInputError::ReadFailed)?
+    }
+}
+
+struct TerminalMcpInput;
+impl McpInput for TerminalMcpInput {
+    fn available(&self) -> bool {
+        self.interactive()
+    }
+    fn interactive(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+    async fn request(
+        &mut self,
+        plan: &devlink_broker::mcp_config::ConfigPlan,
+    ) -> Result<bool, McpInputError> {
+        if !self.interactive() {
+            return Err(McpInputError::Unavailable);
+        }
+        let plan = plan.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Read};
+            let stderr = std::io::stderr();
+            let mut renderer = Renderer::new(stderr.lock(), OutputFormat::Json);
+            renderer
+                .json(&plan)
+                .map_err(|_| McpInputError::ReadFailed)?;
+            write!(
+                renderer.writer,
+                "Apply this DevLink entry to the project MCP file? [y/N]: "
+            )
+            .and_then(|_| renderer.writer.flush())
+            .map_err(|_| McpInputError::ReadFailed)?;
+            let mut bytes = Vec::new();
+            let n = std::io::stdin()
+                .lock()
+                .take(16)
+                .read_until(b'\n', &mut bytes)
+                .map_err(|_| McpInputError::ReadFailed)?;
+            if n == 0 {
+                return Err(McpInputError::Cancelled);
+            }
+            if n >= 16 {
+                return Ok(false);
+            }
+            let value = String::from_utf8(bytes).map_err(|_| McpInputError::ReadFailed)?;
+            Ok(matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "y" | "yes"
+            ))
+        })
+        .await
+        .map_err(|_| McpInputError::ReadFailed)?
     }
 }
 

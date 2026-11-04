@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06·07·08·09·11. 2026-11-03 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·공통 브로커 제어 실행부를 구현했다.
+작업 02·03·04·05·06·07·08·09·10·11. 2026-11-04 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·토큰 준비·공통 브로커 제어·MCP 설정 통합을 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -24,13 +24,19 @@ devlink setup --tool codex --create-agent
 devlink setup --tool codex --agent-id 34
 # 기존 ID의 토큰이 없거나 인증 거부된 경우에만 1회 발급 허용
 devlink setup --tool codex --agent-id 34 --issue-token
+# 비대화형에서 이번 계획의 프로젝트 MCP 설정 적용을 허용
+devlink setup --tool codex --agent-id 34 --apply-mcp
+# 자동 발견이 안 되면 Node와 빌드된 MCP 진입점을 절대 경로로 지정
+devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "C:\DevLink\mcp-server\dist\index.js" --apply-mcp
+# Host 파일은 쓰지 않고 DevLink 설정 예시와 적용 위치를 반환
+devlink setup --mcp-mode manual
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어**다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. MCP 설정/최종 연결 집계는 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 집계는 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
 
-기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker로 진행한 뒤 아직 미연결인 configure_mcp에서 SETUP_STEP_UNAVAILABLE/종료 3으로 멈춘다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤에는 아직 미구현인 verify_connection에서 SETUP_STEP_UNAVAILABLE/종료 3으로 멈춘다. 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -45,6 +51,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 | `devlink-cli/src/setup/login_input.rs` | 비밀을 직렬화/Debug하지 않는 입력 DTO와 주입 가능한 입력 인터페이스 |
 | `devlink-cli/src/setup/team_input.rs` | 팀 ID 검증과 주입 가능한 팀 선택 입력 인터페이스 |
 | `devlink-cli/src/setup/tool_input.rs` | 탐지된 도구 선택 입력 인터페이스 |
+| `devlink-cli/src/setup/mcp_input.rs` | 안전한 MCP 변경 계획 확인 입력 인터페이스 |
 | `devlink-cli/src/setup/terminal.rs` | clap 옵션·human/JSON/JSONL 렌더링·프로세스 종료 코드 전달 |
 | `devlink-cli/src/terminal_input.rs` | 기존 auth/team 명령과 setup이 공유하는 숨김/전용 stdin 입력 |
 | `devlink-broker/src/user_auth.rs` | 기존 로그인·CSRF·세션 저장과 typed session check·장애 분류 |
@@ -54,6 +61,8 @@ devlink setup --tool codex --agent-id 34 --issue-token
 | `devlink-broker/src/setup_project.rs` | 프로젝트 경로 정규화·표시명 기본값·기존 프로젝트 비교, 등록 메타데이터와 로컬 경로 분리 |
 | `devlink-broker/src/tool_discovery.rs` | 설치 위치 탐색·버전 전용 실행·재사용 가능한 실행 정보·MCP 제공자 연결 |
 | `devlink-broker/src/setup_tools.rs` | 사용자/팀/프로젝트에 묶인 비공개 도구 선택 저장·재사용·경합 검사 |
+| `devlink-broker/src/setup_mcp.rs` | 검증된 MCP 실행 경로·stdio 초기화 검사와 동일 계획 적용 연결 |
+| `devlink-broker/src/mcp_config.rs` | Host 문법별 계획·안전한 병합·백업·검사·롤백 제공자 |
 | `devlink-broker/src/broker_control.rs` | 공통 시작·중지·상태 조회·중지 상태 잠금·소유 자식 정리. CLI와 setup이 공유 |
 | `devlink-broker/src/config.rs` | 기존 init과 setup이 공유하는 초기화·원자적 저장·잠금 |
 | `devlink-cli/src/lib.rs` | `devlink_cli::setup`을 테스트와 다른 호출자에서 재사용하도록 공개 |
@@ -533,7 +542,7 @@ Agent 소유권/팀 불일치와 HTTP 403은 계약의 SETUP_AGENT_FORBIDDEN(4),
 - 발급 전 같은 origin/user/team/project/tool 및 중앙 소유권을 다시 확인한다. account → control → broker → owner 잠금을 유지하며 실행 중 브로커가 있으면 SETUP_BROKER_BUSY로 중지를 안내한다. setup은 발급을 위해 다른 프로세스를 자동 중지하지 않는다.
 - CSRF 준비 후 POST 전에 needs_token을 내구 저장해 옛 토큰을 제거한다. 1회 발급 응답의 ID와 토큰의 실신원을 검증하고 MCP 자격 회전/프로필 저장까지 성공해야 ready를 게시한다.
 - 발급 응답 유실/5xx·잘못된 발급 ID·새 토큰 검증 실패·발급 후 저장 결과 불명은 알려진 Agent ID와 SETUP_TOKEN_REQUIRED/outcome:unknown을 보존한다. needs_token에서 새 Agent를 생성하거나 옛 토큰을 복원하지 않는다. 단계의 발급 허용은 1회 소비되므로 같은 실행기를 다시 호출해도 불명한 요청을 자동 반복하지 않는다. 복구 후 새 `setup --issue-token` 요청만 새 발급을 허용한다.
-- 정상 토큰 준비 후 기존 start_broker 어댑터로 진행한다. MCP 통합이 아직 없으므로 전체 setup은 configure_mcp의 SETUP_STEP_UNAVAILABLE/종료 3으로 멈출 수 있다. 이 경우 등록·토큰·브로커 준비는 이미 적용된 상태이며 configure_mcp 오류에 알려진 ID를 유지한다.
+- 정상 토큰 준비 후 기존 start_broker 어댑터로 진행한다. 09 구현 당시에는 configure_mcp에서 멈췄다. 현재는 아래 10 통합으로 MCP 설정까지 진행하고 verify_connection의 SETUP_STEP_UNAVAILABLE/종료 3으로 멈출 수 있다. 이 경우 앞서 적용한 등록·토큰·브로커·MCP 설정과 알려진 ID를 유지한다.
 
 09는 기존 API 기반 구현이다. 등록키 기반 Agent 생성 자동 복구 API는 추가하지 않았으며, 토큰 발급 실패를 새 Agent 생성으로 우회하지 않는다. 실제 운영 중앙/DB·배포본·Host 전체 설정 검증은 별도다.
 
@@ -588,4 +597,89 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 검증 결과: 새 PR #37 회귀 4건과 기존 setup CLI 6건·실행 흐름 10건·출력 5건, 총 25건이 통과했다. 최초 목록 실패 처리 보완 후 해당 본인 목록 회귀 1건도 재실행해 통과했으며 합계에 중복 계산하지 않는다. workspace/all-targets Clippy `-D warnings`, 전체 타깃 컴파일·포맷·변경 공백 검사도 통과했다. 이번 보완에서 전체 workspace 테스트나 실제 서버·Host 검증을 추가 실행한 것은 아니다.
 
+## 작업 10: 프로젝트 MCP 설정 통합
+
+2026-11-04 (Asia/Seoul). `setup_mcp`가 선택 도구·Node/MCP 실행 경로·기존 자격 파일 경로를 `McpConfig` 제공자에 전달한다. Host 파일 문법·기본 위치·안전한 병합·백업·롤백은 기존 제공자를 재사용한다. 프로젝트의 Codex `.codex/config.toml`, Claude Code `.mcp.json`만 대상이다. `--mcp-target`도 선택 프로젝트의 해당 위치여야 하며 전역 설정으로 대신 쓰지 않는다. 자격 파일 경로는 프로필에서 가져오므로 사용자가 조합할 필요가 없다.
+
+### 실행 경로와 적용 확인
+
+- Node 24 이상이 필요하다. `--node-path` → 선택 Host의 Node 실행 경로 → PATH의 절대 경로 순으로 찾는다. MCP 진입점은 `--mcp-entry` → CLI 옆 `mcp-server/dist/index.js` → CLI 위치에서 확인한 개발 checkout의 `packages/mcp-server/dist/index.js` 순이다. 현재 작업 폴더나 빌드 PC 경로를 실행 경로로 쓰지 않는다. 개발 checkout은 `npm.cmd --prefix packages/mcp-server run build`로 먼저 빌드한다. 다운로드·설치·배포 패키지 제작은 수행하지 않는다.
+- 실행 전 경로·권한을 확인하고 Node 버전과 MCP stdio `initialize`를 제한 시간 5초/출력 16 KiB 안에서 확인한다. 검사용 프로세스에는 DevLink 자격 환경변수와 Node 실행 옵션을 전달하지 않는다. AI 작업·업무 도구·Host 세션 등록을 호출하지 않는다.
+- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 / Claude Code 2.1.310**이다. 미검증 버전과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
+- 생성/병합 계획은 안전한 DevLink 항목만 표시한다. TTY에서는 계획을 보여준 후 확인하고, 비대화형에서는 `--apply-mcp`가 없으면 `SETUP_INPUT_REQUIRED`/종료 2와 `mcpPlan`을 반환한다. 거절/EOF는 종료 130이다. 기존 항목이 일치하면 확인·재작성·추가 백업 없이 재사용한다.
+- 확인한 같은 제공자 인스턴스와 `planId`/예상 digest로 적용한다. 입력 대기 동안 잠금은 해제하며 적용 직전에 사용자·팀·Agent·도구·브로커 PID/instance·프로필/자격/실행 파일 해시를 재확인한다. Host 파일의 동시 수정은 제공자의 digest 검사로 거절한다. 확인 후 계획을 몰래 재생성하지 않는다.
+
+### 10 리뷰 보완: 중앙 변경 전 MCP 사전 검사
+
+명시한 Node/MCP 경로의 누락은 `validate`에서 거절한다. 도구를 명시한 실행은 canonical 프로젝트 경로를 확정한 직후 Node/MCP 파일·권한·런타임과 기존 Host 설정 충돌을 읽기 전용으로 검사한다. 이 검사는 Agent·토큰·MCP 자격 파일·실행 중인 브로커를 요구하거나 생성하지 않는다. 따라서 기존 `.mcp.json` DevLink 항목 충돌과 존재하지 않는 `--node-path`는 Agent 생성·토큰 발급 전에 실패한다.
+
+도구가 기존 선택/대화형 선택으로 나중에 결정되면 `register_agent` 진입 시 같은 검사를 수행한다. 명시한 도구도 등록 직전에 다시 검사해 validate 이후의 파일 변경을 거절한다. Host 형식 검사는 기존 제공자의 normalize/merge를 사용한다. manual 모드는 실행 경로를 검사하되 직접 적용하지 않는 기존 항목의 병합 충돌은 차단 조건으로 삼지 않는다.
+
+`--tool`만 지정하고 저장된 도구 선택이 있으면, 인증 후 `select_tool`에서 바인딩과 실행 경로를 확인하고 `register_agent` 진입 시 MCP 사전 검사를 수행한다. `--tool-path`로 설치를 지정하면 `validate`에서 해당 경로를 먼저 검사한다.
+
+사전 검사는 적용 허용이나 최종 계획을 저장하지 않는다. 기존 configure_mcp의 계획·동일 digest 확인, Agent/브로커/실행 파일 재검증, 백업·적용 후 검사·롤백은 그대로 수행한다. 사전 검사 이후에 발생한 변경과 쓰기 실패도 기존 오류·부분 적용 규칙에 따라 처리한다.
+
+2026-11-04 추가 보완. validate의 사전 검사는 `--tool-path`와 탐색 경로로 Host를 먼저 해석해 탐지된 Host의 Node 실행 경로를 사용한다. 정상 npm 설치처럼 shim 옆에만 Node가 있는 경우도 `--node-path` 없이 통과하며, 탐지에 실패하면 Host 없이 런타임만 검사하고 select_tool이 기존대로 다시 probe해 실패를 보고한다. 기존 Host 설정과의 병합 충돌은 제공자가 자동 적용을 지원하는 Host 버전에서만 검사한다. 미지원 버전은 기존 DevLink 항목이 달라도 차단하지 않고 수동 안내(`SETUP_MANUAL_ACTION_REQUIRED`)에 도달하며, 기존 항목의 병합은 사용자가 직접 수행한다.
+
+### 결과와 복구
+
+다른 MCP 항목과 설정은 보존한다. 기존 파일 병합은 비공개 원본 백업 후 원자적으로 교체하며, 제공자가 적용 후 검사와 소유 버전만 복원하는 롤백을 담당한다. 공개 출력에는 다른 항목의 환경변수·토큰·백업 내용이 없고 `DEVLINK_BROKER_FILE` 경로만 들어간다. 오류의 `mcpError`에 적용 outcome·rollback 상태·backupPath/recoveryDirectory를 보존한다. 적용 뒤 추가 재검사 실패도 결과 불명으로 처리하고 백업 위치를 남긴다.
+
+MCP 실패 때문에 이미 준비한 Agent·토큰을 삭제하거나 새 Agent를 생성하지 않는다. 앞 단계에서 시작/재사용한 브로커도 유지한다. 충돌은 종료 6, 쓰기 실패는 종료 5이며, 출력에 알려진 user/team/agent/tool을 유지한다. 결과 불명은 출력의 백업·롤백 근거를 먼저 확인하고 명시적으로 재실행한다. 재실행은 정상 등록·토큰·브로커를 재사용하고 MCP 계획을 다시 확인한다.
+
+적용 결과는 `status`, `targetPath`, 선택 `backupPath`, `restartRequired`, `runtimeVerified:true`, `hostSession:"not_checked"`, `nextActions`를 제공한다. Host를 다시 열거나 재시작한 후 Agent 세션 등록이 필요하다. 설정 파일과 MCP 초기화 확인만으로 Host 연결/협업 준비 완료를 표시하지 않는다. **현재 전체 setup은 다음 `verify_connection`에서 종료 3이며**, 해당 오류의 `mcpConfig`와 단계 결과에 MCP 적용/재사용 내역을 남긴다. 최종 연결 집계·`setup status`·실제 Host 검증은 12번 이후 범위다.
+
+### 작업 10 검증 결과
+
+Windows stable MSVC, `00a99d7` 기반 작업 트리에서 임시 프로젝트·합성 중앙·실제 로컬 브로커와 합성 Host/Node를 사용했다. 개인 Host 설정은 변경하지 않았다.
+
+| 범위 | 결과 |
+| --- | --- |
+| 새 MCP 통합 | 10 passed: 최초 9건 통과, 수동 예시의 TOML 표기 기대값 수정 후 해당 1건 통과 |
+| MCP 제공자: 병합·백업·충돌·롤백·수동 예시 | 17 passed |
+| 기존 인증 / 토큰 | 22 / 12 passed |
+| CLI / 공통 흐름 / 출력 | 6 / 10 / 5 passed |
+| 공개 오류의 불명 outcome·백업·롤백 근거 보존 | 1 passed |
+
+중복 없이 83개 검사다. 최종 런타임 거절 검사에는 오래된 Node·다른 서버·원문 오류와 시간 초과를 포함해 재실행했고 통과했다. 이 재실행은 합계에 중복 계산하지 않는다. 제공자 적용 후 추가 검사 오류를 결과 불명으로 보존하고 환경변수 이름의 대소문자도 처리한 최종 코드에서 단위 검사·런타임 거절 검사와 workspace/all-targets Clippy `-D warnings`를 확인했다. 전체 rustfmt·변경 공백 검사도 통과했다. 전체 workspace 테스트를 새로 실행한 결과는 아니다.
+
+실제 설치된 Node와 `npm.cmd --prefix packages/mcp-server run build`의 산출물도 별도 stdio smoke로 확인했다. `initialize`가 `serverInfo.name=devlink-mcp`, `version=0.1.0`, `protocolVersion=2025-11-25`를 반환하고 종료 0이었으며 업무 도구 호출은 0회다. 운영 중앙/DB·Unix·배포 패키지·실제 Host의 설정 소비/Agent 세션 등록은 검증하지 않았다.
+
+로그: `rust/target/setup10-integration.log`(최초 수동 예시 기대값 실패 포함), `setup10-manual-final.log`(수정 후 통과), `setup10-runtime-final.log`, `setup10-provider.log`, `setup10-clippy-final.log`.
+
+### 10 리뷰 보완 검증 결과
+
+2026-11-04. 기존 `.mcp.json` DevLink 항목 충돌과 존재하지 않는 `--node-path`를 실제 CLI 회귀 2건으로 재현했다. 수정 전에는 두 경우 모두 Agent 생성·토큰 발급이 각각 1회 실행됐다. 수정 후에는 모두 validate에서 실패하고, 로그인 fixture 준비 이후의 중앙 호출·Agent 생성·토큰 발급은 각각 0회다. Host 원본·프로필·자격 파일 보존도 확인했다. 도구를 나중에 선택한 뒤 생긴 충돌과 삭제된 MCP 진입점은 등록 직전 검사로 차단했다.
+
+| 범위 | 최종 통과 수 |
+| --- | --- |
+| MCP 통합: 기존 10 + 사전 검사 회귀 3 | 13 |
+| MCP 제공자: 자격 파일 없는 Codex/Claude 사전 검사 포함 | 18 |
+| 인증 / 팀 / 프로젝트 | 22 / 17 / 11 |
+| Agent 등록 / 토큰 | 19 / 12 |
+| 도구 탐지·선택 | 17 (기존 opt-in 1 ignored) |
+| setup CLI / 흐름 / 출력 | 6 / 10 / 5 |
+
+여러 실행에서 중복 없이 **150개 검사 통과**를 확인했다. 전체 workspace를 한 번에 재실행한 결과는 아니다. 인증·팀·직접 CLI 도구 테스트는 개발 checkout/실제 Node에 의존하지 않도록 임시 프로젝트와 합성 런타임을 지정했다. 팀 테스트의 오래된 호출 배열에는 등록 단계 조회 4개를 반영했고, 합성 Agent 목록 서버는 가입 팀과 테스트용 큰 팀 ID도 처리하도록 정정했다. 제품의 등록·토큰 API 동작은 바꾸지 않았다.
+
+최초 병렬 회귀에서는 추가 MCP 회귀 1건의 선행 단계 준비 assertion이 실패했다. 단독 재실행이 통과했고, 실패 단계 출력과 합성 Host 버전 검사 제한시간(15초)을 보강한 뒤 해당 회귀가 다시 통과했다. 수정 전 팀 테스트의 중복 실행은 중단하고 수정본 17건을 별도로 재검증했다. 초기 실패·중단 기록은 로그에 남아 있으며 통과 합계에 포함하지 않는다.
+
+근거: `rust/target/setup10-preflight-before.log`(수정 전 재현), `setup10-preflight-after.log`(생성·발급 0회), `setup10-preflight-late-final.log`, `setup10-preflight-provider.log`, `setup10-preflight-regression.log`(초기 실패·중단 및 개별 통과 포함), `setup10-preflight-fixtures-final.log`(인증 22·프로젝트 11), `setup10-preflight-teams-final.log`, `setup10-preflight-tools-final.log`, `setup10-preflight-clippy-final.log`. 최종 rustfmt·workspace/all-targets Clippy `-D warnings`·변경 공백 검사도 통과했다. 검증은 임시 프로필·합성 중앙과 로컬 브로커에서 수행했으며 실제 운영 중앙/Host 전체 연결 검증을 새로 수행한 것은 아니다.
+
 로그: `rust/target/registration37-new-tests.log`, `registration37-owned-final.log`, `registration37-setup-tests.log`, `registration37-clippy.log`.
+
+### 10 리뷰 보완 2: shim 옆 Node와 미지원 Host의 수동 안내
+
+2026-11-04. 리뷰 지적 2건을 CLI/통합 회귀로 재현했다. (1) `--tool-path`로 `claude.cmd` shim을 지정하고 PATH에 Node가 없는 정상 npm 배치는 수정 전 validate에서 `SETUP_TOOL_UNAVAILABLE`/종료 5로 끝났고, 수정 후에는 shim 옆 `node.exe`로 사전 검사·적용을 통과해 `verify_connection`/종료 3에 도달하며 `.mcp.json`에 그 Node를 기록한다. batch 텍스트는 실행하지 않는다. (2) 미지원 Claude Code 9.9.9와 다른 DevLink 항목이 있는 기존 `.mcp.json`은 수정 전 validate에서 `SETUP_MCP_CONFIG_CONFLICT`로 끝났고, 수정 후에는 validate·register_agent를 지나 configure_mcp의 `SETUP_MANUAL_ACTION_REQUIRED`에 도달한다. 기존 파일은 그대로이고 예시에 다른 항목 값은 없다.
+
+| 범위 | 결과 |
+| --- | --- |
+| MCP 통합: 기존 13 + 회귀 2 | 15 passed |
+| 브로커 단위 | 105 passed |
+| 도구 탐지·선택 / Agent 등록 / 토큰 | 17 / 19 / 12 passed |
+| 프로젝트 / setup CLI / 출력 | 11 / 6 / 5 passed |
+| 인증 / 팀 | 각 1건 실패 (아래) |
+
+인증 `valid_session_reuses_server_identity_without_reading_an_open_password_pipe`(30초 종료 대기)와 팀 `server_change_during_membership_response_cannot_save_or_reuse_the_old_team`(15초 barrier 대기)는 스위트 전체 실행에서 세 번 연속 시간 초과했고 단독 실행에서는 통과했다. 이번 수정을 되돌린 소스에서도 같은 인증 실패가 재현되어 이 변경과 무관한 기존 시간 의존 문제다. 별도 확인이 필요하다. rustfmt·workspace/all-targets Clippy `-D warnings`는 통과했다.
+
+로그: `rust/target/setup10-preflight-shim-manual-before.log`(수정 전 재현), `setup10-preflight-shim-manual.log`(MCP 15건), `setup10-shim-manual-broker.log`, `setup10-shim-manual-suites2.log`, `setup10-shim-manual-suites3.log`(시간 초과 재현).

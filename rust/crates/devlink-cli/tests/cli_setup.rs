@@ -47,7 +47,11 @@ fn setup_help_documents_usage_output_and_global_config() {
         "--issue-token",
         "current directory",
         "single joined team",
-        "remaining stages follow",
+        "Final connection verification follows",
+        "--mcp-mode",
+        "--mcp-entry <FILE>",
+        "--node-path <FILE>",
+        "--apply-mcp",
     ] {
         assert!(help.contains(expected), "missing {expected}: {help}");
     }

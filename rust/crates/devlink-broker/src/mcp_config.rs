@@ -32,7 +32,7 @@ impl VerifiedHost {
         Ok(Self { tool })
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Executable {
     pub command: PathBuf,
@@ -116,7 +116,7 @@ pub struct ConfigError {
     pub backup_path: Option<PathBuf>,
 }
 impl ConfigError {
-    fn new(code: &'static str) -> Self {
+    pub(crate) fn new(code: &'static str) -> Self {
         Self {
             code,
             outcome: "not_applied",
@@ -125,7 +125,7 @@ impl ConfigError {
             recovery_directory: None,
         }
     }
-    fn uncertain(rollback: &'static str, backup: Option<PathBuf>) -> Self {
+    pub(crate) fn uncertain(rollback: &'static str, backup: Option<PathBuf>) -> Self {
         Self {
             code: "SETUP_MCP_CONFIG_WRITE_FAILED",
             outcome: "unknown",
@@ -141,6 +141,64 @@ impl std::fmt::Display for ConfigError {
     }
 }
 impl std::error::Error for ConfigError {}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualConfig {
+    pub tool_type: ToolType,
+    pub suggested_target_path: PathBuf,
+    pub executable: Executable,
+    pub broker_file: PathBuf,
+    pub snippet: String,
+    pub restart_required: bool,
+}
+
+pub fn project_target(tool: ToolType, project: &std::path::Path) -> PathBuf {
+    project.join(match tool {
+        ToolType::Codex => ".codex/config.toml",
+        ToolType::ClaudeCode => ".mcp.json",
+    })
+}
+
+/// Read-only validation before Agent/token creation. The future credential path
+/// is checked without requiring or creating a descriptor. Host formats stay here.
+pub fn preflight(input: PlanInput, inspect_target: bool) -> Result<()> {
+    let input = storage::normalize(input.tool_type, input)?;
+    if inspect_target {
+        let before = storage::read(&input.target)?;
+        let (change, after) = format::merge(input.tool, before.as_deref(), &format::entry(&input))?;
+        if change == Change::Conflict {
+            return Err(ConfigError::new("SETUP_MCP_CONFIG_CONFLICT"));
+        }
+        if after.len() > LIMIT {
+            return Err(ConfigError::new("SETUP_MCP_CONFIG_WRITE_FAILED"));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the same project/runtime/credential paths and render only DevLink.
+/// This is guidance for manual review, including unverified Host versions; it writes nothing.
+pub fn manual_config(input: PlanInput) -> Result<ManualConfig> {
+    let normalized = storage::normalize(input.tool_type, input)?;
+    storage::require_credentials(&normalized.broker)?;
+    let (_, bytes) = format::merge(normalized.tool, None, &format::entry(&normalized))?;
+    let snippet =
+        String::from_utf8(bytes).map_err(|_| ConfigError::new("SETUP_MCP_CONFIG_WRITE_FAILED"))?;
+    Ok(ManualConfig {
+        tool_type: normalized.tool,
+        suggested_target_path: normalized.target,
+        executable: normalized.executable,
+        broker_file: normalized.broker,
+        snippet,
+        restart_required: true,
+    })
+}
+
+/// Use the same Windows path spelling as the generated Host entry.
+pub(crate) fn launch_path(path: &std::path::Path) -> String {
+    storage::host_path(path)
+}
 
 #[derive(Clone)]
 struct Normalized {

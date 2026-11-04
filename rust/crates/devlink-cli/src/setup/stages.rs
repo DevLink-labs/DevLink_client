@@ -1,17 +1,19 @@
 use super::{
     AgentChoice, AgentInput, AgentInputError, ErrorCode, ErrorLocation, InputKind, InputSource,
-    LoginCredentials, LoginInput, LoginInputError, NoAgentInput, NoLoginInput, NoTeamInput,
-    NoToolInput, Outcome, RequiredInput, SetupContext, SetupError, Step, StepExecutor, StepResult,
-    TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError,
+    LoginCredentials, LoginInput, LoginInputError, McpInput, McpInputError, NoAgentInput,
+    NoLoginInput, NoMcpInput, NoTeamInput, NoToolInput, Outcome, RequiredInput, SetupContext,
+    SetupError, Step, StepExecutor, StepResult, TeamChoice, TeamInput, TeamInputError, ToolInput,
+    ToolInputError,
 };
 use devlink_broker::{
     agent_profile::registration::{
         self, Registration, RegistrationContext, RegistrationState, Selection,
     },
     agent_profile::tokens,
-    broker_control,
+    broker_control, mcp_config,
     sessions::ToolType,
     setup_config::{self, FailureKind, PreparedConfig},
+    setup_mcp,
     setup_project::{self, PreparedProject, ProjectOptions},
     setup_tools::{self, SelectionBinding, SelectionSnapshot},
     teams::{self, SetupSelection, SetupTeamFault, SetupTeamFaultKind, Team},
@@ -23,11 +25,18 @@ use devlink_broker::{
 /// Per-stage state lives in small structs, so swapping one input adapter moves a
 /// handful of fields and a new stage adds its own struct instead of touching three
 /// field lists.
-pub struct SetupStages<I = NoLoginInput, T = NoTeamInput, U = NoToolInput, A = NoAgentInput> {
+pub struct SetupStages<
+    I = NoLoginInput,
+    T = NoTeamInput,
+    U = NoToolInput,
+    A = NoAgentInput,
+    M = NoMcpInput,
+> {
     input: I,
     team_input: T,
     tool_input: U,
     agent_input: A,
+    mcp_input: M,
     prepared: Option<PreparedConfig>,
     auth: AuthState,
     teams: TeamState,
@@ -35,6 +44,7 @@ pub struct SetupStages<I = NoLoginInput, T = NoTeamInput, U = NoToolInput, A = N
     tools: ToolState,
     agents: AgentState,
     broker: BrokerState,
+    mcp: McpState,
 }
 
 #[derive(Default)]
@@ -82,6 +92,15 @@ struct BrokerState {
     result: Option<broker_control::StartResult>,
 }
 
+#[derive(Default)]
+struct McpState {
+    options: setup_mcp::Options,
+    waiting: bool,
+    confirmed: bool,
+    prepared: Option<setup_mcp::Preparation>,
+    result: Option<setup_mcp::ConfigurationResult>,
+}
+
 impl Default for SetupStages<NoLoginInput> {
     fn default() -> Self {
         Self::new(NoLoginInput)
@@ -95,6 +114,7 @@ impl<I> SetupStages<I, NoTeamInput> {
             team_input: NoTeamInput,
             tool_input: NoToolInput,
             agent_input: NoAgentInput,
+            mcp_input: NoMcpInput,
             prepared: None,
             auth: AuthState::default(),
             teams: TeamState::default(),
@@ -102,17 +122,19 @@ impl<I> SetupStages<I, NoTeamInput> {
             tools: ToolState::default(),
             agents: AgentState::default(),
             broker: BrokerState::default(),
+            mcp: McpState::default(),
         }
     }
 }
 
-impl<I, T, U, A> SetupStages<I, T, U, A> {
-    pub fn with_team_input<V>(self, input: V) -> SetupStages<I, V, U, A> {
+impl<I, T, U, A, M> SetupStages<I, T, U, A, M> {
+    pub fn with_team_input<V>(self, input: V) -> SetupStages<I, V, U, A, M> {
         SetupStages {
             input: self.input,
             team_input: input,
             tool_input: self.tool_input,
             agent_input: self.agent_input,
+            mcp_input: self.mcp_input,
             prepared: self.prepared,
             auth: self.auth,
             teams: self.teams,
@@ -120,15 +142,17 @@ impl<I, T, U, A> SetupStages<I, T, U, A> {
             tools: self.tools,
             agents: self.agents,
             broker: self.broker,
+            mcp: self.mcp,
         }
     }
 
-    pub fn with_tool_input<V>(self, input: V) -> SetupStages<I, T, V, A> {
+    pub fn with_tool_input<V>(self, input: V) -> SetupStages<I, T, V, A, M> {
         SetupStages {
             input: self.input,
             team_input: self.team_input,
             tool_input: input,
             agent_input: self.agent_input,
+            mcp_input: self.mcp_input,
             prepared: self.prepared,
             auth: self.auth,
             teams: self.teams,
@@ -136,14 +160,16 @@ impl<I, T, U, A> SetupStages<I, T, U, A> {
             tools: self.tools,
             agents: self.agents,
             broker: self.broker,
+            mcp: self.mcp,
         }
     }
-    pub fn with_agent_input<V>(self, input: V) -> SetupStages<I, T, U, V> {
+    pub fn with_agent_input<V>(self, input: V) -> SetupStages<I, T, U, V, M> {
         SetupStages {
             input: self.input,
             team_input: self.team_input,
             tool_input: self.tool_input,
             agent_input: input,
+            mcp_input: self.mcp_input,
             prepared: self.prepared,
             auth: self.auth,
             teams: self.teams,
@@ -151,7 +177,32 @@ impl<I, T, U, A> SetupStages<I, T, U, A> {
             tools: self.tools,
             agents: self.agents,
             broker: self.broker,
+            mcp: self.mcp,
         }
+    }
+    pub fn with_mcp_input<V>(self, input: V) -> SetupStages<I, T, U, A, V> {
+        SetupStages {
+            input: self.input,
+            team_input: self.team_input,
+            tool_input: self.tool_input,
+            agent_input: self.agent_input,
+            mcp_input: input,
+            prepared: self.prepared,
+            auth: self.auth,
+            teams: self.teams,
+            project: self.project,
+            tools: self.tools,
+            agents: self.agents,
+            broker: self.broker,
+            mcp: self.mcp,
+        }
+    }
+    pub fn with_mcp(mut self, options: setup_mcp::Options) -> Self {
+        self.mcp.options = options;
+        self
+    }
+    pub fn mcp_configuration(&self) -> Option<&setup_mcp::ConfigurationResult> {
+        self.mcp.result.as_ref()
     }
     pub fn with_agent(mut self, selection: Option<Selection>) -> Self {
         self.agents.selection = selection;
@@ -215,8 +266,8 @@ impl<I, T, U, A> SetupStages<I, T, U, A> {
     }
 }
 
-impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
-    for SetupStages<I, T, U, A>
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> StepExecutor
+    for SetupStages<I, T, U, A, M>
 {
     type Data = ();
 
@@ -232,6 +283,14 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
         }
         if step == Step::RegisterAgent {
             return self.register_agent(context).await;
+        }
+        if step == Step::ConfigureMcp {
+            return self.configure_mcp(context).await;
+        }
+        if step == Step::Validate
+            && let Err(error) = self.mcp.options.validate()
+        {
+            return StepResult::Failed(mcp_error(Step::Validate, error));
         }
         if step == Step::StartBroker {
             let executable = self
@@ -317,6 +376,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
                 .as_ref()
                 .and_then(|r| r.agent_id)
                 .map(|id| id.to_string());
+            error.mcp_config = self.mcp.result.clone();
             error.tools = self.tools.reports.clone();
             error.known.tool_type = self.tools.selected.as_ref().map(|s| s.tool_type);
             return StepResult::Failed(error);
@@ -337,6 +397,33 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
                     step,
                     Outcome::NotApplied,
                 ));
+            }
+        }
+        // A saved launcher must be checked against the authenticated binding in
+        // SelectTool. Defer its MCP preflight to RegisterAgent, before any Agent
+        // or token mutation. An explicit path takes precedence over saved state.
+        if let Some(tool) = self.tools.requested
+            && (self.tools.path.is_some()
+                || matches!(
+                    std::fs::symlink_metadata(setup_tools::path(&context.config_path)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ))
+        {
+            // Resolve the Host before checking its runtime: an npm shim's Node may
+            // live only beside the shim, and only a verified version is applied
+            // automatically. select_tool probes again; a Host missing here fails there.
+            let explicit = self.tools.path.as_deref().map(|path| (tool, path));
+            let host = self
+                .tools
+                .search
+                .detect_one(tool, None, explicit)
+                .await
+                .selected;
+            if let Err(error) = self
+                .preflight_mcp(context, Step::Validate, tool, host)
+                .await
+            {
+                return StepResult::Failed(*error);
             }
         }
         let path = context.config_path.clone();
@@ -385,7 +472,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
     }
 
     fn can_resolve_input(&self) -> bool {
-        if self.agents.waiting {
+        if self.mcp.waiting {
+            self.mcp_input.available()
+        } else if self.agents.waiting {
             self.agent_input.available()
         } else if self.tools.waiting {
             self.tool_input.available()
@@ -396,7 +485,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
         }
     }
     fn input_is_interactive(&self) -> bool {
-        if self.agents.waiting {
+        if self.mcp.waiting {
+            self.mcp_input.interactive()
+        } else if self.agents.waiting {
             self.agent_input.interactive()
         } else if self.tools.waiting {
             self.tool_input.interactive()
@@ -408,6 +499,39 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> StepExecutor
     }
 
     async fn resolve_input(&mut self, required: &SetupError) -> Result<(), SetupError> {
+        if required.step == Step::ConfigureMcp {
+            let Some(plan) = self.mcp.prepared.as_ref().and_then(|p| p.plan()) else {
+                return Err(SetupError::new(
+                    ErrorCode::InternalError,
+                    Step::ConfigureMcp,
+                    Outcome::NotApplied,
+                ));
+            };
+            match self.mcp_input.request(plan).await {
+                Ok(true) => {
+                    self.mcp.confirmed = true;
+                    return Ok(());
+                }
+                Err(McpInputError::Unavailable) => return Err(required.clone()),
+                Err(McpInputError::ReadFailed) => {
+                    return Err(SetupError::new(
+                        ErrorCode::InternalError,
+                        Step::ConfigureMcp,
+                        Outcome::NotApplied,
+                    ));
+                }
+                Ok(false) | Err(McpInputError::Cancelled) => {
+                    let mut cancelled = SetupError::new(
+                        ErrorCode::Cancelled,
+                        Step::ConfigureMcp,
+                        Outcome::NotApplied,
+                    );
+                    cancelled.mcp_plan = required.mcp_plan.clone();
+                    cancelled.known = required.known.clone();
+                    return Err(cancelled);
+                }
+            }
+        }
         if required.step == Step::RegisterAgent {
             let code = match self.agent_input.request(&required.agent_choices).await {
                 Ok(selection) => {
@@ -539,7 +663,9 @@ fn broker_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
     safe
 }
 
-impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T, U, A> {
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
+    SetupStages<I, T, U, A, M>
+{
     async fn select_tool(&mut self, context: &SetupContext) -> StepResult {
         let (Some(config), Some(user), Some(team), Some(project)) = (
             &self.prepared,
@@ -1046,8 +1172,24 @@ fn auth_error(path: &std::path::Path, error: &anyhow::Error, login_attempted: bo
     safe
 }
 
-impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput> SetupStages<I, T, U, A> {
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
+    SetupStages<I, T, U, A, M>
+{
     async fn register_agent(&mut self, context: &SetupContext) -> StepResult {
+        // A tool chosen after Validate, or a local change since that check, must
+        // still be rejected before registration and token issuance can mutate central.
+        if let Some(tool) = &self.tools.selected
+            && let Err(error) = self
+                .preflight_mcp(
+                    context,
+                    Step::RegisterAgent,
+                    tool.tool_type,
+                    Some(tool.clone()),
+                )
+                .await
+        {
+            return StepResult::Failed(*error);
+        }
         let (Some(config), Some(user), Some(team), Some(project), Some(tool)) = (
             &self.prepared,
             &self.auth.user,
@@ -1297,8 +1439,277 @@ fn registration_outcome(outcome: registration::Mutation) -> Outcome {
     }
 }
 
+impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
+    SetupStages<I, T, U, A, M>
+{
+    async fn preflight_mcp(
+        &mut self,
+        context: &SetupContext,
+        step: Step,
+        tool_type: ToolType,
+        host: Option<SelectedTool>,
+    ) -> Result<(), Box<SetupError>> {
+        let project = self
+            .project
+            .prepared
+            .as_ref()
+            .map(|p| p.root.clone())
+            .or_else(|| self.project.options.path.clone())
+            .ok_or_else(|| {
+                Box::new(SetupError::new(
+                    ErrorCode::InternalError,
+                    step,
+                    Outcome::NotApplied,
+                ))
+            })?;
+        let executable = self
+            .broker
+            .executable
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe)
+            .map_err(|_| {
+                Box::new(SetupError::new(
+                    ErrorCode::ToolUnavailable,
+                    step,
+                    Outcome::NotApplied,
+                ))
+            })?;
+        setup_mcp::preflight(
+            setup_mcp::PreflightContext {
+                config_path: context.config_path.clone(),
+                project,
+                tool_type,
+                host_launcher: host.as_ref().map(|h| h.executable.command.clone()),
+                mcp_automatic_supported: host.as_ref().is_some_and(|h| h.verified_host().is_ok()),
+            },
+            self.mcp.options.clone(),
+            executable,
+        )
+        .await
+        .map_err(|error| {
+            let mut safe = mcp_error(step, error);
+            self.mcp_identity(&mut safe);
+            Box::new(safe)
+        })
+    }
+
+    async fn configure_mcp(&mut self, context: &SetupContext) -> StepResult {
+        if self.mcp.prepared.is_none() {
+            let (
+                Some(config),
+                Some(user),
+                Some(team),
+                Some(project),
+                Some(tool),
+                Some(registration),
+                Some(broker),
+            ) = (
+                &self.prepared,
+                &self.auth.user,
+                &self.teams.selected,
+                &self.project.prepared,
+                &self.tools.selected,
+                &self.agents.registration,
+                &self.broker.result,
+            )
+            else {
+                return StepResult::Failed(SetupError::new(
+                    ErrorCode::InternalError,
+                    Step::ConfigureMcp,
+                    Outcome::NotApplied,
+                ));
+            };
+            let Ok(origin) = user_auth::origin(&config.config) else {
+                return StepResult::Failed(SetupError::new(
+                    ErrorCode::ConfigInvalid,
+                    Step::ConfigureMcp,
+                    Outcome::NotApplied,
+                ));
+            };
+            let executable = self
+                .broker
+                .executable
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(std::env::current_exe);
+            let Ok(executable) = executable else {
+                return StepResult::Failed(SetupError::new(
+                    ErrorCode::ToolUnavailable,
+                    Step::ConfigureMcp,
+                    Outcome::NotApplied,
+                ));
+            };
+            let binding = setup_mcp::Context {
+                config_path: context.config_path.clone(),
+                origin: origin.to_string(),
+                user_id: user.user_id,
+                team_id: team.team_id,
+                agent_id: registration.agent_id.unwrap_or(0),
+                project: project.root.clone(),
+                tool: tool.clone(),
+                broker_pid: broker.health.pid,
+                broker_instance: broker.health.instance_id.clone(),
+            };
+            match setup_mcp::prepare(binding, self.mcp.options.clone(), executable).await {
+                Ok(prepared) => self.mcp.prepared = Some(prepared),
+                Err(error) => return self.mcp_failure(mcp_error(Step::ConfigureMcp, error)),
+            }
+        }
+        let Some(prepared) = self.mcp.prepared.as_ref() else {
+            return self.mcp_failure(SetupError::new(
+                ErrorCode::InternalError,
+                Step::ConfigureMcp,
+                Outcome::NotApplied,
+            ));
+        };
+        if prepared.requires_manual() {
+            let mut error = SetupError::new(
+                ErrorCode::ManualActionRequired,
+                Step::ConfigureMcp,
+                Outcome::NotApplied,
+            );
+            error.manual_config = Some(prepared.manual().clone());
+            return self.mcp_failure(error);
+        }
+        let Some(plan) = prepared.plan() else {
+            return self.mcp_failure(SetupError::new(
+                ErrorCode::InternalError,
+                Step::ConfigureMcp,
+                Outcome::NotApplied,
+            ));
+        };
+        if plan.change == mcp_config::Change::Conflict {
+            let mut error = SetupError::new(
+                ErrorCode::McpConfigConflict,
+                Step::ConfigureMcp,
+                Outcome::NotApplied,
+            );
+            error.mcp_plan = Some(plan.clone());
+            return self.mcp_failure(error);
+        }
+        if plan.change != mcp_config::Change::Unchanged
+            && !(self.mcp.options.apply || self.mcp.confirmed)
+        {
+            self.mcp.waiting = true;
+            let mut error = SetupError::new(
+                ErrorCode::InputRequired,
+                Step::ConfigureMcp,
+                Outcome::NotApplied,
+            );
+            error.required_inputs.push(RequiredInput {
+                field: "mcp.apply",
+                kind: InputKind::Value,
+                secret: false,
+                source: InputSource::Input,
+            });
+            error.mcp_plan = Some(plan.clone());
+            self.mcp_identity(&mut error);
+            return StepResult::InputRequired(error);
+        }
+        self.mcp.waiting = false;
+        self.mcp.confirmed = false;
+        self.mcp.options.apply = false;
+        let Some(prepared) = self.mcp.prepared.take() else {
+            return self.mcp_failure(SetupError::new(
+                ErrorCode::InternalError,
+                Step::ConfigureMcp,
+                Outcome::Unknown,
+            ));
+        };
+        match prepared.apply().await {
+            Ok(result) => {
+                let reused = result.config.status == mcp_config::ApplyStatus::Unchanged;
+                self.mcp.result = Some(result);
+                StepResult::Complete {
+                    outcome: if reused {
+                        Outcome::NotApplied
+                    } else {
+                        Outcome::Applied
+                    },
+                    reused,
+                }
+            }
+            Err(error) => self.mcp_failure(mcp_error(Step::ConfigureMcp, error)),
+        }
+    }
+    fn mcp_identity(&self, error: &mut SetupError) {
+        error.known.user_id = self.auth.user.as_ref().map(|u| u.user_id.to_string());
+        error.known.team_id = self.teams.selected.as_ref().map(|t| t.team_id.to_string());
+        error.known.agent_id = self
+            .agents
+            .registration
+            .as_ref()
+            .and_then(|r| r.agent_id)
+            .map(|id| id.to_string());
+        error.known.tool_type = self.tools.selected.as_ref().map(|t| t.tool_type);
+    }
+    fn mcp_failure(&self, mut error: SetupError) -> StepResult {
+        self.mcp_identity(&mut error);
+        StepResult::Failed(error)
+    }
+}
+fn mcp_error(step: Step, error: mcp_config::ConfigError) -> SetupError {
+    let code = match error.code {
+        "SETUP_INPUT_INVALID" | "SETUP_PROJECT_INVALID" => ErrorCode::InputInvalid,
+        "SETUP_TOOL_UNAVAILABLE" => ErrorCode::ToolUnavailable,
+        "SETUP_UNSAFE_FILE" => ErrorCode::UnsafeFile,
+        "SETUP_AUTH_BUSY" => ErrorCode::AuthBusy,
+        "SETUP_CONFIG_BUSY" => ErrorCode::ConfigBusy,
+        "SETUP_PROFILE_CONFLICT" => ErrorCode::ProfileConflict,
+        "SETUP_BROKER_START_FAILED" => ErrorCode::BrokerStartFailed,
+        "SETUP_MCP_CONFIG_CONFLICT" => ErrorCode::McpConfigConflict,
+        "SETUP_MCP_CONFIG_WRITE_FAILED" => ErrorCode::McpConfigWriteFailed,
+        "SETUP_MANUAL_ACTION_REQUIRED" => ErrorCode::ManualActionRequired,
+        _ => ErrorCode::InternalError,
+    };
+    let mut safe = SetupError::new(
+        code,
+        step,
+        match error.outcome {
+            "applied" => Outcome::Applied,
+            "not_applied" => Outcome::NotApplied,
+            _ => Outcome::Unknown,
+        },
+    );
+    if code == ErrorCode::ToolUnavailable {
+        for field in ["mcp.nodePath", "mcp.entry"] {
+            safe.required_inputs.push(RequiredInput {
+                field,
+                kind: InputKind::Value,
+                secret: false,
+                source: InputSource::Input,
+            });
+        }
+    }
+    if code != ErrorCode::InternalError {
+        safe.mcp_error = Some(error);
+    }
+    safe
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mcp_uncertain_errors_keep_backup_and_rollback_evidence() {
+        for rollback in ["restored", "failed", "conflict", "not_needed"] {
+            let backup = std::path::PathBuf::from("safe-private-backup");
+            let provider = mcp_config::ConfigError {
+                code: "SETUP_MCP_CONFIG_WRITE_FAILED",
+                outcome: "unknown",
+                rollback,
+                backup_path: Some(backup.clone()),
+                recovery_directory: None,
+            };
+            let public = mcp_error(Step::ConfigureMcp, provider);
+            assert_eq!(public.code, ErrorCode::McpConfigWriteFailed);
+            assert_eq!(public.outcome, Outcome::Unknown);
+            let evidence = public.mcp_error.unwrap();
+            assert_eq!(evidence.rollback, rollback);
+            assert_eq!(evidence.backup_path, Some(backup));
+        }
+    }
+
     use super::*;
 
     struct BrokenInput;

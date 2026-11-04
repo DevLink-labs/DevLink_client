@@ -156,6 +156,14 @@ pub enum ErrorCode {
     AgentForbidden,
     #[serde(rename = "SETUP_AGENT_STORAGE_FAILED")]
     AgentStorageFailed,
+    #[serde(rename = "SETUP_MCP_CONFIG_CONFLICT")]
+    McpConfigConflict,
+    #[serde(rename = "SETUP_MCP_CONFIG_WRITE_FAILED")]
+    McpConfigWriteFailed,
+    #[serde(rename = "SETUP_MANUAL_ACTION_REQUIRED")]
+    ManualActionRequired,
+    #[serde(rename = "SETUP_PROFILE_CONFLICT")]
+    ProfileConflict,
 }
 
 impl ErrorCode {
@@ -165,7 +173,10 @@ impl ErrorCode {
             | Self::InputInvalid
             | Self::ConfigInvalid
             | Self::ConfigPathInvalid => 2,
-            Self::RegistrationUnknown | Self::TokenRequired | Self::StepUnavailable => 3,
+            Self::RegistrationUnknown
+            | Self::TokenRequired
+            | Self::StepUnavailable
+            | Self::ManualActionRequired => 3,
             Self::InternalError => 1,
             Self::UnsafeFile | Self::ConfigStorageFailed => 5,
             Self::ConfigBusy | Self::BrokerBusy => 6,
@@ -186,8 +197,11 @@ impl ErrorCode {
             Self::ToolRequired => 2,
             Self::ToolUnavailable | Self::ToolStorageFailed => 5,
             Self::ToolBindingConflict | Self::ToolSelectionConflict => 6,
-            Self::BrokerStartFailed | Self::AgentStorageFailed => 5,
-            Self::AgentBindingConflict | Self::AgentAlreadyExists => 6,
+            Self::BrokerStartFailed | Self::AgentStorageFailed | Self::McpConfigWriteFailed => 5,
+            Self::AgentBindingConflict
+            | Self::AgentAlreadyExists
+            | Self::McpConfigConflict
+            | Self::ProfileConflict => 6,
             Self::AgentRejected | Self::AgentForbidden => 4,
         }
     }
@@ -277,7 +291,7 @@ impl ErrorCode {
                 "Choose an available tool using --tool codex or --tool claude-code, or the terminal selection."
             }
             Self::ToolUnavailable => {
-                "The requested tool is unavailable. Install Codex or Claude Code using the reported official installation link, reopen the terminal, then rerun setup --tool codex or setup --tool claude-code. Use --tool-path for an installation outside PATH. For unsupported pnpm/yarn shim layouts, specify the package's native executable or use a native installation. No AI session was started."
+                "The requested Host or MCP runtime is unavailable. Check Node >=24 with --node-path and a built DevLink entry with --mcp-entry. Install Codex or Claude Code using the reported official installation link, reopen the terminal, then rerun setup --tool codex or setup --tool claude-code. Use --tool-path for an installation outside PATH. For unsupported pnpm/yarn shim layouts, specify the package's native executable or use a native installation. No AI session was started."
             }
             Self::ToolBindingConflict => {
                 "The selected tool conflicts with the existing Agent binding. Inspect devlink agent status and explicitly bind an owned Agent, or use a separate profile."
@@ -302,6 +316,18 @@ impl ErrorCode {
             }
             Self::AgentStorageFailed => {
                 "Agent profile storage failed. Inspect the preserved profile and known Agent ID before retrying; do not create blindly."
+            }
+            Self::McpConfigConflict => {
+                "DevLink MCP configuration conflicts with the existing file or reviewed plan. Inspect the proposed entry and target; existing settings were preserved."
+            }
+            Self::McpConfigWriteFailed => {
+                "MCP configuration could not be verified after writing. Inspect the reported outcome, backup and rollback before retrying."
+            }
+            Self::ManualActionRequired => {
+                "Review the manual DevLink configuration, apply it to the suggested project file, then reopen the trusted Host. No Host configuration was written by manual mode."
+            }
+            Self::ProfileConflict => {
+                "The profile, broker, runtime or selected tool changed. Inspect the current binding and rerun setup; an old plan was not applied."
             }
             Self::BrokerStartFailed => {
                 "Broker startup or identity verification failed. Inspect devlink status, the profile and local port. Use devlink stop for a verified running broker before changing its profile or credentials; no unknown process was force-stopped."
@@ -346,6 +372,10 @@ impl ErrorCode {
             Self::ToolStorageFailed => "inspect_tool_selection",
             Self::ToolSelectionConflict => "inspect_tool_selection_then_retry",
             Self::BrokerStartFailed => "inspect_broker_then_retry",
+            Self::McpConfigConflict => "review_mcp_diff",
+            Self::McpConfigWriteFailed => "inspect_mcp_backup",
+            Self::ManualActionRequired => "apply_manual_mcp_config",
+            Self::ProfileConflict => "inspect_profile_then_rebind",
             Self::AgentBindingConflict => "inspect_agent_binding",
             Self::AgentRejected => "inspect_owned_agents_then_use",
             Self::AgentAlreadyExists => "rename_agent_or_select_owned_id",
@@ -446,6 +476,14 @@ pub struct SetupError {
     pub known: KnownIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ErrorLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_plan: Option<devlink_broker::mcp_config::ConfigPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual_config: Option<devlink_broker::mcp_config::ManualConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<devlink_broker::setup_mcp::ConfigurationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_error: Option<devlink_broker::mcp_config::ConfigError>,
     message: &'static str,
     retryable: bool,
     recovery: Recovery,
@@ -464,6 +502,10 @@ impl SetupError {
             tools: Vec::new(),
             known: KnownIdentity::default(),
             location: None,
+            mcp_plan: None,
+            manual_config: None,
+            mcp_config: None,
+            mcp_error: None,
             message: code.message(),
             retryable: matches!(
                 code,
@@ -484,6 +526,7 @@ impl SetupError {
                     | ErrorCode::BrokerStartFailed
                     | ErrorCode::AgentForbidden
                     | ErrorCode::AgentAlreadyExists
+                    | ErrorCode::ManualActionRequired
             ),
             recovery: Recovery {
                 action: code.recovery(),
@@ -528,6 +571,8 @@ pub struct ProgressEvent {
     pub agent_choices: Vec<AgentChoice>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<devlink_broker::tool_discovery::ToolDetection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_plan: Option<devlink_broker::mcp_config::ConfigPlan>,
 }
 
 /// Flattened variants enforce exactly one of data/error in a final result.
