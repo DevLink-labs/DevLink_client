@@ -22,6 +22,12 @@ use std::{
 pub struct SetupArgs {
     #[command(subcommand)]
     pub command: Option<SetupCommand>,
+    /// Run without prompts using the v1 JSON input file
+    #[arg(long)]
+    pub non_interactive: bool,
+    /// Read setup inputs from a v1 JSON file (up to 64 KiB)
+    #[arg(long, value_name = "FILE")]
+    pub input: Option<PathBuf>,
     /// Output format: final JSON only, JSONL progress, or human-readable messages
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
@@ -63,8 +69,8 @@ pub struct SetupArgs {
     #[arg(long, conflicts_with = "create_agent")]
     pub issue_token: bool,
     /// Project MCP configuration mode: apply or manual
-    #[arg(long, default_value = "apply", value_parser = devlink_broker::setup_mcp::parse_mode)]
-    pub mcp_mode: devlink_broker::setup_mcp::Mode,
+    #[arg(long, value_parser = devlink_broker::setup_mcp::parse_mode)]
+    pub mcp_mode: Option<devlink_broker::setup_mcp::Mode>,
     /// Explicit project Host config target; otherwise the provider chooses its fixed project file
     #[arg(long, value_name = "FILE")]
     pub mcp_target: Option<PathBuf>,
@@ -137,14 +143,19 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     };
     let stdout = std::io::stdout();
     let mut output = Renderer::new(stdout.lock(), args.output);
+    if args.non_interactive || args.input.is_some() {
+        let result = run_batch(&context, args, &mut output).await;
+        return finish(&mut output, &result);
+    }
     let input = TerminalLoginInput {
         email: args.email,
         password_stdin: args.password_stdin,
+        unattended: false,
     };
     let stages = SetupStages::new(input)
         .with_mcp_input(TerminalMcpInput)
         .with_mcp(devlink_broker::setup_mcp::Options {
-            mode: args.mcp_mode,
+            mode: args.mcp_mode.unwrap_or_default(),
             target: args.mcp_target,
             node: args.node_path,
             entry: args.mcp_entry,
@@ -169,11 +180,91 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
             role_description: args.role_description,
         });
     let result = super::run(&context, stages, |event| output.progress(event)).await;
-    render_connection_result(&mut output, &result)?;
+    finish(&mut output, &result)
+}
+
+fn finish<W: Write>(
+    output: &mut Renderer<W>,
+    result: &RunResult<setup_connection::Report>,
+) -> anyhow::Result<()> {
+    render_connection_result(output, result)?;
     if result.exit_code != 0 {
         return Err(SetupExit(result.exit_code).into());
     }
     Ok(())
+}
+
+async fn run_batch<W: Write>(
+    context: &SetupContext,
+    args: SetupArgs,
+    output: &mut Renderer<W>,
+) -> RunResult<setup_connection::Report> {
+    use super::{batch, flow};
+    let start = tokio::time::Instant::now();
+    let invalid_flags = !args.non_interactive
+        || args.email.is_some()
+        || args.team_id.is_some()
+        || args.project.is_some()
+        || args.project_name.is_some()
+        || args.agent_name.is_some()
+        || args.role_description.is_some()
+        || args.tool.is_some()
+        || args.tool_path.is_some()
+        || args.create_agent
+        || args.agent_id.is_some()
+        || args.issue_token
+        || args.mcp_mode.is_some()
+        || args.mcp_target.is_some()
+        || args.apply_mcp;
+    let plan = match (invalid_flags, args.input) {
+        (true, _) => Err(batch::invalid()),
+        (false, None) => Err(batch::missing(["input"])),
+        (false, Some(path)) => {
+            let password_stdin = args.password_stdin;
+            let load = tokio::task::spawn_blocking(move || batch::load(&path, password_stdin));
+            match tokio::time::timeout_at(start + std::time::Duration::from_secs(30), load).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(Box::new(SetupError::new(
+                    ErrorCode::InternalError,
+                    Step::Validate,
+                    Outcome::NotApplied,
+                ))),
+                Err(_) => Err(Box::new(SetupError::new(
+                    ErrorCode::Timeout,
+                    Step::Validate,
+                    Outcome::NotApplied,
+                ))),
+            }
+        }
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => return flow::reject(*error, |event| output.progress(event)),
+    };
+    let login = plan.login_email.is_some();
+    let stages = SetupStages::new(TerminalLoginInput {
+        email: plan.login_email,
+        password_stdin: args.password_stdin,
+        unattended: true,
+    })
+    .with_batch(plan.server_url, login)
+    .with_team_id(Some(plan.team))
+    .with_project(plan.project)
+    .with_tool(Some(plan.tool), None)
+    .with_agent(Some(plan.agent))
+    .with_issue_token(plan.issue_token)
+    .with_mcp(setup_mcp::Options {
+        node: args.node_path,
+        entry: args.mcp_entry,
+        ..plan.mcp
+    });
+    flow::run_until(
+        context,
+        stages,
+        |event| output.progress(event),
+        Some(start + plan.timeout),
+    )
+    .await
 }
 
 async fn status(
@@ -370,6 +461,7 @@ impl ToolInput for TerminalToolInput {
 struct TerminalLoginInput {
     email: Option<String>,
     password_stdin: bool,
+    unattended: bool,
 }
 
 impl LoginInput for TerminalLoginInput {
@@ -378,7 +470,7 @@ impl LoginInput for TerminalLoginInput {
     }
 
     fn interactive(&self) -> bool {
-        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+        !self.unattended && std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
     }
 
     async fn request(&mut self) -> Result<LoginCredentials, LoginInputError> {
@@ -485,6 +577,11 @@ impl<W: Write> Renderer<W> {
                 if let Completion::Failure { error } = &result.completion {
                     write!(self.writer, "Stage: ").map_err(|_| ProgressUnavailable)?;
                     self.json(&error.step)?;
+                    if !error.required_inputs.is_empty() {
+                        write!(self.writer, "Required inputs: ")
+                            .map_err(|_| ProgressUnavailable)?;
+                        self.json(&error.required_inputs)?;
+                    }
                     if let Some(location) = &error.location {
                         write!(self.writer, "Location: ").map_err(|_| ProgressUnavailable)?;
                         self.json(location)?;

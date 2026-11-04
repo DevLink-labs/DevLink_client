@@ -277,7 +277,15 @@ pub(crate) fn initialize_missing(
     path: &Path,
     private: bool,
 ) -> std::result::Result<bool, InitializeError> {
-    initialize_missing_with_sync(path, private, |parent| {
+    initialize_config_missing(path, private, &Config::default())
+}
+
+pub(crate) fn initialize_config_missing(
+    path: &Path,
+    private: bool,
+    config: &Config,
+) -> std::result::Result<bool, InitializeError> {
+    initialize_missing_with_sync(path, private, config, |parent| {
         #[cfg(unix)]
         File::open(parent)?.sync_all()?;
         #[cfg(not(unix))]
@@ -289,6 +297,7 @@ pub(crate) fn initialize_missing(
 fn initialize_missing_with_sync(
     path: &Path,
     private: bool,
+    config: &Config,
     sync_parent: impl FnOnce(&Path) -> Result<()>,
 ) -> std::result::Result<bool, InitializeError> {
     // Any entry, including a dangling link, is an existing config. Propagate
@@ -302,7 +311,7 @@ fn initialize_missing_with_sync(
                 .into());
         }
     }
-    let file = prepare_json(path, &Config::default(), private)?;
+    let file = prepare_json(path, config, private)?;
     match file.persist_noclobber(path) {
         Ok(_) => {
             sync_parent(directory(path)).map_err(|source| InitializeError {
@@ -367,7 +376,7 @@ mod tests {
     fn parent_sync_failure_reports_the_already_persisted_config() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.json");
-        let error = initialize_missing_with_sync(&path, false, |_| {
+        let error = initialize_missing_with_sync(&path, false, &Config::default(), |_| {
             anyhow::bail!("injected parent sync failure")
         })
         .unwrap_err();

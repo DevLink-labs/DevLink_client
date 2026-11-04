@@ -51,6 +51,13 @@ pub struct SetupStages<
 struct AuthState {
     credentials: Option<LoginCredentials>,
     user: Option<User>,
+    batch: Option<BatchAuth>,
+}
+
+struct BatchAuth {
+    server_url: Option<String>,
+    login: bool,
+    preparing_config: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +83,7 @@ struct ToolState {
     snapshot: Option<SelectionSnapshot>,
     waiting: bool,
     selected: Option<SelectedTool>,
+    batch_candidate: Option<SelectedTool>,
 }
 
 #[derive(Default)]
@@ -84,6 +92,7 @@ struct AgentState {
     selection: Option<Selection>,
     waiting: bool,
     registration: Option<Registration>,
+    timeout_hint: Option<ErrorCode>,
 }
 
 #[derive(Default)]
@@ -130,6 +139,14 @@ impl<I> SetupStages<I, NoTeamInput> {
 }
 
 impl<I, T, U, A, M> SetupStages<I, T, U, A, M> {
+    pub(super) fn with_batch(mut self, server_url: Option<String>, login: bool) -> Self {
+        self.auth.batch = Some(BatchAuth {
+            server_url,
+            login,
+            preparing_config: false,
+        });
+        self
+    }
     pub fn with_team_input<V>(self, input: V) -> SetupStages<I, V, U, A, M> {
         SetupStages {
             input: self.input,
@@ -407,7 +424,11 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
         // A saved launcher must be checked against the authenticated binding in
         // SelectTool. Defer its MCP preflight to RegisterAgent, before any Agent
         // or token mutation. An explicit path takes precedence over saved state.
-        if let Some(tool) = self.tools.requested
+        if self.auth.batch.is_some() {
+            if let Err(error) = self.preflight_batch(context).await {
+                return StepResult::Failed(*error);
+            }
+        } else if let Some(tool) = self.tools.requested
             && (self.tools.path.is_some()
                 || matches!(
                     std::fs::symlink_metadata(setup_tools::path(&context.config_path)),
@@ -432,7 +453,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
             }
         }
         let path = context.config_path.clone();
-        match tokio::task::spawn_blocking(move || setup_config::prepare(&path)).await {
+        let server_url = self.auth.batch.as_mut().and_then(|batch| {
+            batch.preparing_config = true;
+            batch.server_url.clone()
+        });
+        match tokio::task::spawn_blocking(move || {
+            setup_config::prepare_with_server(&path, server_url.as_deref())
+        })
+        .await
+        {
             Ok(Ok(prepared)) => {
                 let created = prepared.created;
                 self.prepared = Some(prepared);
@@ -445,29 +474,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
                     reused: !created,
                 }
             }
-            Ok(Err(failure)) => {
-                let code = match failure.kind {
-                    FailureKind::InvalidPath => ErrorCode::ConfigPathInvalid,
-                    FailureKind::InvalidConfig => ErrorCode::ConfigInvalid,
-                    FailureKind::UnsafeFile => ErrorCode::UnsafeFile,
-                    FailureKind::ConfigBusy => ErrorCode::ConfigBusy,
-                    FailureKind::BrokerBusy => ErrorCode::BrokerBusy,
-                    FailureKind::Storage => ErrorCode::ConfigStorageFailed,
-                };
-                let outcome = if failure.mutation_uncertain {
-                    Outcome::Unknown
-                } else if failure.created {
-                    Outcome::Applied
-                } else {
-                    Outcome::NotApplied
-                };
-                let mut error = SetupError::new(code, step, outcome);
-                error.location = Some(ErrorLocation {
-                    file: failure.file,
-                    field: failure.field,
-                });
-                StepResult::Failed(error)
-            }
+            Ok(Err(failure)) => StepResult::Failed(config_error(failure)),
             Err(_) => StepResult::Failed(SetupError::new(
                 ErrorCode::InternalError,
                 step,
@@ -477,6 +484,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
     }
 
     fn can_resolve_input(&self) -> bool {
+        if self.auth.batch.is_some() {
+            return false;
+        }
         if self.mcp.waiting {
             self.mcp_input.available()
         } else if self.agents.waiting {
@@ -613,6 +623,57 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
             .connection
             .expect("successful verification records the connection")
     }
+
+    fn timed_out(&self, step: Step) -> SetupError {
+        let (code, outcome) = match step {
+            Step::RegisterAgent => self
+                .agents
+                .timeout_hint
+                .map_or((ErrorCode::Timeout, Outcome::NotApplied), |code| {
+                    (code, Outcome::Unknown)
+                }),
+            Step::Validate
+                if self
+                    .auth
+                    .batch
+                    .as_ref()
+                    .is_some_and(|batch| !batch.preparing_config) =>
+            {
+                (ErrorCode::Timeout, Outcome::NotApplied)
+            }
+            Step::BindProject | Step::VerifyConnection => (ErrorCode::Timeout, Outcome::NotApplied),
+            _ => (ErrorCode::Timeout, Outcome::Unknown),
+        };
+        let mut error = SetupError::new(code, step, outcome);
+        self.mcp_identity(&mut error);
+        error.mcp_config = self.mcp.result.clone();
+        error
+    }
+}
+
+fn config_error(failure: setup_config::Failure) -> SetupError {
+    let code = match failure.kind {
+        FailureKind::InvalidPath => ErrorCode::ConfigPathInvalid,
+        FailureKind::InvalidConfig => ErrorCode::ConfigInvalid,
+        FailureKind::ServerConflict => ErrorCode::ProfileConflict,
+        FailureKind::UnsafeFile => ErrorCode::UnsafeFile,
+        FailureKind::ConfigBusy => ErrorCode::ConfigBusy,
+        FailureKind::BrokerBusy => ErrorCode::BrokerBusy,
+        FailureKind::Storage => ErrorCode::ConfigStorageFailed,
+    };
+    let outcome = if failure.mutation_uncertain {
+        Outcome::Unknown
+    } else if failure.created {
+        Outcome::Applied
+    } else {
+        Outcome::NotApplied
+    };
+    let mut error = SetupError::new(code, Step::Validate, outcome);
+    error.location = Some(ErrorLocation {
+        file: failure.file,
+        field: failure.field,
+    });
+    error
 }
 
 fn project_error(step: Step, failure: setup_project::Failure) -> SetupError {
@@ -732,7 +793,11 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 Outcome::NotApplied,
             ));
         }
-        let preferred = snapshot.preferred();
+        let preferred = self
+            .tools
+            .batch_candidate
+            .as_ref()
+            .or_else(|| snapshot.preferred());
         let pinned = self.tools.requested.or(snapshot.bound_tool);
         let requested = pinned.or_else(|| preferred.map(|s| s.tool_type));
         let explicit = requested.zip(self.tools.path.as_deref());
@@ -779,6 +844,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 .find(|r| r.tool_type == tool)
                 .and_then(|r| r.selected.clone())
         });
+        if let (Some(expected), Some(current)) = (&self.tools.batch_candidate, &selected)
+            && expected != current
+        {
+            return self.tool_failure(SetupError::new(
+                ErrorCode::ToolSelectionConflict,
+                Step::SelectTool,
+                Outcome::NotApplied,
+            ));
+        }
         if selected.is_none() && (self.tools.requested.is_some() || snapshot.bound_tool.is_some()) {
             return self.tool_failure(SetupError::new(
                 ErrorCode::ToolUnavailable,
@@ -950,6 +1024,32 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 Outcome::NotApplied,
             ));
         };
+        if self.auth.batch.as_ref().is_some_and(|batch| batch.login) {
+            let Some(credentials) = self.auth.credentials.take() else {
+                return StepResult::Failed(SetupError::new(
+                    ErrorCode::InternalError,
+                    Step::Authenticate,
+                    Outcome::NotApplied,
+                ));
+            };
+            return match user_auth::login_for_setup_explicit(
+                &context.config_path,
+                credentials.email(),
+                credentials.password(),
+                expected_origin.as_str(),
+            )
+            .await
+            {
+                Ok(user) => {
+                    self.auth.user = Some(user);
+                    StepResult::Complete {
+                        outcome: Outcome::Applied,
+                        reused: false,
+                    }
+                }
+                Err(error) => StepResult::Failed(auth_error(&context.config_path, &error, true)),
+            };
+        }
         let checked =
             user_auth::check_session(&context.config_path, expected_origin.as_str()).await;
         match checked {
@@ -973,20 +1073,24 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                             Outcome::NotApplied
                         },
                     );
-                    error.required_inputs = vec![
-                        RequiredInput {
-                            field: "user.email",
-                            kind: InputKind::Value,
-                            secret: false,
-                            source: InputSource::Input,
-                        },
-                        RequiredInput {
-                            field: "password",
-                            kind: InputKind::Secret,
-                            secret: true,
-                            source: InputSource::HiddenPromptOrStdin,
-                        },
-                    ];
+                    error.required_inputs = if self.auth.batch.is_some() {
+                        vec![super::batch::required("user.mode")]
+                    } else {
+                        vec![
+                            RequiredInput {
+                                field: "user.email",
+                                kind: InputKind::Value,
+                                secret: false,
+                                source: InputSource::Input,
+                            },
+                            RequiredInput {
+                                field: "password",
+                                kind: InputKind::Secret,
+                                secret: true,
+                                source: InputSource::HiddenPromptOrStdin,
+                            },
+                        ]
+                    };
                     return StepResult::InputRequired(error);
                 };
                 match user_auth::login_for_setup(
@@ -1226,8 +1330,13 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             project: project.clone(),
             tool: tool.tool_type,
         };
+        self.agents.timeout_hint = Some(match self.agents.selection {
+            Some(Selection::Create) => ErrorCode::RegistrationUnknown,
+            _ => ErrorCode::Timeout,
+        });
         let result =
             registration::ensure(&context.config_path, &expected, self.agents.selection).await;
+        self.agents.timeout_hint = None;
         let result = match result {
             Ok(mut registered)
                 if matches!(
@@ -1244,6 +1353,10 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 // Retrying this stage cannot silently reuse an issuance grant.
                 let explicit_issue = std::mem::take(&mut self.agents.issue_token);
                 let permission = registered.created || explicit_issue;
+                if self.auth.batch.is_some() {
+                    self.agents.registration = Some(registered.clone());
+                    self.agents.timeout_hint = Some(token_timeout_hint(permission));
+                }
                 match tokens::ensure(&context.config_path, &token_context, id, permission).await {
                     Ok(prepared) => {
                         registered.state = if prepared.verified {
@@ -1440,6 +1553,16 @@ fn combine_registration_outcome(
         _ => NotApplied,
     }
 }
+/// The binding may already be saved and token verification can update local
+/// state, so an interrupted token phase never reports `not_applied`.
+fn token_timeout_hint(issuance_allowed: bool) -> ErrorCode {
+    if issuance_allowed {
+        ErrorCode::TokenRequired
+    } else {
+        ErrorCode::Timeout
+    }
+}
+
 fn registration_outcome(outcome: registration::Mutation) -> Outcome {
     match outcome {
         registration::Mutation::NotApplied => Outcome::NotApplied,
@@ -1451,6 +1574,55 @@ fn registration_outcome(outcome: registration::Mutation) -> Outcome {
 impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
     SetupStages<I, T, U, A, M>
 {
+    async fn preflight_batch(&mut self, context: &SetupContext) -> Result<(), Box<SetupError>> {
+        let (Some(batch), Some(tool)) = (&self.auth.batch, self.tools.requested) else {
+            return Err(super::batch::invalid());
+        };
+        let login = batch.login;
+        let server = batch.server_url.clone();
+        let path = context.config_path.clone();
+        tokio::task::spawn_blocking(move || {
+            setup_config::preflight_server(&path, server.as_deref())
+        })
+        .await
+        .map_err(|_| {
+            Box::new(SetupError::new(
+                ErrorCode::InternalError,
+                Step::Validate,
+                Outcome::NotApplied,
+            ))
+        })?
+        .map_err(|error| Box::new(config_error(error)))?;
+        let report = self.tools.search.detect_one(tool, None, None).await;
+        let Some(host) = report.selected.clone() else {
+            let mut error = SetupError::new(
+                ErrorCode::ToolUnavailable,
+                Step::Validate,
+                Outcome::NotApplied,
+            );
+            error.tools = vec![report];
+            return Err(Box::new(error));
+        };
+        self.preflight_mcp(context, Step::Validate, tool, Some(host.clone()))
+            .await?;
+        self.tools.batch_candidate = Some(host);
+        if login {
+            self.auth.credentials =
+                Some(self.input.request().await.map_err(|error| match error {
+                    LoginInputError::Cancelled | LoginInputError::Unavailable => {
+                        super::batch::missing(["password"])
+                    }
+                    LoginInputError::Invalid => super::batch::invalid(),
+                    LoginInputError::ReadFailed => Box::new(SetupError::new(
+                        ErrorCode::InternalError,
+                        Step::Validate,
+                        Outcome::NotApplied,
+                    )),
+                })?);
+        }
+        Ok(())
+    }
+
     async fn preflight_mcp(
         &mut self,
         context: &SetupContext,
@@ -1778,6 +1950,20 @@ mod tests {
         }
         async fn request(&mut self, _: &[TeamChoice]) -> Result<u64, TeamInputError> {
             Err(TeamInputError::ReadFailed)
+        }
+    }
+
+    #[test]
+    fn batch_token_phase_timeout_never_reports_an_unchanged_registration() {
+        for (issuance_allowed, code) in [
+            (false, ErrorCode::Timeout),
+            (true, ErrorCode::TokenRequired),
+        ] {
+            let mut stages = SetupStages::default().with_batch(None, false);
+            stages.agents.timeout_hint = Some(token_timeout_hint(issuance_allowed));
+            let error = stages.timed_out(Step::RegisterAgent);
+            assert_eq!(error.code, code);
+            assert_eq!(error.outcome, Outcome::Unknown);
         }
     }
 
