@@ -593,14 +593,7 @@ pub async fn login_for_setup(
     password: &str,
     expected_origin: &str,
 ) -> Result<LoginResult> {
-    let mut client = UserClient::load(config_path)?;
-    require_setup_origin(&client, expected_origin)?;
-    if client.local_problem.is_some() {
-        return Err(fault(
-            AuthFaultKind::SessionConflict,
-            "The local session changed; inspect it before signing in",
-        ));
-    }
+    let mut client = setup_login_client(config_path, expected_origin)?;
     let mut expired_now = false;
     if matches!(client.snapshot.state, SessionState::Authenticated { .. }) {
         match client.verify_session().await {
@@ -628,6 +621,30 @@ pub async fn login_for_setup(
                 error
             }
         })
+}
+
+/// An explicit batch login always authenticates the supplied account.
+pub async fn login_for_setup_explicit(
+    config_path: &Path,
+    email: &str,
+    password: &str,
+    expected_origin: &str,
+) -> Result<User> {
+    validate_login_input(email, password)?;
+    let client = setup_login_client(config_path, expected_origin)?;
+    login_with_client(client, config_path, email, password).await
+}
+
+fn setup_login_client(config_path: &Path, expected_origin: &str) -> Result<UserClient> {
+    let client = UserClient::load(config_path)?;
+    require_setup_origin(&client, expected_origin)?;
+    if client.local_problem.is_some() {
+        return Err(fault(
+            AuthFaultKind::SessionConflict,
+            "The local session changed; inspect it before signing in",
+        ));
+    }
+    Ok(client)
 }
 
 async fn login_with_client(
@@ -661,6 +678,12 @@ async fn login_with_client(
         }
         crate::agent_profile::before_login_publish(config_path, verified.user_id)?;
         client.csrf().await?; // Login rotates the session and the CSRF token.
+        if config_origin(config_path)? != client.origin {
+            return Err(fault(
+                AuthFaultKind::SessionConflict,
+                "The configured server changed during sign-in",
+            ));
+        }
         client.snapshot = Snapshot {
             schema_version: 1,
             origin: client.origin.to_string(),

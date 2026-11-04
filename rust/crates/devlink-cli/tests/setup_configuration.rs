@@ -54,6 +54,27 @@ fn assert_failure(path: &Path, code: &str, exit: i32, field: Option<&str>) -> Va
 }
 
 #[test]
+fn explicit_batch_server_initializes_a_new_profile_and_preserves_an_existing_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("profile/config.json");
+    let server = "wss://central.example.test/ws/broker";
+    setup_config::preflight_server(&path, Some(server)).unwrap();
+    assert!(!path.parent().unwrap().exists());
+    let prepared = setup_config::prepare_with_server(&path, Some(server)).unwrap();
+    assert!(prepared.created);
+    assert_eq!(Config::load(&path).unwrap().server_url, server);
+    let original = fs::read(&path).unwrap();
+    let reused =
+        setup_config::prepare_with_server(&path, Some("wss://central.example.test")).unwrap();
+    assert!(!reused.created);
+    assert_eq!(reused.config.server_url, server);
+    let conflict =
+        setup_config::preflight_server(&path, Some("wss://other.example.test")).unwrap_err();
+    assert_eq!(conflict.kind, setup_config::FailureKind::ServerConflict);
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
 fn fresh_setup_creates_private_defaults_and_preserves_them_on_second_run() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("프로필 with spaces/config.json");

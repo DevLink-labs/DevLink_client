@@ -116,6 +116,16 @@ impl ToolSearch {
         vec![codex, claude]
     }
 
+    /// Recheck the validated launcher form without discovering a replacement.
+    pub async fn recheck_saved(&self, saved: &SelectedTool) -> ToolDetection {
+        Self {
+            directories: Vec::new(),
+            timeout: self.timeout,
+        }
+        .detect_one(saved.tool_type, Some(saved), None)
+        .await
+    }
+
     /// Probe one tool only. A caller that already knows which tool it needs
     /// (explicit, bound, or chosen) must not pay for the other host's probe.
     pub async fn detect_one(

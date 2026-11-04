@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06·07·08·09·10·11·12. 2026-11-04 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·토큰 준비·공통 브로커 제어·MCP 설정 통합을 구현했다.
+작업 02·03·04·05·06·07·08·09·10·11·12·13. 2026-11-04 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·토큰 준비·공통 브로커 제어·MCP 설정 통합을 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -34,7 +34,7 @@ devlink setup --mcp-mode manual
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--input`과 `--non-interactive`는 후속 범위다.
+현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--non-interactive --input <FILE>`로 v1 입력 파일을 사용한 비대화형 실행을 제공한다.
 
 기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤 verify_connection에서 브로커·중앙·Agent 신원·자격·MCP 설정을 확인한다. 검증 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
@@ -698,3 +698,17 @@ devlink --config C:\work\profile\config.json setup status --output jsonl
 이전 빌드에서 시작되어 `/v1/setup-connection`이 없는 브로커는 `broker=unhealthy`로 표시한다. setup에서는 SETUP_BROKER_START_FAILED와 `inspect_local_broker`로 중단하므로 해당 브로커를 중지한 뒤 다시 실행한다. MCP 적용으로 Host 재시작이 필요하면 일반 `open_or_restart_host` 안내만 재시작 안내로 바꾸고 `inspect_connection_owner` 같은 연결 안내는 유지한다.
 
 `setup status`는 동일한 판정을 한 번 조회하고 JSON/JSONL에는 단계가 없는 최종 결과 한 건을 출력한다. 조회 성공은 준비 여부에 관계없이 종료 0이다. 임시 파일과 잠금 파일을 만들지 않고 브로커나 Host를 실행하지 않는다. MCP 런타임을 직접 지정해 설정했다면 같은 `--node-path` 및 `--mcp-entry`를 상태 조회에도 전달할 수 있다.
+
+## 작업 13 (S15P31D108-114): 비대화형 입력
+
+```powershell
+devlink setup --non-interactive --input .\setup-v1.json --output jsonl
+```
+
+[입력 파일 규격과 예시](../../contracts/setup/v1/README.md#공통-입력)를 따른다. Windows PowerShell 5.1의 `Set-Content -Encoding utf8`처럼 파일 앞에 붙는 UTF-8 BOM 하나는 허용한다. 선택값은 파일에 명시하며 JSON의 필수 항목 누락은 validate에서 한꺼번에 반환한다. 기존 대화형 선택 플래그는 입력 파일과 함께 사용할 수 없다. 실행 환경에 따라 MCP 런타임의 `--node-path`와 `--mcp-entry`를 지정할 수 있다.
+
+`user.mode=session`은 저장된 세션을 확인한다. `user.mode=login`은 `--password-stdin`으로 비밀번호 한 줄을 받아 새로 로그인한다. `serverUrl`은 새 프로필의 서버 주소로 사용하며, 이미 설정된 프로필에서는 같은 origin인지 확인한다. 다른 서버를 대상으로 할 때는 해당 서버용 `--config`를 선택한다.
+
+인증과 팀 확인 후 같은 서버·사용자·팀·프로젝트에 저장된 `tool.type`의 Host를 재검사한다. PATH 밖의 경로도 유효하면 재사용한다. 해당 선택이 없을 때만 PATH와 기본 설치 디렉터리를 탐색한다. 저장된 Host를 사용할 수 없으면 `SETUP_TOOL_UNAVAILABLE`과 복구 안내를 반환한다. 설치를 복구하거나 대화형 `setup --tool <TYPE> --tool-path <FILE>`로 교체 경로를 명시한다. Agent 생성·토큰 발급 전에 선택한 Host와 MCP 설정을 확인한다.
+
+`timeoutMs`는 입력 읽기와 검증부터 최종 결과까지 적용된다. 기본값은 60초다. 제한시간이 지나면 이후 단계는 건너뛰고 이미 완료한 단계와 확인한 Agent ID를 결과에 남긴다. Agent 확인 뒤 토큰 단계에서 중단되면 바인딩 저장 여부를 단정하지 않고 register_agent를 `outcome:unknown`으로 표시한다. 결과가 불확실한 등록이나 토큰 발급은 자동으로 다시 요청하지 않는다.

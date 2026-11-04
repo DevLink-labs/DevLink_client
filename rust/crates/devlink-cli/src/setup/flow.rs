@@ -1,5 +1,6 @@
 use super::model::*;
 use std::future::Future;
+use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
 /// Stage adapters retain their typed input/state. Terminal I/O belongs to the caller.
@@ -28,6 +29,10 @@ pub trait StepExecutor {
 
     /// Called only after every stage, including connection verification, succeeds.
     fn finish(self) -> Self::Data;
+
+    fn timed_out(&self, step: Step) -> SetupError {
+        SetupError::new(ErrorCode::Timeout, step, Outcome::Unknown)
+    }
 }
 
 /// A progress consumer has disconnected. Stop before performing another operation.
@@ -38,12 +43,14 @@ pub struct ProgressUnavailable;
 /// No stdin/stdout, sleeps for user input, subprocesses, or implicit mutation retries.
 pub async fn run<E: StepExecutor>(
     context: &SetupContext,
-    mut executor: E,
-    mut observe: impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
+    executor: E,
+    observe: impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
 ) -> RunResult<E::Data> {
-    let run_id = Uuid::new_v4().to_string();
-    let mut sequence = 0;
-    let mut stages: Vec<_> = Step::ALL
+    run_until(context, executor, observe, None).await
+}
+
+fn initial_stages() -> Vec<Stage> {
+    Step::ALL
         .iter()
         .map(|&step| Stage {
             step,
@@ -51,7 +58,33 @@ pub async fn run<E: StepExecutor>(
             outcome: Outcome::NotApplied,
             reused: false,
         })
-        .collect();
+        .collect()
+}
+
+pub(super) fn reject<D>(
+    error: SetupError,
+    mut observe: impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
+) -> RunResult<D> {
+    let run_id = Uuid::new_v4().to_string();
+    let mut sequence = 0;
+    let mut stages = initial_stages();
+    let validate = &mut stages[0];
+    validate.status = StageStatus::Running;
+    let _ = emit(&run_id, &mut sequence, validate, &mut observe);
+    validate.status = StageStatus::Failed;
+    let _ = emit(&run_id, &mut sequence, validate, &mut observe);
+    failure(run_id, sequence, stages, 0, error)
+}
+
+pub(super) async fn run_until<E: StepExecutor>(
+    context: &SetupContext,
+    mut executor: E,
+    mut observe: impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
+    deadline: Option<Instant>,
+) -> RunResult<E::Data> {
+    let run_id = Uuid::new_v4().to_string();
+    let mut sequence = 0;
+    let mut stages = initial_stages();
 
     for index in 0..stages.len() {
         let step = stages[index].step;
@@ -68,7 +101,22 @@ pub async fn run<E: StepExecutor>(
 
         let mut input_resolved = false;
         let error = loop {
-            match executor.execute(step, context).await {
+            let result = match deadline {
+                Some(deadline) if Instant::now() >= deadline => {
+                    let error = executor.timed_out(step);
+                    let mut timeout =
+                        SetupError::new(ErrorCode::Timeout, step, stages[index].outcome);
+                    timeout.known = error.known;
+                    StepResult::Failed(timeout)
+                }
+                Some(deadline) => match timeout_at(deadline, executor.execute(step, context)).await
+                {
+                    Ok(result) => result,
+                    Err(_) => StepResult::Failed(executor.timed_out(step)),
+                },
+                None => executor.execute(step, context).await,
+            };
+            match result {
                 StepResult::InputRequired(mut required) => {
                     required.step = step;
                     required.outcome = combine(stages[index].outcome, required.outcome);
@@ -98,7 +146,16 @@ pub async fn run<E: StepExecutor>(
                             ));
                         }
                     }
-                    if let Err(mut error) = executor.resolve_input(&required).await {
+                    let resolved = match deadline {
+                        Some(deadline) => {
+                            match timeout_at(deadline, executor.resolve_input(&required)).await {
+                                Ok(result) => result,
+                                Err(_) => Err(executor.timed_out(step)),
+                            }
+                        }
+                        None => executor.resolve_input(&required).await,
+                    };
+                    if let Err(mut error) = resolved {
                         error.step = step;
                         error.outcome = combine(stages[index].outcome, error.outcome);
                         stages[index].status = StageStatus::Failed;
@@ -275,5 +332,67 @@ fn combine(previous: Outcome, current: Outcome) -> Outcome {
         Outcome::Applied
     } else {
         Outcome::NotApplied
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, future::pending, time::Duration};
+
+    struct Stalled<'a>(&'a Cell<usize>);
+
+    impl StepExecutor for Stalled<'_> {
+        type Data = ();
+
+        fn execute(
+            &mut self,
+            step: Step,
+            _: &SetupContext,
+        ) -> impl Future<Output = StepResult> + Send {
+            self.0.set(self.0.get() + 1);
+            async move {
+                if step == Step::RegisterAgent {
+                    pending().await
+                } else {
+                    StepResult::Complete {
+                        outcome: Outcome::Applied,
+                        reused: false,
+                    }
+                }
+            }
+        }
+
+        fn timed_out(&self, step: Step) -> SetupError {
+            let mut error = SetupError::new(ErrorCode::TokenRequired, step, Outcome::Unknown);
+            error.known.agent_id = Some("201".into());
+            error
+        }
+
+        fn finish(self) {}
+    }
+
+    #[tokio::test]
+    async fn deadline_preserves_the_known_agent_and_stops_following_stages() {
+        let calls = Cell::new(0);
+        let context = SetupContext {
+            config_path: "unused".into(),
+        };
+        let result = run_until(
+            &context,
+            Stalled(&calls),
+            |_| Ok(()),
+            Some(Instant::now() + Duration::from_millis(100)),
+        )
+        .await;
+        let Completion::Failure { error } = result.completion else {
+            panic!("expected deadline failure")
+        };
+        assert_eq!(error.code, ErrorCode::TokenRequired);
+        assert_eq!(error.known.agent_id.as_deref(), Some("201"));
+        assert_eq!(result.stages[0].outcome, Outcome::Applied);
+        assert_eq!(result.stages[5].outcome, Outcome::Unknown);
+        assert_eq!(result.stages[6].status, StageStatus::Skipped);
+        assert_eq!(calls.get(), 6);
     }
 }
