@@ -65,7 +65,10 @@ pub fn path(config_path: &Path) -> PathBuf {
     config::state_directory(config_path).join("selected-tool.json")
 }
 
-fn inspect(config_path: &Path, binding: &SelectionBinding) -> Result<SelectionSnapshot, Failure> {
+pub(crate) fn inspect(
+    config_path: &Path,
+    binding: &SelectionBinding,
+) -> Result<SelectionSnapshot, Failure> {
     let storage = |file| failure(FailureKind::Storage, file);
     if !binding.project_root.is_absolute()
         || binding.project_root.canonicalize().ok().as_ref() != Some(&binding.project_root)

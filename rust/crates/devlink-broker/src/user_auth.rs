@@ -418,6 +418,15 @@ impl UserClient {
         self.exchange(Method::GET, path, None, None).await
     }
 
+    pub(crate) async fn get_with_query<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        self.exchange_with_query(Method::GET, path, None, None, query)
+            .await
+    }
+
     pub async fn post<T: DeserializeOwned>(&mut self, path: &str, body: Value) -> Result<T> {
         let prepared = self.prepare_post().await?;
         self.post_prepared(path, body, prepared).await
@@ -444,6 +453,18 @@ impl UserClient {
         body: Option<Value>,
         csrf: Option<Csrf>,
     ) -> Result<T> {
+        self.exchange_with_query(method, path, body, csrf, &[])
+            .await
+    }
+
+    async fn exchange_with_query<T: DeserializeOwned>(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        csrf: Option<Csrf>,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
         ensure!(
             path.starts_with("/api/v1/")
                 && !path.contains(['?', '#', '\\'])
@@ -452,6 +473,9 @@ impl UserClient {
         );
         let mut url = self.origin.clone();
         url.set_path(path);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
         let mut request = self.client.request(method, url);
         if let Some(body) = body {
             request = request.json(&body);
@@ -529,6 +553,7 @@ fn rejection(status: u16, code: Option<&str>) -> anyhow::Error {
         Some("VALIDATION_FAILED") => "VALIDATION_FAILED",
         Some("ACCESS_DENIED") => "ACCESS_DENIED",
         Some("RESOURCE_NOT_FOUND") => "RESOURCE_NOT_FOUND",
+        Some("AGENT_ALREADY_EXISTS") if status == 409 => "AGENT_ALREADY_EXISTS",
         _ => match status {
             401 => "AUTHENTICATION_REQUIRED",
             403 => "ACCESS_DENIED",

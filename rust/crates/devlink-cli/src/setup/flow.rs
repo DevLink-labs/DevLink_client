@@ -86,9 +86,7 @@ pub async fn run<E: StepExecutor>(
                             &run_id,
                             &mut sequence,
                             &stages[index],
-                            &required.required_inputs,
-                            &required.team_choices,
-                            &required.tools,
+                            Some(&required),
                             &mut observe,
                         )
                         .is_err()
@@ -195,16 +193,14 @@ fn emit(
     stage: &Stage,
     observe: &mut impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
 ) -> Result<(), ProgressUnavailable> {
-    emit_with_inputs(run_id, sequence, stage, &[], &[], &[], observe)
+    emit_with_inputs(run_id, sequence, stage, None, observe)
 }
 
 fn emit_with_inputs(
     run_id: &str,
     sequence: &mut u64,
     stage: &Stage,
-    required_inputs: &[RequiredInput],
-    team_choices: &[TeamChoice],
-    tools: &[devlink_broker::tool_discovery::ToolDetection],
+    inputs: Option<&SetupError>,
     observe: &mut impl FnMut(&ProgressEvent) -> Result<(), ProgressUnavailable>,
 ) -> Result<(), ProgressUnavailable> {
     *sequence += 1;
@@ -221,9 +217,16 @@ fn emit_with_inputs(
         step: stage.step,
         step_status: stage.status,
         outcome: stage.outcome,
-        required_inputs: required_inputs.to_vec(),
-        team_choices: team_choices.to_vec(),
-        tools: tools.to_vec(),
+        required_inputs: inputs
+            .map(|error| error.required_inputs.clone())
+            .unwrap_or_default(),
+        team_choices: inputs
+            .map(|error| error.team_choices.clone())
+            .unwrap_or_default(),
+        agent_choices: inputs
+            .map(|error| error.agent_choices.clone())
+            .unwrap_or_default(),
+        tools: inputs.map(|error| error.tools.clone()).unwrap_or_default(),
     })
 }
 

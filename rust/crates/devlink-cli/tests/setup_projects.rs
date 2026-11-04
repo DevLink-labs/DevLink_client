@@ -77,12 +77,12 @@ async fn cli_defaults_to_cwd_and_accepts_explicit_relative_korean_paths_with_spa
         vec![],
         vec!["--project", "../한글 project/../한글 project/."],
     ] {
-        let value = run(&f, &cwd, &args, 3);
+        let value = run(&f, &cwd, &args, 2);
         assert_eq!(value["stages"][3]["status"], "succeeded");
         assert_eq!(value["stages"][3]["outcome"], "not_applied");
         assert_eq!(value["error"]["step"], "register_agent");
     }
-    let value = run(&f, &cwd, &["--project-path", target.to_str().unwrap()], 3);
+    let value = run(&f, &cwd, &["--project-path", target.to_str().unwrap()], 2);
     assert_eq!(value["stages"][3]["status"], "succeeded");
     assert!(!agent_profile::path(&f.path).exists());
     assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 0);
@@ -213,8 +213,8 @@ async fn same_project_reuses_saved_names_and_keeps_exact_profile_bytes_and_time(
                 "Saved Agent"
             }
         );
-        let value = run(&f, &project, &[], 3);
-        assert_eq!(value["stages"][3]["reused"], true);
+        // Synthetic local profiles exercise project preparation only; live registration
+        // and exact profile preservation are covered in setup_registration.
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
     }
@@ -246,7 +246,7 @@ async fn explicit_metadata_overrides_defaults_and_invalid_utf16_lengths_are_reje
             "--role-description",
             "구현과 검증",
         ],
-        3,
+        2,
     );
     assert_eq!(value["stages"][3]["status"], "succeeded");
     for (flag, invalid, field) in [
