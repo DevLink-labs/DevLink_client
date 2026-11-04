@@ -137,42 +137,92 @@ impl Feed {
         }
     }
 
-    pub(crate) fn page(&self, cursor: Option<&Cursor>, limit: usize) -> Value {
+    /// Next entries after `cursor`: remaining received tasks first, then sent-task events.
+    pub(crate) fn take(&self, cursor: Option<&Cursor>, limit: usize) -> Batch<'_> {
         let (mut at, reset) = self.resolve(cursor);
-        let mut updates = Vec::with_capacity(limit);
+        let mut updates = Vec::with_capacity(limit.min(self.received.len() + self.sent.len()));
         for message in self.received[at.received..].iter().take(limit) {
-            updates.push(json!({
-                "eventId": message.event_id,
-                "kind": "TASK_CREATED",
-                "direction": "received",
-                "taskId": message.payload.task_id.to_string(),
-                "requesterAgentId": message.payload.requester_agent_id.to_string(),
-            }));
+            updates.push(Update::Received(message));
             at.received += 1;
         }
         for event in self.sent[at.sent..].iter().take(limit - updates.len()) {
-            let kind = match event {
-                TaskNotification::TaskStatusChanged { .. } => "TASK_STATUS_CHANGED",
-                TaskNotification::TaskCompleted { .. } => "TASK_COMPLETED",
-            };
-            updates.push(json!({
-                "eventId": event.event_id(),
-                "kind": kind,
-                "direction": "sent",
-                "taskId": event.task_id().to_string(),
-                "taskVersion": event.version().to_string(),
-                "status": event.status(),
-            }));
+            updates.push(Update::Sent(event));
             at.sent += 1;
         }
+        Batch {
+            updates,
+            next: self.cursor(at),
+            has_more: at.received < self.received.len() || at.sent < self.sent.len(),
+            reset,
+        }
+    }
+
+    /// Highest retained version of a sent task (later entry wins a tie). Notifications keep
+    /// late lower versions in history, so the newest batch alone can be stale.
+    pub(crate) fn latest_sent(&self, task_id: u64) -> Option<&TaskNotification> {
+        self.sent
+            .iter()
+            .filter(|event| event.task_id() == task_id)
+            .reduce(|best, event| {
+                if event.version() >= best.version() {
+                    event
+                } else {
+                    best
+                }
+            })
+    }
+
+    /// Every retained entry; both stores are bounded, so one batch drains the feed.
+    pub(crate) fn len(&self) -> usize {
+        self.received.len() + self.sent.len()
+    }
+
+    pub(crate) fn page(&self, cursor: Option<&Cursor>, limit: usize) -> Value {
+        let batch = self.take(cursor, limit);
+        let updates: Vec<Value> = batch
+            .updates
+            .iter()
+            .map(|update| match update {
+                Update::Received(message) => json!({
+                    "eventId": message.event_id,
+                    "kind": "TASK_CREATED",
+                    "direction": "received",
+                    "taskId": message.payload.task_id.to_string(),
+                    "requesterAgentId": message.payload.requester_agent_id.to_string(),
+                }),
+                Update::Sent(event) => json!({
+                    "eventId": event.event_id(),
+                    "kind": match event {
+                        TaskNotification::TaskStatusChanged { .. } => "TASK_STATUS_CHANGED",
+                        TaskNotification::TaskCompleted { .. } => "TASK_COMPLETED",
+                    },
+                    "direction": "sent",
+                    "taskId": event.task_id().to_string(),
+                    "taskVersion": event.version().to_string(),
+                    "status": event.status(),
+                }),
+            })
+            .collect();
         json!({
             "updates": updates,
-            "nextCursor": self.cursor(at),
-            "hasMore": at.received < self.received.len() || at.sent < self.sent.len(),
-            "cursorReset": reset,
+            "nextCursor": batch.next,
+            "hasMore": batch.has_more,
+            "cursorReset": batch.reset,
             "coverage": "local",
         })
     }
+}
+
+pub(crate) enum Update<'a> {
+    Received(&'a TaskCreatedMessage),
+    Sent(&'a TaskNotification),
+}
+
+pub(crate) struct Batch<'a> {
+    pub(crate) updates: Vec<Update<'a>>,
+    pub(crate) next: String,
+    pub(crate) has_more: bool,
+    pub(crate) reset: bool,
 }
 
 /// A syntactically valid cursor; whether it still matches the stores is decided by Feed.

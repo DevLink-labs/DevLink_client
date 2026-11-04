@@ -29,5 +29,6 @@ pub mod task_requests;
 pub mod task_routes;
 pub mod teams;
 pub mod tool_discovery;
+pub mod update_hook;
 pub mod updates;
 pub mod user_auth;
