@@ -95,6 +95,16 @@ pub enum Commands {
         #[arg(long)]
         clear: bool,
     },
+    /// Host hook helper: print new local task updates as hook context JSON.
+    /// Reads local stores only, never stdin; always exits 0 so it cannot block a prompt.
+    UpdatesHook {
+        /// codex | claude-code (each keeps its own cursor)
+        #[arg(long)]
+        host: String,
+        /// session-start | user-prompt-submit
+        #[arg(long)]
+        event: String,
+    },
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
     Broker,
@@ -225,6 +235,39 @@ fn print_json(value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Host hooks treat a non-zero exit as an error (exit 2 blocks the prompt), so every
+/// outcome here exits 0. Silence means nothing new; failures are reported only at
+/// session start to avoid repeating the same notice on every prompt.
+fn updates_hook(config_path: Option<PathBuf>, host: &str, event: &str) {
+    let event = match event {
+        "session-start" => "SessionStart",
+        "user-prompt-submit" => "UserPromptSubmit",
+        _ => {
+            eprintln!("devlink updates-hook: --event must be session-start or user-prompt-submit");
+            return;
+        }
+    };
+    if !matches!(host, "codex" | "claude-code") {
+        eprintln!("devlink updates-hook: --host must be codex or claude-code");
+        return;
+    }
+    let result = config::config_path(config_path).and_then(|path| {
+        let cwd = std::env::current_dir().context("Cannot read the working directory")?;
+        devlink_broker::update_hook::digest(&path, host, &cwd)
+    });
+    let context = match result {
+        Ok(Some(digest)) => digest,
+        Ok(None) => return,
+        Err(error) if event == "SessionStart" => format!(
+            "DevLink could not check local task updates ({error}). Use DevLink get_updates or get_tasks if task status matters."
+        ),
+        Err(_) => return,
+    };
+    let _ = print_json(&serde_json::json!({
+        "hookSpecificOutput": {"hookEventName": event, "additionalContext": context}
+    }));
+}
+
 fn password_input(from_stdin: bool) -> Result<String> {
     secret_input("Password", 72, from_stdin)
 }
@@ -235,8 +278,14 @@ fn secret_input(label: &str, limit: usize, from_stdin: bool) -> Result<String> {
 
 /// CLI 진입점: 파싱된 CLI 명령어에 따라 적절한 로직을 라우팅하여 실행합니다.
 pub async fn run(cli: Cli) -> Result<()> {
+    if let Commands::UpdatesHook { host, event } = &cli.command {
+        updates_hook(cli.config.clone(), host, event);
+        return Ok(());
+    }
     let path = config::config_path(cli.config)?;
     match cli.command {
+        // Handled before config path resolution so it can never exit non-zero.
+        Commands::UpdatesHook { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, args).await?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
