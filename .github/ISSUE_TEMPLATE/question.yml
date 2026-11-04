@@ -1,0 +1,19 @@
+name: "❓ 질문"
+description: "질문이나 논의가 필요한 사항을 작성합니다."
+title: "[Question] "
+labels: ["question"]
+
+body:
+  - type: textarea
+    id: question-description
+    attributes:
+      label: "질문 내용"
+      value: |
+        -
+
+  - type: textarea
+    id: references
+    attributes:
+      label: "참고 사항"
+      value: |
+        -

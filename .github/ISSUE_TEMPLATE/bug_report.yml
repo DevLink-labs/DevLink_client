@@ -1,0 +1,29 @@
+name: "🐛 버그 수정"
+description: "발생한 버그를 수정합니다."
+title: "[fix] "
+labels: ["bug"]
+
+body:
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: "버그 내용"
+      value: |
+        -
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: "재현 방법"
+      value: |
+        1.
+        2.
+
+  - type: textarea
+    id: task-list
+    attributes:
+      label: "작업 목록"
+      value: |
+        - [ ] 원인 파악
+        - [ ] 버그 수정
+        - [ ] 정상 동작 확인

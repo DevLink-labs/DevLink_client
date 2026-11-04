@@ -1,0 +1,20 @@
+name: "📝 문서 작업"
+description: "문서를 작성하거나 수정합니다."
+title: "[Docs] "
+labels: ["documentation"]
+
+body:
+  - type: textarea
+    id: work-description
+    attributes:
+      label: "작업 내용"
+      value: |
+        -
+
+  - type: textarea
+    id: task-list
+    attributes:
+      label: "작업 목록"
+      value: |
+        - [ ]
+        - [ ]
