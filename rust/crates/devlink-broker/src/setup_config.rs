@@ -95,19 +95,16 @@ pub fn prepare_with_server(
     prepare_profile(path, server_url)
 }
 
-/// Prepare the profile and reserve it for this setup run. This lock is always
-/// taken before control/broker locks and is used only by setup orchestration.
-pub fn prepare_for_run(
-    path: &Path,
-    server_url: Option<&str>,
-) -> Result<(PreparedConfig, fs::File), Failure> {
+/// Reserve the profile for one setup run without creating its config file.
+/// Callers take this before reading any input, so a busy profile is reported
+/// immediately. It is always taken before control/broker locks and is used only
+/// by setup orchestration; prepare the profile with `prepare_with_server` after.
+pub fn reserve_run(path: &Path) -> Result<fs::File, Failure> {
     prepare_directory(path)?;
     let lock_path = config::state_directory(path).join("setup.lock");
-    let lock = config::try_lock(&lock_path)
+    config::try_lock(&lock_path)
         .map_err(|_| Failure::new(FailureKind::UnsafeFile, &lock_path))?
-        .ok_or_else(|| Failure::new(FailureKind::ConfigBusy, &lock_path))?;
-    let prepared = prepare_profile(path, server_url)?;
-    Ok((prepared, lock))
+        .ok_or_else(|| Failure::new(FailureKind::ConfigBusy, &lock_path))
 }
 
 fn prepare_directory(path: &Path) -> Result<(), Failure> {

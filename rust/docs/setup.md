@@ -723,6 +723,6 @@ devlink setup --non-interactive --input .\setup-v1.json --output jsonl
 
 ## 작업 15 (S15P31D108-118) 동시 실행
 
-`setup`은 프로필을 준비할 때 `.devlink-runtime/setup.lock`의 OS 잠금을 획득한다. 같은 설정 디렉터리를 공유하는 실행은 `--config`의 파일명이 달라도 같은 잠금을 사용한다. 후행 실행은 `validate`에서 `SETUP_CONFIG_BUSY`(종료 6)를 반환한다. 다른 프로필과 `devlink setup status`는 계속 사용할 수 있다.
+`setup`은 프로필을 준비할 때 `.devlink-runtime/setup.lock`의 OS 잠금을 획득한다. 같은 설정 디렉터리를 공유하는 실행은 `--config`의 파일명이 달라도 같은 잠금을 사용한다. 후행 실행은 `validate`에서 `SETUP_CONFIG_BUSY`(종료 6)를 반환한다. 잠금은 읽기 전용 사전 검사 직후, 비대화형 `--password-stdin` 비밀번호를 읽거나 설정 파일을 만들기 전에 획득하므로 후행 실행이 비밀번호를 기다리지 않는다. 다른 프로필과 `devlink setup status`는 계속 사용할 수 있다.
 
 선행 실행은 사용자 입력 대기부터 최종 검증까지 잠금을 유지한다. 종료하거나 강제 종료하면 OS가 잠금을 해제하며, 파일은 다음 실행을 위해 남는다. 이후 `setup`을 다시 실행하면 저장된 Agent·토큰 상태를 확인하고 필요한 단계부터 진행한다. 기존 계정·제어·브로커 잠금과 MCP 설정 충돌 검사는 각 변경 지점에서 계속 적용된다.

@@ -1630,6 +1630,26 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 return StepResult::Failed(*error);
             }
         }
+        // Reserve the profile before waiting on any input: a concurrent run must
+        // see SETUP_CONFIG_BUSY at once, not after a password has been supplied.
+        if coordinated && self.setup_lock.is_none() {
+            let path = context.config_path.clone();
+            let _write = LocalWrite::begin(&self.local_write);
+            match tokio::task::spawn_blocking(move || setup_config::reserve_run(&path)).await {
+                Ok(Ok(lock)) => self.setup_lock = Some(lock),
+                Ok(Err(failure)) => return StepResult::Failed(config_error(failure)),
+                Err(_) => {
+                    return StepResult::Failed(SetupError::new(
+                        ErrorCode::InternalError,
+                        step,
+                        Outcome::Unknown,
+                    ));
+                }
+            }
+        }
+        if let Err(error) = self.read_batch_password().await {
+            return StepResult::Failed(*error);
+        }
         let path = context.config_path.clone();
         let server_url = self
             .auth
@@ -1638,20 +1658,13 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             .and_then(|batch| batch.server_url.clone());
         let _write = LocalWrite::begin(&self.local_write);
         match tokio::task::spawn_blocking(move || {
-            if coordinated {
-                setup_config::prepare_for_run(&path, server_url.as_deref())
-                    .map(|(prepared, lock)| (prepared, Some(lock)))
-            } else {
-                setup_config::prepare_with_server(&path, server_url.as_deref())
-                    .map(|prepared| (prepared, None))
-            }
+            setup_config::prepare_with_server(&path, server_url.as_deref())
         })
         .await
         {
-            Ok(Ok((prepared, lock))) => {
+            Ok(Ok(prepared)) => {
                 let created = prepared.created;
                 self.prepared = Some(prepared);
-                self.setup_lock = lock;
                 StepResult::Complete {
                     outcome: if created {
                         Outcome::Applied
@@ -1674,7 +1687,6 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
         let (Some(batch), Some(tool)) = (&self.auth.batch, self.tools.requested) else {
             return Err(super::batch::invalid());
         };
-        let login = batch.login;
         let server = batch.server_url.clone();
         let path = context.config_path.clone();
         tokio::task::spawn_blocking(move || {
@@ -1709,20 +1721,26 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 .await?;
             self.tools.batch_candidate = Some(host);
         }
-        if login {
-            self.auth.credentials =
-                Some(self.input.request().await.map_err(|error| match error {
-                    LoginInputError::Cancelled | LoginInputError::Unavailable => {
-                        super::batch::missing(["password"])
-                    }
-                    LoginInputError::Invalid => super::batch::invalid(),
-                    LoginInputError::ReadFailed => Box::new(SetupError::new(
-                        ErrorCode::InternalError,
-                        Step::Validate,
-                        Outcome::NotApplied,
-                    )),
-                })?);
+        Ok(())
+    }
+
+    /// Read an unattended login password only after every local check and the
+    /// profile reservation, so neither a conflict nor a busy profile waits on stdin.
+    async fn read_batch_password(&mut self) -> Result<(), Box<SetupError>> {
+        if !self.auth.batch.as_ref().is_some_and(|batch| batch.login) {
+            return Ok(());
         }
+        self.auth.credentials = Some(self.input.request().await.map_err(|error| match error {
+            LoginInputError::Cancelled | LoginInputError::Unavailable => {
+                super::batch::missing(["password"])
+            }
+            LoginInputError::Invalid => super::batch::invalid(),
+            LoginInputError::ReadFailed => Box::new(SetupError::new(
+                ErrorCode::InternalError,
+                Step::Validate,
+                Outcome::NotApplied,
+            )),
+        })?);
         Ok(())
     }
 
