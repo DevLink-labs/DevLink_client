@@ -119,7 +119,7 @@ running → waiting_input → running           (대화형만)
 pending → skipped                          (선행 실패/취소)
 ```
 
-run 상태는 `running | waiting_input | succeeded | action_required | failed | cancelled`다. 입력 대기 중 Ctrl+C는 cancelled다. 대화형 선택 거절/입력 EOF도 cancelled로 종료한다. 실행 중 오류는 현재 단계를 failed, 이후 단계를 skipped로 기록한다. manual 모드는 configure_mcp를 waiting_input으로 남기지 않고 failed(SETUP_MANUAL_ACTION_REQUIRED)로 마무리하며 run은 action_required다.
+run 상태는 `running | waiting_input | succeeded | action_required | failed | cancelled`다. 실행 중이거나 입력 대기 중 Ctrl+C를 받으면 현재 단계와 run을 cancelled로, 이후 단계를 skipped로 기록한다. 대화형 선택 거절/입력 EOF도 cancelled로 종료한다. 이미 시작한 로컬 설정 쓰기는 저장 또는 롤백 결과를 확인한 뒤 종료한다. 실행 중 오류는 현재 단계를 failed, 이후 단계를 skipped로 기록한다. manual 모드는 configure_mcp를 waiting_input으로 남기지 않고 failed(SETUP_MANUAL_ACTION_REQUIRED)로 마무리하며 run은 action_required다.
 
 `outcome`은 **해당 단계의 변경 결과**로 `not_applied | applied | unknown`이다. failed와 unknown은 함께 가능하다. 예를 들어 생성 POST의 응답 유실은 `failed/unknown`이며 Agent 미생성을 뜻하지 않는다. 이전 단계의 applied 상태는 결과의 stages에 보존한다.
 
@@ -259,6 +259,7 @@ MANUAL_ACTION_REQUIRED에서만 error.manualConfig에 `toolType`, `suggestedTarg
 | `SETUP_REGISTRATION_UNKNOWN` | 생성 응답 유실·5xx·기존 create_pending. 확인 후 agent.id | `inspect_owned_agents_then_use` | false / 3 |
 | `SETUP_TOKEN_REQUIRED` | ID는 알려졌지만 토큰 없거나 발급/검증 결과 불명. agent.issueToken | `explicit_issue_token` | false / 3 |
 | `SETUP_BROKER_BUSY` | 브로커 실행 중 변경·다른 owner lock | `stop_owned_broker_then_retry` | true / 6 |
+| `SETUP_CONFIG_BUSY` | 같은 프로필의 setup 또는 설정 제어 작업이 잠금 보유 | `wait_for_config_operation` | true / 6 |
 | `SETUP_BROKER_START_FAILED` | 포트·기동·health 확인 실패 | `inspect_local_broker` | true / 7 |
 | `SETUP_CENTRAL_UNAVAILABLE` | 중앙 단절·조회 실패 | `check_network_then_retry` | true / 7 |
 | `SETUP_CENTRAL_AUTH_FAILED` | WS AuthFailed 또는 현재 신원 인증 거부 | `stop_then_reauthenticate_agent` | false / 4 |
@@ -270,7 +271,7 @@ MANUAL_ACTION_REQUIRED에서만 error.manualConfig에 `toolType`, `suggestedTarg
 | `SETUP_MANUAL_ACTION_REQUIRED` | manual 설정 안내만 생성 | `apply_manual_mcp_config` | true / 3 |
 | `SETUP_UNSAFE_FILE` | 자격/설정 경로 링크·소유권/권한 부적합·손상 | `repair_private_file` | false / 5 |
 | `SETUP_TIMEOUT` | 전체 예산 만료. 진행 중 변경 결과는 별도 보존 | `inspect_status_then_retry` | false / 7 |
-| `SETUP_CANCELLED` | Ctrl+C·대화형 취소/EOF | `inspect_status_before_resume` | false / 130 |
+| `SETUP_CANCELLED` | Ctrl+C·대화형 취소/EOF | 기본 `inspect_status_before_resume`. 미확정 생성은 `inspect_owned_agents_then_use`, 미확정 발급은 `explicit_issue_token` | false / 130 |
 | `SETUP_INTERNAL_ERROR` | 분류되지 않은 내부 실패 | `inspect_safe_diagnostics` | false / 1 |
 
 종료 0은 setupReady 충족, 1은 내부 실패, 2는 입력/사용법, 3은 수동 복구·추가 동작, 4는 인증/권한, 5는 로컬 환경/파일, 6은 충돌/점유, 7은 연결/제한시간, 130은 사용자 취소다. 파이프 단절·강제 종료처럼 최종 JSON을 전달할 수 없는 상황은 예외다. 부분 적용 내역은 재조회로 확인한다.
@@ -357,6 +358,7 @@ setup과 `setup status`가 같은 집계 규칙을 사용한다. CLI는 OS 잠�
 4. 하위 구현은 구조화된 결과를 반환해야 한다. 기존 CLI stdout/에러 문자열을 무검증 중계하거나 문자열 일치로 API 성공·중복 생성 여부를 판단하지 않는다.
 5. 뒤 단계 실패로 앞서 만든 중앙 Agent/팀·발급 token을 자동 삭제/폐기하지 않는다. 알려진 ID와 단계 outcome을 보존하고 같은 ID로 재개한다. 원격 변경과 로컬 저장은 단일 트랜잭션이 아니다.
 6. 이번 실행이 시작한 브로커도 후속 실패 시 자동 강제 종료하지 않는다. 실패 결과의 stages에 기동 적용 내역을 남기고 `setup status`/명시 `stop`으로 확인한다. 기존 공유 브로커를 정리 대상으로 삼지 않는다.
+7. 대화형과 비대화형 setup은 설정 쓰기 전에 해당 프로필의 OS 잠금을 획득한다. 같은 런타임 디렉터리를 쓰는 다른 setup은 `validate`에서 `SETUP_CONFIG_BUSY`(종료 6)를 반환한다. 잠금은 입력 대기에도 유지되고 실행 종료 시 해제된다. `setup status`는 읽기 전용으로 조회할 수 있다.
 
 ## 8. 완료 기준과 후속 구현 검사
 
@@ -379,6 +381,7 @@ setup과 `setup status`가 같은 집계 규칙을 사용한다. CLI는 OS 잠�
 | Agent 생성 응답 유실/프로세스 중단 | 재실행에도 생성 POST 자동 반복 0회, 목록 확인/use 복구 |
 | ID 확인 후 토큰 유실/저장 실패 | 같은 ID 유지·token_required, 명시 발급만 가능 |
 | 다른 팀/소유자·실행 중 바인딩 변경 | 권한/점유 코드, 기존 정상 프로필 보존 |
+| 같은 프로필에서 setup 동시 실행 | 선행 실행만 변경 가능, 후행은 validate/6, 종료 뒤 명시적 재실행 가능 |
 | MCP 동시 변경·부분 쓰기·검사 실패 | digest 충돌, 원자 교체/조건부 복원, 비공개 백업 및 rollback 결과 |
 | health 정상이나 WS 인증/신원 실패 | setupReady=false, 기존 Host 소유권을 진단으로 교체하지 않음 |
 | 실제 지원 Host 두 종류 | 설정 파싱·경로 전달·재시작 안내·읽기 전용 상태와 실제 바인딩 결과 대조 |

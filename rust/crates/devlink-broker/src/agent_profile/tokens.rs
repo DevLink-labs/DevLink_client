@@ -125,6 +125,17 @@ pub async fn ensure(
     id: u64,
     allow_issue: bool,
 ) -> Result<TokenPreparation, Failure> {
+    ensure_tracked(path, expected, id, allow_issue, &mut false).await
+}
+
+/// Set the recovery marker after durably recording needs_token and before POST.
+pub async fn ensure_tracked(
+    path: &Path,
+    expected: &RegistrationContext,
+    id: u64,
+    allow_issue: bool,
+    issuance_pending: &mut bool,
+) -> Result<TokenPreparation, Failure> {
     if !valid_id(id) {
         return Err(fail(FailureKind::Protocol, id));
     }
@@ -198,6 +209,7 @@ pub async fn ensure(
         outcome: Mutation::Unknown,
         agent_id: Some(id),
     })?;
+    *issuance_pending = true;
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Issued {

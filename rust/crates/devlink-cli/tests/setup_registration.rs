@@ -456,6 +456,35 @@ async fn lost_creation_response_is_never_replayed_and_explicit_owned_id_recovers
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_creation_leaves_pending_and_rerun_does_not_replay_the_post() {
+    let (f, _, expected) = fixture().await;
+    f.state.pause_create.store(true, Ordering::SeqCst);
+    let mut pending = false;
+    tokio::select! {
+        result = registration::ensure_tracked(&f.path, &expected, Some(Selection::Create), &mut pending) =>
+            panic!("expected creation to still be running: {result:?}"),
+        entered = tokio::time::timeout(std::time::Duration::from_secs(30), f.state.create_entered.notified()) =>
+            entered.unwrap(),
+    }
+    assert!(pending);
+    f.state.create_resume.notify_one();
+    f.state.pause_create.store(false, Ordering::SeqCst);
+
+    let profile: Value =
+        serde_json::from_slice(&fs::read(agent_profile::path(&f.path)).unwrap()).unwrap();
+    assert_eq!(profile["state"]["kind"], "create_pending");
+    let resumed = registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
+    assert_eq!(resumed.state, R::CreationUnknown);
+    let recovered = registration::ensure(&f.path, &expected, Some(Selection::Use(201)))
+        .await
+        .unwrap();
+    assert_eq!(recovered.agent_id, Some(201));
+    assert_eq!(counts(&f), (1, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn csrf_failure_does_not_create_pending_and_definite_rejection_allows_explicit_retry() {
     let (f, _, expected) = fixture().await;
     f.state.csrf_failure.store(true, Ordering::SeqCst);

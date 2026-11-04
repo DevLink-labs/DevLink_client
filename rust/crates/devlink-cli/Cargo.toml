@@ -22,6 +22,9 @@ tokio.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true

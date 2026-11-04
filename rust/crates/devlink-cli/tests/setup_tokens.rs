@@ -345,6 +345,32 @@ async fn issue_holds_locks_and_durably_removes_old_token_before_the_post_respons
     assert_eq!(counts(&f), (1, 2));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_issuance_keeps_the_agent_and_requires_a_new_explicit_request() {
+    let (f, _, expected) = fixture().await;
+    unissued(&f, &expected).await;
+    f.state.pause_token.store(true, Ordering::SeqCst);
+    let mut pending = false;
+    tokio::select! {
+        result = tokens::ensure_tracked(&f.path, &expected, 201, true, &mut pending) =>
+            panic!("expected issuance to still be running: {result:?}"),
+        entered = tokio::time::timeout(std::time::Duration::from_secs(30), f.state.token_entered.notified()) =>
+            entered.unwrap(),
+    }
+    assert!(pending);
+    f.state.token_resume.notify_one();
+    f.state.pause_token.store(false, Ordering::SeqCst);
+
+    assert_eq!(profile(&f)["state"]["kind"], "needs_token");
+    let resumed = tokens::ensure(&f.path, &expected, 201, false)
+        .await
+        .unwrap();
+    assert_eq!(resumed.agent_id, "201");
+    assert!(!resumed.verified);
+    assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.state.token_requests.load(Ordering::SeqCst), 1);
+}
+
 struct Stop(PathBuf);
 impl Drop for Stop {
     fn drop(&mut self) {

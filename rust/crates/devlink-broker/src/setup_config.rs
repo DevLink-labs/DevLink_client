@@ -91,6 +91,26 @@ pub fn prepare_with_server(
     path: &Path,
     server_url: Option<&str>,
 ) -> Result<PreparedConfig, Failure> {
+    prepare_directory(path)?;
+    prepare_profile(path, server_url)
+}
+
+/// Prepare the profile and reserve it for this setup run. This lock is always
+/// taken before control/broker locks and is used only by setup orchestration.
+pub fn prepare_for_run(
+    path: &Path,
+    server_url: Option<&str>,
+) -> Result<(PreparedConfig, fs::File), Failure> {
+    prepare_directory(path)?;
+    let lock_path = config::state_directory(path).join("setup.lock");
+    let lock = config::try_lock(&lock_path)
+        .map_err(|_| Failure::new(FailureKind::UnsafeFile, &lock_path))?
+        .ok_or_else(|| Failure::new(FailureKind::ConfigBusy, &lock_path))?;
+    let prepared = prepare_profile(path, server_url)?;
+    Ok((prepared, lock))
+}
+
+fn prepare_directory(path: &Path) -> Result<(), Failure> {
     validate_path(path)?;
     let parent = config::directory(path);
     let parent_missing = matches!(fs::symlink_metadata(parent), Err(error) if error.kind() == io::ErrorKind::NotFound);
@@ -100,6 +120,10 @@ pub fn prepare_with_server(
         credentials::set_private_permissions(parent)
             .map_err(|_| Failure::new(FailureKind::Storage, parent))?;
     }
+    Ok(())
+}
+
+fn prepare_profile(path: &Path, server_url: Option<&str>) -> Result<PreparedConfig, Failure> {
     let state = config::state_directory(path);
     let control_path = state.join("control.lock");
     let _control = config::try_lock(&control_path)

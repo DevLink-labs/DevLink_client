@@ -1,4 +1,5 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
+use super::control::{Attempt, RunControl, terminal_signal};
 use super::{
     AgentChoice, AgentInput, AgentInputError, Completion, ErrorCode, LoginCredentials, LoginInput,
     LoginInputError, McpInput, McpInputError, Outcome, ProgressEvent, ProgressUnavailable,
@@ -143,8 +144,9 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     };
     let stdout = std::io::stdout();
     let mut output = Renderer::new(stdout.lock(), args.output);
+    let mut control = RunControl::new(terminal_signal());
     if args.non_interactive || args.input.is_some() {
-        let result = run_batch(&context, args, &mut output).await;
+        let result = run_batch(&context, args, &mut output, &mut control).await;
         return finish(&mut output, &result);
     }
     let input = TerminalLoginInput {
@@ -179,7 +181,13 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
             agent_name: args.agent_name,
             role_description: args.role_description,
         });
-    let result = super::run(&context, stages, |event| output.progress(event)).await;
+    let result = super::flow::run_controlled(
+        &context,
+        stages,
+        |event| output.progress(event),
+        &mut control,
+    )
+    .await;
     finish(&mut output, &result)
 }
 
@@ -198,6 +206,7 @@ async fn run_batch<W: Write>(
     context: &SetupContext,
     args: SetupArgs,
     output: &mut Renderer<W>,
+    control: &mut RunControl,
 ) -> RunResult<setup_connection::Report> {
     use super::{batch, flow};
     let start = tokio::time::Instant::now();
@@ -221,16 +230,25 @@ async fn run_batch<W: Write>(
         (false, None) => Err(batch::missing(["input"])),
         (false, Some(path)) => {
             let password_stdin = args.password_stdin;
-            let load = tokio::task::spawn_blocking(move || batch::load(&path, password_stdin));
-            match tokio::time::timeout_at(start + std::time::Duration::from_secs(30), load).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(Box::new(SetupError::new(
+            control.deadline = Some(start + std::time::Duration::from_secs(30));
+            match control
+                .attempt(
+                    async move {
+                        tokio::task::spawn_blocking(move || batch::load(&path, password_stdin))
+                            .await
+                    },
+                    None,
+                )
+                .await
+            {
+                Attempt::Done(Ok(result)) => result,
+                Attempt::Done(Err(_)) => Err(Box::new(SetupError::new(
                     ErrorCode::InternalError,
                     Step::Validate,
                     Outcome::NotApplied,
                 ))),
-                Err(_) => Err(Box::new(SetupError::new(
-                    ErrorCode::Timeout,
+                Attempt::Interrupted { reason, .. } => Err(Box::new(SetupError::new(
+                    reason,
                     Step::Validate,
                     Outcome::NotApplied,
                 ))),
@@ -258,13 +276,8 @@ async fn run_batch<W: Write>(
         entry: args.mcp_entry,
         ..plan.mcp
     });
-    flow::run_until(
-        context,
-        stages,
-        |event| output.progress(event),
-        Some(start + plan.timeout),
-    )
-    .await
+    control.deadline = Some(start + plan.timeout);
+    flow::run_controlled(context, stages, |event| output.progress(event), control).await
 }
 
 async fn status(
@@ -477,6 +490,11 @@ impl LoginInput for TerminalLoginInput {
         let email = self.email.clone();
         let password_stdin = self.password_stdin;
         let interactive = self.interactive();
+        let _mode = if interactive && !password_stdin {
+            crate::terminal_input::TerminalMode::capture()
+        } else {
+            None
+        };
         tokio::task::spawn_blocking(move || {
             let email = match email {
                 Some(email) => email,

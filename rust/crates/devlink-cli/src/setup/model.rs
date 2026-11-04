@@ -240,7 +240,7 @@ impl ErrorCode {
                 "A setup file or directory is unsafe or unreadable. Inspect the indicated path and repair its ownership, permissions, or contents before retrying. Existing files were preserved."
             }
             Self::ConfigBusy => {
-                "Another configuration operation holds the control lock. Wait for it to finish, then rerun setup."
+                "Another setup or configuration operation is using this profile. Wait for it to finish, then rerun setup."
             }
             Self::BrokerBusy => {
                 "The broker is running or starting. Stop this profile's broker before creating configuration or changing Agent credentials."
@@ -275,9 +275,7 @@ impl ErrorCode {
             Self::AuthBusy => {
                 "Another user session operation holds the account lock. Wait for it to finish, then rerun setup."
             }
-            Self::Cancelled => {
-                "Setup input was cancelled. Inspect the completed stages before resuming."
-            }
+            Self::Cancelled => "Setup was cancelled. Inspect the completed stages before resuming.",
             Self::TeamRequired => "Choose a joined team using --team-id or the terminal selection.",
             Self::TeamMembershipRequired => {
                 "No joined teams were found. Use devlink team create --name <NAME> or devlink team join, then rerun setup."
@@ -579,6 +577,36 @@ impl SetupError {
 
     pub fn recovery_action(&self) -> &'static str {
         self.recovery.action
+    }
+
+    pub(super) fn interrupted(mut self, reason: ErrorCode, in_flight: bool) -> Self {
+        let interrupted_code = self.code;
+        let domain_recovery = in_flight
+            && matches!(
+                interrupted_code,
+                ErrorCode::RegistrationUnknown | ErrorCode::TokenRequired
+            );
+        if reason == ErrorCode::Timeout && domain_recovery {
+            return self;
+        }
+        let description = Self::new(reason, self.step, self.outcome);
+        self.code = reason;
+        self.message = description.message;
+        self.retryable = description.retryable;
+        if !domain_recovery {
+            self.recovery = description.recovery;
+        } else if reason == ErrorCode::Cancelled {
+            self.message = match interrupted_code {
+                ErrorCode::RegistrationUnknown => {
+                    "Setup was cancelled with an unconfirmed Agent creation. Inspect your Agents and resume with the verified ID."
+                }
+                ErrorCode::TokenRequired => {
+                    "Setup was cancelled with an unconfirmed token issuance. Inspect the saved Agent ID before explicitly issuing a token."
+                }
+                _ => description.message,
+            };
+        }
+        self
     }
 }
 

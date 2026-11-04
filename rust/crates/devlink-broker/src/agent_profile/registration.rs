@@ -285,6 +285,16 @@ pub async fn ensure(
     expected: &RegistrationContext,
     selection: Option<Selection>,
 ) -> Result<Registration, Failure> {
+    ensure_tracked(path, expected, selection, &mut false).await
+}
+
+/// Set the recovery marker after durably recording creation and before sending POST.
+pub async fn ensure_tracked(
+    path: &Path,
+    expected: &RegistrationContext,
+    selection: Option<Selection>,
+    creation_pending: &mut bool,
+) -> Result<Registration, Failure> {
     if matches!(selection, Some(Selection::Use(id)) if !valid_id(id)) {
         return Err(failure(FailureKind::Rejected));
     }
@@ -451,6 +461,7 @@ pub async fn ensure(
         outcome: Mutation::Unknown,
         agent_id: None,
     })?;
+    *creation_pending = true;
     let response = client
         .post_prepared::<Agent>(
             &format!("/api/v1/agents/teams/{}", expected.team_id),
