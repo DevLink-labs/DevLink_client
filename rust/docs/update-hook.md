@@ -58,11 +58,13 @@ Claude Code (`.claude/settings.json` 또는 `~/.claude/settings.json`):
 }
 ```
 
-Codex는 사용자 계층 `~/.codex/hooks.json`에 둔다. 처음 실행할 때 대화형 Codex의 `/hooks`에서 훅을 신뢰 승인해야 하며, 명령이 바뀌면 다시 승인해야 한다. 사용자 계층에 두어도 helper는 작업 디렉터리가 bind된 프로젝트 밖이면 출력하지 않으므로 다른 프로젝트에 섞이지 않는다.
+Codex는 사용자 계층 `~/.codex/hooks.json`과 프로젝트 계층 `<repo>/.codex/hooks.json` 중 하나에 둔다. 어느 쪽이든 처음 실행할 때 대화형 Codex의 `/hooks`에서 훅을 신뢰 승인해야 하며, 명령이 바뀌면 다시 승인해야 한다.
 
-프로젝트 계층 `<repo>/.codex/hooks.json`은 권장하지 않는다. Codex는 프로젝트 `.codex/`를 그 프로젝트가 신뢰된 경우에만 읽는데, 아래 PoC에서는 `-c projects.'<경로>'.trust_level="trusted"`와 `git init`을 적용해도 이 파일이 로드되지 않았다. 원인은 확정하지 못했다.
+- 사용자 계층: 프로젝트마다 신뢰할 필요가 없다. helper는 작업 디렉터리가 bind된 프로젝트 밖이면 출력하지 않으므로 다른 프로젝트에 섞이지 않는다.
+- 프로젝트 계층: 그 프로젝트가 신뢰된 경우에만 읽힌다. 신뢰는 Codex의 프로젝트 신뢰 확인으로 `~/.codex/config.toml`의 `[projects.'<경로>'] trust_level = "trusted"`에 저장된다.
+- `-c`로 신뢰를 넘길 때 주의: Codex 0.166.0의 `-c` 키는 `.`으로만 나누고 TOML 따옴표를 해석하지 않는다(`codex-rs/config/src/overrides.rs`). `projects.'<경로>'.trust_level`처럼 따옴표를 붙이면 따옴표가 키에 포함되어 신뢰가 적용되지 않는다. 경로에 마침표가 있으면 `-c`로는 신뢰를 넘길 수 없다.
 
-Codex (`~/.codex/hooks.json`):
+Codex (`~/.codex/hooks.json` 또는 `<repo>/.codex/hooks.json`):
 
 ```json
 {
@@ -87,8 +89,9 @@ Codex (`~/.codex/hooks.json`):
 | --- | --- | --- |
 | Claude Code 2.1.310 | 프로젝트 `.claude/settings.json`, `claude -p --setting-sources project` | SessionStart·UserPromptSubmit 모두 요약이 모델 문맥에 들어감. 새 이벤트만 표시하고, 새 이벤트가 없으면 출력 없음 |
 | Codex 0.166.0 | `codex exec --dangerously-bypass-hook-trust`, `-c hooks.<Event>=[...]` | SessionStart·UserPromptSubmit 모두 실행됨. 모델이 task ID·Agent·상태를 정확히 요약함. 원문 복사 요청은 developer 메시지라는 이유로 거절 |
-| Codex 0.166.0 | 같은 명령, 프로젝트 `.codex/hooks.json` | 훅 미실행(cursor 미생성) |
+| Codex 0.166.0 | 같은 명령, 프로젝트 `.codex/hooks.json`, `-c projects.'<경로>'.trust_level="trusted"` | 훅 미실행(cursor 미생성). PoC 명령 문제: 따옴표가 키에 포함되어 프로젝트가 신뢰되지 않았다 |
 
 - 두 모델 모두 요약을 사용자 승인으로 해석하지 않았다.
 - prompt·resultText에 넣은 표식 문자열은 출력되지 않았고, Host별 cursor는 서로 독립이었다.
-- 미검증: `~/.codex/hooks.json` 파일 자체(PoC는 같은 비프로젝트 계층인 `-c` 지정만 확인), 대화형 세션(TUI)의 시작·재개·입력, 우회 플래그 없이 저장된 훅 신뢰로 실행하는 경우, 실제 중앙 서버에서 받은 이벤트.
+- 프로젝트 계층 미실행 원인 확인: 훅 없이 `.codex/config.toml`에 `model_reasoning_effort = "low"`만 둔 폴더로 비교했다. 따옴표 있는 키(`projects.'<경로>'…`)는 실행 헤더가 사용자 기본값 `xhigh`로 남아 계층이 로드되지 않았다. 따옴표 없는 키(`projects.<경로>…`)는 `low`로 바뀌어 계층이 로드됐다.
+- 미검증: 신뢰된 프로젝트에서 프로젝트 `.codex/hooks.json` 훅이 실제로 실행되는지, `~/.codex/hooks.json` 파일 자체(PoC는 같은 비프로젝트 계층인 `-c` 지정만 확인), 대화형 세션(TUI)의 시작·재개·입력, 우회 플래그 없이 저장된 훅 신뢰로 실행하는 경우, 실제 중앙 서버에서 받은 이벤트.
