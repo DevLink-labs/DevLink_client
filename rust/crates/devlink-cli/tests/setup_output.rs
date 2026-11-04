@@ -21,6 +21,7 @@ fn progress() -> ProgressEvent {
         team_choices: Vec::new(),
         agent_choices: Vec::new(),
         tools: Vec::new(),
+        mcp_plan: None,
     }
 }
 

@@ -53,6 +53,8 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
     let f = fixture().await;
     assert!(f.login().status.success());
     f.state.calls.lock().unwrap().clear();
+    let (node, entry) =
+        account_server::tool_fixture::mcp_runtime(&f._root.path().join("mcp-runtime"));
     let mut child = Command::new(env!("CARGO_BIN_EXE_devlink"))
         .arg("--config")
         .arg(&f.path)
@@ -66,6 +68,12 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
         ])
         .args(["--tool", "codex", "--tool-path"])
         .arg(account_server::test_tool())
+        .arg("--node-path")
+        .arg(node)
+        .arg("--mcp-entry")
+        .arg(entry)
+        .arg("--project")
+        .arg(f._root.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -365,10 +373,18 @@ async fn interactive_adapter_waits_outside_the_flow_and_reuses_a_session_created
         &SetupContext {
             config_path: f.path.clone(),
         },
-        SetupStages::new(input).with_tool(
-            Some(devlink_broker::sessions::ToolType::Codex),
-            Some(account_server::test_tool().to_path_buf()),
-        ),
+        SetupStages::new(input)
+            .with_project(devlink_broker::setup_project::ProjectOptions {
+                path: Some(f._root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .with_mcp(account_server::tool_fixture::mcp_options(
+                &f._root.path().join("mcp-runtime"),
+            ))
+            .with_tool(
+                Some(devlink_broker::sessions::ToolType::Codex),
+                Some(account_server::test_tool().to_path_buf()),
+            ),
         |event| {
             events.push(event.clone());
             Ok(())

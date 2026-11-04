@@ -110,10 +110,7 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(invalid());
     }
-    let target = root.join(match host {
-        ToolType::Codex => ".codex/config.toml",
-        ToolType::ClaudeCode => ".mcp.json",
-    });
+    let target = super::project_target(host, &root);
     let configured_home = std::env::var_os("CODEX_HOME");
     if host == ToolType::Codex && global_target(&target, configured_home.as_deref().map(Path::new))?
     {
