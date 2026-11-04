@@ -1,5 +1,6 @@
 //! Setup orchestration. Stage adapters own business operations; the flow never prompts.
 mod agent_input;
+mod connection;
 mod flow;
 mod login_input;
 mod mcp_input;

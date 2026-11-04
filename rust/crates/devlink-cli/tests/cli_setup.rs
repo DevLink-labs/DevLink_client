@@ -32,6 +32,7 @@ fn setup_help_documents_usage_output_and_global_config() {
     let help = String::from_utf8(out.stdout).unwrap();
     for expected in [
         "setup [OPTIONS]",
+        "status",
         "--config <FILE>",
         "--output",
         "human",
@@ -56,6 +57,28 @@ fn setup_help_documents_usage_output_and_global_config() {
         assert!(help.contains(expected), "missing {expected}: {help}");
     }
     assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn setup_status_reports_a_stopped_profile_without_creating_files() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("missing");
+    let config = profile.join("config.json");
+    let out = cli(&[
+        "setup",
+        "status",
+        "--config",
+        config.to_str().unwrap(),
+        "--output",
+        "json",
+    ]);
+    assert!(out.status.success(), "{:?}", out);
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(result["data"]["connection"]["broker"], "stopped");
+    assert_eq!(result["data"]["connection"]["setupReady"], false);
+    assert!(result["data"].get("agentId").is_none());
+    assert!(!profile.exists());
 }
 
 #[test]

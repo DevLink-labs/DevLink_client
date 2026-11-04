@@ -107,6 +107,13 @@ impl ContextReader {
         })
     }
     pub(crate) async fn diagnose(&self, instance: &Identifier) -> Result<Value, ContextFailure> {
+        self.diagnose_for(Some(instance)).await
+    }
+
+    pub(crate) async fn diagnose_for(
+        &self,
+        instance: Option<&Identifier>,
+    ) -> Result<Value, ContextFailure> {
         self.check_binding().await.map_err(ContextFailure::local)?;
         let (generation, status, identity) = self.central.context_snapshot().await;
         if status == ConnectionStatus::AuthFailed {
@@ -348,6 +355,7 @@ pub(crate) mod tests {
             team_id: 1,
             agent_id: 12,
             project_root: dir.path().canonicalize().unwrap().to_str().unwrap().into(),
+            tool: crate::sessions::ToolType::Codex,
         });
         let original: crate::sessions::Principal =
             serde_json::from_value(json!({"userId":"3","teamId":"1"})).unwrap();

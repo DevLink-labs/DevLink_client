@@ -47,6 +47,7 @@ impl Runtime {
         // Ignore HTTP_PROXY: discovery endpoints must never leave this machine.
         Ok(reqwest::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(1))
             .build()?)
     }

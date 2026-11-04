@@ -297,10 +297,15 @@ impl McpConfig {
         Ok(public)
     }
     pub fn inspect(&self, input: InspectionInput) -> Result<ConfigInspection> {
+        Self::inspect_for(self.host.tool, input)
+    }
+
+    /// Read-only comparison is independent of the Host version's apply support.
+    pub(crate) fn inspect_for(tool: ToolType, input: InspectionInput) -> Result<ConfigInspection> {
         let root = storage::project_from_target(input.tool_type, &input.target_path)?;
         let target = input.target_path.clone();
         let input = match storage::normalize(
-            self.host.tool,
+            tool,
             PlanInput {
                 tool_type: input.tool_type,
                 project_path: root,

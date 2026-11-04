@@ -393,6 +393,7 @@ async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    use devlink_broker::protocol::{ClientMessage, HeartbeatPing, ServerMessage};
     use futures_util::StreamExt;
     let Some(id) = token_agent(&state, &headers) else {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
@@ -402,11 +403,12 @@ async fn websocket(
         let ready=json!({"type":"BROKER_READY","payload":{"connection_id":format!("profile-{id}"),"agent_id":id}});
         if socket.send(Message::Text(ready.to_string().into())).await.is_err(){return;}
         while let Some(Ok(message))=socket.next().await{
-            if let Message::Text(text)=message
-                && let Ok(value)=serde_json::from_str::<Value>(&text)
-                    && value["type"]=="HEARTBEAT_PING"{
-                        let pong=json!({"type":"HEARTBEAT_PONG","payload":{"ping_id":value["payload"]["ping_id"]}});
-                        if socket.send(Message::Text(pong.to_string().into())).await.is_err(){break;}
+                if let Message::Text(text)=message
+                    && let Ok(ClientMessage::Heartbeat(HeartbeatPing::Ping { ping_id })) =
+                        serde_json::from_str(&text)
+                {
+                    let pong = serde_json::to_string(&ServerMessage::heartbeat_pong(ping_id)).unwrap();
+                    if socket.send(Message::Text(pong.into())).await.is_err() { break; }
             }
         }
     })
@@ -641,14 +643,16 @@ pub fn run_at(path: &std::path::Path, args: &[&str], input: Option<&str>) -> Out
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Existing auth/team/project fixtures use a synthetic --version-only Host.
-    if args.contains(&"setup") && !args.contains(&"--tool") && !args.contains(&"--tool-path") {
+    let guided_setup =
+        args.contains(&"setup") && !args.windows(2).any(|pair| pair == ["setup", "status"]);
+    if guided_setup && !args.contains(&"--tool") && !args.contains(&"--tool-path") {
         command
             .args(["--tool", "codex", "--tool-path"])
             .arg(test_tool());
     }
     // Setup now checks its MCP runtime before any central mutation. Keep account
     // tests independent of a developer's Node installation and TypeScript build.
-    if args.contains(&"setup") {
+    if guided_setup {
         // Account fixtures use their own project, never the developer checkout's
         // Host settings. Project cwd behavior is tested with direct commands.
         command.current_dir(path.parent().unwrap());
