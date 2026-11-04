@@ -148,7 +148,7 @@ pub async fn run(path: &Path) -> Result<()> {
         .route("/shutdown", post(shutdown))
         .fallback(not_found)
         .with_state(ApiState {
-            runtime,
+            runtime: runtime.clone(),
             central: central_state,
             cancel: cancel.clone(),
             mcp_token: mcp_token.clone(),
@@ -162,6 +162,12 @@ pub async fn run(path: &Path) -> Result<()> {
             mcp_token.clone(),
             broker_url.clone(),
             context_reader.clone(),
+        ))
+        .merge(crate::connection_api::setup_router(
+            mcp_token.clone(),
+            broker_url,
+            context_reader.clone(),
+            runtime,
         ))
         .merge(crate::session_api::router(
             mcp_token.clone(),

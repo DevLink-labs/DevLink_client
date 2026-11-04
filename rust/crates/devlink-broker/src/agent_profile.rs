@@ -155,6 +155,7 @@ pub(crate) struct InspectionBinding {
     pub team_id: u64,
     pub agent_id: u64,
     pub project_root: String,
+    pub tool: crate::sessions::ToolType,
 }
 pub(crate) fn inspection_binding(
     config_path: &Path,
@@ -185,13 +186,19 @@ pub(crate) fn inspection_binding(
     {
         return Err(Forbidden);
     }
-    let agent_id = profile.agent().ok_or(Unavailable)?.agent_id;
+    let agent = profile.agent().ok_or(Unavailable)?;
+    let agent_id = agent.agent_id;
+    let tool = match agent.tool_type {
+        Tool::Codex => crate::sessions::ToolType::Codex,
+        Tool::ClaudeCode => crate::sessions::ToolType::ClaudeCode,
+    };
     Ok(Some(InspectionBinding {
         origin: profile.origin,
         user_id: profile.user_id,
         team_id: profile.team_id,
         agent_id,
         project_root: profile.project_root,
+        tool,
     }))
 }
 fn valid_id(id: u64) -> bool {

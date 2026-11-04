@@ -1,11 +1,12 @@
 //! Terminal adapter: CLI flags and rendering, separate from setup orchestration.
 use super::{
-    AgentChoice, AgentInput, AgentInputError, Completion, LoginCredentials, LoginInput,
-    LoginInputError, McpInput, McpInputError, ProgressEvent, ProgressUnavailable, RunResult,
-    SetupContext, SetupStages, TeamChoice, TeamInput, TeamInputError, ToolInput, ToolInputError,
-    parse_team_id,
+    AgentChoice, AgentInput, AgentInputError, Completion, ErrorCode, LoginCredentials, LoginInput,
+    LoginInputError, McpInput, McpInputError, Outcome, ProgressEvent, ProgressUnavailable,
+    RunResult, RunStatus, SetupContext, SetupError, SetupStages, Step, TeamChoice, TeamInput,
+    TeamInputError, ToolInput, ToolInputError, parse_team_id,
 };
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
+use devlink_broker::{setup_connection, setup_mcp};
 use serde::Serialize;
 use std::{
     fmt,
@@ -15,9 +16,12 @@ use std::{
 
 #[derive(Args)]
 #[command(
+    args_conflicts_with_subcommands = true,
     after_help = "Setup initializes settings, verifies your user session, selects a joined team, prepares the local project, and selects an installed tool.\nWhen sign-in is needed, use hidden terminal input or --email with --password-stdin.\nA valid saved team is reused; a single joined team is selected automatically.\nUse --team-id when several teams require selection.\nProject defaults to the current directory; display names default to its folder name.\nTools are checked with --version only. A valid saved tool is reused; use --tool when several tools are available.\nUse --create-agent for explicit creation or --agent-id for an owned existing Agent.\nA newly created Agent receives its first token once. Existing Agents require --issue-token when their token is missing or rejected.\nValid tokens are reused. Stop this profile's broker before issuance; MCP config is planned for the selected project. Review it interactively or approve with --apply-mcp.\nUse --mcp-mode manual for a safe snippet. Reopen the trusted Host after changing settings. Final connection verification follows."
 )]
 pub struct SetupArgs {
+    #[command(subcommand)]
+    pub command: Option<SetupCommand>,
     /// Output format: final JSON only, JSONL progress, or human-readable messages
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
@@ -75,6 +79,21 @@ pub struct SetupArgs {
     pub apply_mcp: bool,
 }
 
+#[derive(Subcommand)]
+pub enum SetupCommand {
+    /// Inspect setup readiness without changing the profile, broker, or Host
+    Status {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+        /// Node executable override used when configuring MCP
+        #[arg(long, value_name = "FILE")]
+        node_path: Option<PathBuf>,
+        /// MCP entry override used when configuring MCP
+        #[arg(long, value_name = "FILE")]
+        mcp_entry: Option<PathBuf>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -96,6 +115,23 @@ impl fmt::Display for SetupExit {
 impl std::error::Error for SetupExit {}
 
 pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
+    if let Some(SetupCommand::Status {
+        output,
+        node_path,
+        mcp_entry,
+    }) = args.command
+    {
+        return status(
+            path,
+            output,
+            setup_mcp::Options {
+                node: node_path,
+                entry: mcp_entry,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
     let context = SetupContext {
         config_path: path.to_path_buf(),
     };
@@ -133,9 +169,108 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
             role_description: args.role_description,
         });
     let result = super::run(&context, stages, |event| output.progress(event)).await;
-    output.result(&result).map_err(|_| SetupExit(1))?;
+    render_connection_result(&mut output, &result)?;
     if result.exit_code != 0 {
         return Err(SetupExit(result.exit_code).into());
+    }
+    Ok(())
+}
+
+async fn status(
+    path: &Path,
+    format: OutputFormat,
+    options: setup_mcp::Options,
+) -> anyhow::Result<()> {
+    let observation = match (options.validate(), std::env::current_exe()) {
+        (Ok(()), Ok(executable)) => setup_connection::inspect(path, &options, &executable, None)
+            .await
+            .map_err(super::connection::read_error),
+        (validation, _) => {
+            let code = match validation.err().map(|error| error.code) {
+                Some("SETUP_TOOL_UNAVAILABLE") => ErrorCode::ToolUnavailable,
+                Some(_) => ErrorCode::InputInvalid,
+                None => ErrorCode::InternalError,
+            };
+            Err(Box::new(SetupError::new(
+                code,
+                Step::VerifyConnection,
+                Outcome::NotApplied,
+            )))
+        }
+    };
+    let (status, exit_code, completion) = match observation {
+        Ok(data) => (RunStatus::Succeeded, 0, Completion::Success { data }),
+        Err(error) => (
+            RunStatus::Failed,
+            error.code.exit_code(),
+            Completion::Failure { error },
+        ),
+    };
+    let result = RunResult {
+        schema_version: 1,
+        event_type: "result",
+        run_id: uuid::Uuid::new_v4().to_string(),
+        sequence: 1,
+        status,
+        exit_code,
+        stages: Vec::new(),
+        completion,
+    };
+    render_connection_result(
+        &mut Renderer::new(std::io::stdout().lock(), format),
+        &result,
+    )?;
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(SetupExit(exit_code).into())
+    }
+}
+
+fn render_connection_result<W: Write>(
+    output: &mut Renderer<W>,
+    result: &RunResult<setup_connection::Report>,
+) -> Result<(), SetupExit> {
+    output.result(result).map_err(|_| SetupExit(1))?;
+    if matches!(output.format, OutputFormat::Human)
+        && let Completion::Success { data } = &result.completion
+    {
+        let state = &data.connection;
+        writeln!(output.writer, "Setup ready: {}", state.setup_ready).map_err(|_| SetupExit(1))?;
+        writeln!(
+            output.writer,
+            "Collaboration ready: {}",
+            match state.collaboration_ready {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unknown",
+            }
+        )
+        .map_err(|_| SetupExit(1))?;
+        let central = state
+            .central
+            .map_or_else(|| "unknown".into(), |value| format!("{value:?}"));
+        writeln!(
+            output.writer,
+            "Broker: {:?} | Central: {central} | Identity: {:?}",
+            state.broker, state.identity
+        )
+        .map_err(|_| SetupExit(1))?;
+        writeln!(
+            output.writer,
+            "Credentials: {:?} | MCP config: {:?} | Host session: {:?}",
+            state.credentials, state.mcp_config, state.host_session
+        )
+        .map_err(|_| SetupExit(1))?;
+        if !data.next_actions.is_empty() {
+            writeln!(
+                output.writer,
+                "Next actions: {}",
+                data.next_actions.join(", ")
+            )
+            .map_err(|_| SetupExit(1))?;
+        }
+        output.writer.flush().map_err(|_| SetupExit(1))?;
     }
     Ok(())
 }
@@ -342,6 +477,7 @@ impl<W: Write> Renderer<W> {
             OutputFormat::Json | OutputFormat::Jsonl => self.json(result),
             OutputFormat::Human => {
                 let message = match &result.completion {
+                    Completion::Success { .. } if result.stages.is_empty() => "Setup status.",
                     Completion::Success { .. } => "Setup completed.",
                     Completion::Failure { error } => error.message(),
                 };
@@ -386,7 +522,10 @@ impl<W: Write> Renderer<W> {
                         write!(self.writer, "MCP configuration result: ")
                             .map_err(|_| ProgressUnavailable)?;
                         self.json(result)?;
-                        writeln!(self.writer, "Reopen/restart the trusted Host, then call get_my_context, get_connection_status and register_agent. Host connection has not been verified.").map_err(|_| ProgressUnavailable)?;
+                    }
+                    if let Some(connection) = &error.connection {
+                        write!(self.writer, "Connection: ").map_err(|_| ProgressUnavailable)?;
+                        self.json(connection)?;
                     }
                     if let Some(provider) = &error.mcp_error {
                         let label = if provider.conflict.is_some() {

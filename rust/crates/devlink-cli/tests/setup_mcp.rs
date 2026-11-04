@@ -18,7 +18,7 @@ use devlink_cli::setup::{
     ErrorCode, McpInput, McpInputError, NoLoginInput, Outcome, SetupContext, SetupStages, Step,
     StepExecutor, StepResult,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
@@ -421,22 +421,69 @@ async fn cli_requires_review_applies_explicitly_and_then_reuses_configuration_be
     let mut apply = base.to_vec();
     apply.push("--apply-mcp");
     let output = f.app.run(&apply, None);
-    assert_eq!(output.status.code(), Some(3), "{}", text(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
     assert_no_secrets(&output);
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["step"], "verify_connection");
-    assert_eq!(value["error"]["mcpConfig"]["status"], "applied");
-    assert_eq!(value["error"]["mcpConfig"]["hostSession"], "not_checked");
+    assert_eq!(value["stages"][8]["status"], "succeeded");
+    assert_eq!(value["data"]["mcpConfig"]["status"], "applied");
+    assert_eq!(value["data"]["connection"]["setupReady"], true);
+    assert_eq!(value["data"]["connection"]["hostSession"], "unbound");
+    assert_eq!(value["data"]["connection"]["collaborationReady"], false);
     let modified = fs::metadata(f.target()).unwrap().modified().unwrap();
     let output = f.app.run(&base, None);
-    assert_eq!(output.status.code(), Some(3), "{}", text(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["mcpConfig"]["status"], "unchanged");
+    assert_eq!(value["data"]["mcpConfig"]["status"], "unchanged");
     assert_eq!(
         fs::metadata(f.target()).unwrap().modified().unwrap(),
         modified
     );
     assert_eq!(f.profile(), original);
+    assert_eq!(f.calls(), (1, 1));
+
+    let status = [
+        "setup",
+        "status",
+        "--output",
+        "jsonl",
+        "--node-path",
+        f.options.node.as_ref().unwrap().to_str().unwrap(),
+        "--mcp-entry",
+        f.options.entry.as_ref().unwrap().to_str().unwrap(),
+    ];
+    let output = f.app.run(&status, None);
+    assert!(output.status.success(), "{}", text(&output));
+    assert_no_secrets(&output);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["sequence"], 1);
+    assert_eq!(result["stages"], json!([]));
+    assert_eq!(result["data"]["agentId"], "201");
+    assert_eq!(result["data"]["connection"]["setupReady"], true);
+    assert_eq!(
+        fs::metadata(f.target()).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(f.profile(), original);
+
+    fs::write(
+        f.target(),
+        br#"{"mcpServers":{"devlink":{"command":"changed"}}}"#,
+    )
+    .unwrap();
+    let output = f.app.run(&status, None);
+    assert!(output.status.success(), "{}", text(&output));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["connection"]["mcpConfig"], "conflict");
+    assert_eq!(result["data"]["connection"]["setupReady"], false);
+
+    f.app.state.wrong_context.store(true, Ordering::SeqCst);
+    let output = f.app.run(&status, None);
+    assert!(output.status.success(), "{}", text(&output));
+    assert_no_secrets(&output);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["connection"]["identity"], "mismatch");
+    assert_eq!(result["data"]["connection"]["setupReady"], false);
+    assert!(result["data"].get("agentId").is_none());
     assert_eq!(f.calls(), (1, 1));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -736,15 +783,15 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
     let reuse = run(false);
     let _ = app.run(&["stop"], None);
     for (output, status) in [(&first_setup, "applied"), (&reuse, "unchanged")] {
-        assert_eq!(output.status.code(), Some(3), "{}", text(output));
+        assert_eq!(output.status.code(), Some(0), "{}", text(output));
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
-            value["error"]["step"],
-            "verify_connection",
+            value["data"]["connection"]["setupReady"],
+            true,
             "{}",
             text(output)
         );
-        assert_eq!(value["error"]["mcpConfig"]["status"], status);
+        assert_eq!(value["data"]["mcpConfig"]["status"], status);
         assert_no_secrets(output);
     }
     let written = fs::read_to_string(root.join(".mcp.json")).unwrap();

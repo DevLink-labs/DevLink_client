@@ -278,7 +278,7 @@ fn fingerprints(context: &Context, input: &PlanInput) -> Result<Fingerprint> {
         entry: file_hash(Path::new(&input.executable.args[0]))?,
     })
 }
-fn runtime_input(
+pub(crate) fn runtime_input(
     context: &PreflightContext,
     options: &Options,
     executable: &Path,

@@ -527,7 +527,7 @@ impl SessionManager {
     /// Inspect without expiring entries, claiming, renewing, binding or publishing presence.
     pub(crate) async fn inspect(
         &self,
-        instance: &Identifier,
+        instance: Option<&Identifier>,
         context: &crate::agent_context::AgentContext,
     ) -> Result<&'static str, IdentityError> {
         let registry = self.registry.lock().await;
@@ -554,7 +554,23 @@ impl SessionManager {
                     .owners
                     .get(&agent)
                     .and_then(|id| registry.sessions.get(id))
-                    .is_some_and(|e| e.expires_at > now && !e.replaced);
+                    .filter(|e| e.expires_at > now && !e.replaced);
+                let Some(instance) = instance else {
+                    let Some(entry) = owned else {
+                        return Ok("unbound");
+                    };
+                    let principal = &entry.view.principal;
+                    return Ok(
+                        if principal.user_id.as_str() == context.owner_user_id.to_string()
+                            && principal.team_id.as_str() == context.team_id.to_string()
+                            && principal.agent_id.as_ref() == Some(&agent)
+                        {
+                            "bound"
+                        } else {
+                            "conflict"
+                        },
+                    );
+                };
                 if let Some(entry) = registry
                     .instances
                     .get(instance)
@@ -575,13 +591,17 @@ impl SessionManager {
                     }
                     return Ok(if p.agent_id.is_some() {
                         "bound"
-                    } else if owned {
+                    } else if owned.is_some() {
                         "conflict"
                     } else {
                         "unbound"
                     });
                 }
-                Ok(if owned { "conflict" } else { "unbound" })
+                Ok(if owned.is_some() {
+                    "conflict"
+                } else {
+                    "unbound"
+                })
             })
             .await
     }
@@ -1006,13 +1026,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            manager.inspect(&id("unbound"), &context).await.unwrap(),
+            manager
+                .inspect(Some(&id("unbound")), &context)
+                .await
+                .unwrap(),
             "conflict"
         );
         let presence = central.presence().await;
-        assert_eq!(manager.inspect(&owner, &context).await.unwrap(), "bound");
         assert_eq!(
-            manager.inspect(&id("other"), &context).await.unwrap(),
+            manager.inspect(Some(&owner), &context).await.unwrap(),
+            "bound"
+        );
+        assert_eq!(manager.inspect(None, &context).await.unwrap(), "bound");
+        assert_eq!(
+            manager.inspect(Some(&id("other")), &context).await.unwrap(),
             "conflict"
         );
         assert_eq!(
@@ -1020,7 +1047,11 @@ mod tests {
             expiry
         );
         tokio::time::advance(Duration::from_secs(91)).await;
-        assert_eq!(manager.inspect(&owner, &context).await.unwrap(), "unbound");
+        assert_eq!(
+            manager.inspect(Some(&owner), &context).await.unwrap(),
+            "unbound"
+        );
+        assert_eq!(manager.inspect(None, &context).await.unwrap(), "unbound");
         assert_eq!(manager.registry.lock().await.sessions.len(), 2);
         assert_eq!(central.presence().await, presence);
     }

@@ -13,7 +13,7 @@ use devlink_broker::{
     broker_control, mcp_config,
     sessions::ToolType,
     setup_config::{self, FailureKind, PreparedConfig},
-    setup_mcp,
+    setup_connection, setup_mcp,
     setup_project::{self, PreparedProject, ProjectOptions},
     setup_tools::{self, SelectionBinding, SelectionSnapshot},
     teams::{self, SetupSelection, SetupTeamFault, SetupTeamFaultKind, Team},
@@ -99,6 +99,8 @@ struct McpState {
     confirmed: bool,
     prepared: Option<setup_mcp::Preparation>,
     result: Option<setup_mcp::ConfigurationResult>,
+    binding: Option<setup_mcp::Context>,
+    connection: Option<setup_connection::Report>,
 }
 
 impl Default for SetupStages<NoLoginInput> {
@@ -269,7 +271,7 @@ impl<I, T, U, A, M> SetupStages<I, T, U, A, M> {
 impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> StepExecutor
     for SetupStages<I, T, U, A, M>
 {
-    type Data = ();
+    type Data = setup_connection::Report;
 
     async fn execute(&mut self, step: Step, context: &SetupContext) -> StepResult {
         if step == Step::Authenticate {
@@ -286,6 +288,9 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
         }
         if step == Step::ConfigureMcp {
             return self.configure_mcp(context).await;
+        }
+        if step == Step::VerifyConnection {
+            return self.verify_connection().await;
         }
         if step == Step::Validate
             && let Err(error) = self.mcp.options.validate()
@@ -603,7 +608,11 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
         ))
     }
 
-    fn finish(self) {}
+    fn finish(self) -> Self::Data {
+        self.mcp
+            .connection
+            .expect("successful verification records the connection")
+    }
 }
 
 fn project_error(step: Step, failure: setup_project::Failure) -> SetupError {
@@ -1551,8 +1560,11 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 broker_pid: broker.health.pid,
                 broker_instance: broker.health.instance_id.clone(),
             };
-            match setup_mcp::prepare(binding, self.mcp.options.clone(), executable).await {
-                Ok(prepared) => self.mcp.prepared = Some(prepared),
+            match setup_mcp::prepare(binding.clone(), self.mcp.options.clone(), executable).await {
+                Ok(prepared) => {
+                    self.mcp.binding = Some(binding);
+                    self.mcp.prepared = Some(prepared);
+                }
                 Err(error) => return self.mcp_failure(mcp_error(Step::ConfigureMcp, error)),
             }
         }
@@ -1633,6 +1645,44 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             Err(error) => self.mcp_failure(mcp_error(Step::ConfigureMcp, error)),
         }
     }
+    async fn verify_connection(&mut self) -> StepResult {
+        let executable = self
+            .broker
+            .executable
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe);
+        let (Some(binding), Some(applied), Ok(executable)) =
+            (&self.mcp.binding, &self.mcp.result, executable)
+        else {
+            return self.mcp_failure(SetupError::new(
+                ErrorCode::InternalError,
+                Step::VerifyConnection,
+                Outcome::NotApplied,
+            ));
+        };
+        match super::connection::verify(binding, &self.mcp.options, &executable).await {
+            Ok(mut report) => {
+                if applied.config.restart_required {
+                    super::connection::merge_restart_actions(
+                        &mut report.next_actions,
+                        &applied.next_actions,
+                    );
+                }
+                report.mcp_config = Some(applied.clone());
+                self.mcp.connection = Some(report);
+                StepResult::Complete {
+                    outcome: Outcome::NotApplied,
+                    reused: false,
+                }
+            }
+            Err(mut error) => {
+                error.mcp_config = Some(applied.clone());
+                self.mcp_failure(*error)
+            }
+        }
+    }
+
     fn mcp_identity(&self, error: &mut SetupError) {
         error.known.user_id = self.auth.user.as_ref().map(|u| u.user_id.to_string());
         error.known.team_id = self.teams.selected.as_ref().map(|t| t.team_id.to_string());

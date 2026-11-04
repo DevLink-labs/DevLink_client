@@ -106,6 +106,14 @@ pub enum ErrorCode {
     AuthRejected,
     #[serde(rename = "SETUP_CENTRAL_UNAVAILABLE")]
     CentralUnavailable,
+    #[serde(rename = "SETUP_CENTRAL_AUTH_FAILED")]
+    CentralAuthFailed,
+    #[serde(rename = "SETUP_CONNECTION_REPLACED")]
+    ConnectionReplaced,
+    #[serde(rename = "SETUP_INBOX_FAILED")]
+    InboxFailed,
+    #[serde(rename = "SETUP_TIMEOUT")]
+    Timeout,
     #[serde(rename = "SETUP_PROTOCOL_ERROR")]
     ProtocolError,
     #[serde(rename = "SETUP_AUTH_SESSION_CONFLICT")]
@@ -180,8 +188,10 @@ impl ErrorCode {
             Self::InternalError => 1,
             Self::UnsafeFile | Self::ConfigStorageFailed => 5,
             Self::ConfigBusy | Self::BrokerBusy => 6,
-            Self::AuthRequired | Self::AuthRejected => 4,
-            Self::CentralUnavailable | Self::ProtocolError => 7,
+            Self::AuthRequired | Self::AuthRejected | Self::CentralAuthFailed => 4,
+            Self::ConnectionReplaced => 6,
+            Self::InboxFailed => 5,
+            Self::CentralUnavailable | Self::ProtocolError | Self::Timeout => 7,
             Self::AuthSessionConflict | Self::AuthBusy => 6,
             Self::AuthStorageFailed => 5,
             Self::Cancelled => 130,
@@ -247,8 +257,14 @@ impl ErrorCode {
             Self::CentralUnavailable => {
                 "The central service is temporarily unavailable. Check the connection and retry; this is not evidence of session expiry."
             }
+            Self::CentralAuthFailed => "Central Agent authentication was rejected.",
+            Self::ConnectionReplaced => {
+                "Another connection replaced this Agent's broker connection."
+            }
+            Self::InboxFailed => "The broker could not persist the local inbox.",
+            Self::Timeout => "Connection verification did not complete within the time limit.",
             Self::ProtocolError => {
-                "The central authentication response could not be verified. Inspect the provider contract before retrying."
+                "The provider response or current Agent identity could not be verified."
             }
             Self::AuthSessionConflict => {
                 "The central origin or stored session changed. Inspect the profile, then restart setup or sign in explicitly with devlink auth login."
@@ -352,6 +368,10 @@ impl ErrorCode {
             Self::AuthRequired => "login",
             Self::AuthRejected => "login",
             Self::CentralUnavailable => "check_network_then_retry",
+            Self::CentralAuthFailed => "stop_then_reauthenticate_agent",
+            Self::ConnectionReplaced => "inspect_connection_owner",
+            Self::InboxFailed => "repair_inbox_then_restart",
+            Self::Timeout => "inspect_status_then_retry",
             Self::ProtocolError => "check_provider_contract",
             Self::AuthSessionConflict => "inspect_profile_then_reauthenticate",
             Self::AuthStorageFailed => "inspect_private_session",
@@ -484,6 +504,8 @@ pub struct SetupError {
     pub mcp_config: Option<devlink_broker::setup_mcp::ConfigurationResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_error: Option<devlink_broker::mcp_config::ConfigError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<devlink_broker::setup_connection::Snapshot>,
     message: &'static str,
     retryable: bool,
     recovery: Recovery,
@@ -506,6 +528,7 @@ impl SetupError {
             manual_config: None,
             mcp_config: None,
             mcp_error: None,
+            connection: None,
             message: code.message(),
             retryable: matches!(
                 code,

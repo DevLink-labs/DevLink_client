@@ -1,6 +1,6 @@
 # setup 명령과 공통 실행 흐름
 
-작업 02·03·04·05·06·07·08·09·10·11. 2026-11-04 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·토큰 준비·공통 브로커 제어·MCP 설정 통합을 구현했다.
+작업 02·03·04·05·06·07·08·09·10·11·12. 2026-11-04 (Asia/Seoul). [01 호출·단계·오류 규격](../../contracts/setup/v1/README.md)을 기준으로 CLI 진입점·공통 흐름·설정 초기화·사용자 로그인·팀 선택·프로젝트 준비·도구 탐지/선택·Agent 등록/재사용·토큰 준비·공통 브로커 제어·MCP 설정 통합을 구현했다.
 
 ## 사용법과 현재 범위
 
@@ -34,9 +34,9 @@ devlink setup --mcp-mode manual
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 집계는 후속 작업이다. `--input`, `--non-interactive`, `setup status`는 아직 제공하지 않는다.
+현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--input`과 `--non-interactive`는 후속 범위다.
 
-기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤에는 아직 미구현인 verify_connection에서 SETUP_STEP_UNAVAILABLE/종료 3으로 멈춘다. 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
+기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤 verify_connection에서 브로커·중앙·Agent 신원·자격·MCP 설정을 확인한다. 검증 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
 
@@ -542,7 +542,7 @@ Agent 소유권/팀 불일치와 HTTP 403은 계약의 SETUP_AGENT_FORBIDDEN(4),
 - 발급 전 같은 origin/user/team/project/tool 및 중앙 소유권을 다시 확인한다. account → control → broker → owner 잠금을 유지하며 실행 중 브로커가 있으면 SETUP_BROKER_BUSY로 중지를 안내한다. setup은 발급을 위해 다른 프로세스를 자동 중지하지 않는다.
 - CSRF 준비 후 POST 전에 needs_token을 내구 저장해 옛 토큰을 제거한다. 1회 발급 응답의 ID와 토큰의 실신원을 검증하고 MCP 자격 회전/프로필 저장까지 성공해야 ready를 게시한다.
 - 발급 응답 유실/5xx·잘못된 발급 ID·새 토큰 검증 실패·발급 후 저장 결과 불명은 알려진 Agent ID와 SETUP_TOKEN_REQUIRED/outcome:unknown을 보존한다. needs_token에서 새 Agent를 생성하거나 옛 토큰을 복원하지 않는다. 단계의 발급 허용은 1회 소비되므로 같은 실행기를 다시 호출해도 불명한 요청을 자동 반복하지 않는다. 복구 후 새 `setup --issue-token` 요청만 새 발급을 허용한다.
-- 정상 토큰 준비 후 기존 start_broker 어댑터로 진행한다. 09 구현 당시에는 configure_mcp에서 멈췄다. 현재는 아래 10 통합으로 MCP 설정까지 진행하고 verify_connection의 SETUP_STEP_UNAVAILABLE/종료 3으로 멈출 수 있다. 이 경우 앞서 적용한 등록·토큰·브로커·MCP 설정과 알려진 ID를 유지한다.
+- 정상 토큰 준비 후 기존 start_broker 어댑터로 진행한다. 09 구현 당시에는 configure_mcp에서 멈췄다. 현재는 작업 10에서 MCP 설정을 적용하고 작업 12에서 최종 연결을 확인한다. 이 경우 앞서 적용한 등록·토큰·브로커·MCP 설정과 알려진 ID를 유지한다.
 
 09는 기존 API 기반 구현이다. 등록키 기반 Agent 생성 자동 복구 API는 추가하지 않았으며, 토큰 발급 실패를 새 Agent 생성으로 우회하지 않는다. 실제 운영 중앙/DB·배포본·Host 전체 설정 검증은 별도다.
 
@@ -631,7 +631,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 MCP 실패 때문에 이미 준비한 Agent·토큰을 삭제하거나 새 Agent를 생성하지 않는다. 앞 단계에서 시작/재사용한 브로커도 유지한다. 충돌은 종료 6, 쓰기 실패는 종료 5이며, 출력에 알려진 user/team/agent/tool을 유지한다. 결과 불명은 출력의 백업·롤백 근거를 먼저 확인하고 명시적으로 재실행한다. 재실행은 정상 등록·토큰·브로커를 재사용하고 MCP 계획을 다시 확인한다.
 
-적용 결과는 `status`, `targetPath`, 선택 `backupPath`, `restartRequired`, `runtimeVerified:true`, `hostSession:"not_checked"`, `nextActions`를 제공한다. Host를 다시 열거나 재시작한 후 Agent 세션 등록이 필요하다. 설정 파일과 MCP 초기화 확인만으로 Host 연결/협업 준비 완료를 표시하지 않는다. **현재 전체 setup은 다음 `verify_connection`에서 종료 3이며**, 해당 오류의 `mcpConfig`와 단계 결과에 MCP 적용/재사용 내역을 남긴다. 최종 연결 집계·`setup status`·실제 Host 검증은 12번 이후 범위다.
+적용 결과는 `status`, `targetPath`, 선택 `backupPath`, `restartRequired`, `runtimeVerified:true`, `hostSession:"not_checked"`, `nextActions`를 제공한다. Host를 다시 열거나 재시작한 후 Agent 세션 등록이 필요하다. 설정 파일과 MCP 초기화 확인만으로 Host 연결/협업 준비 완료를 표시하지 않는다. 이 적용 결과는 마지막 `verify_connection`에 전달하며, 최종 결과의 `mcpConfig`와 단계 결과에 적용/재사용 내역을 남긴다.
 
 ### 작업 10 검증 결과
 
@@ -685,3 +685,16 @@ Windows stable MSVC, `00a99d7` 기반 작업 트리에서 임시 프로젝트·�
 인증 `valid_session_reuses_server_identity_without_reading_an_open_password_pipe`(30초 종료 대기)와 팀 `server_change_during_membership_response_cannot_save_or_reuse_the_old_team`(15초 barrier 대기)는 스위트 전체 실행에서 세 번 연속 시간 초과했고 단독 실행에서는 통과했다. 이번 수정을 되돌린 소스에서도 같은 인증 실패가 재현되어 이 변경과 무관한 기존 시간 의존 문제다. 별도 확인이 필요하다. rustfmt·workspace/all-targets Clippy `-D warnings`는 통과했다.
 
 로그: `rust/target/setup10-preflight-shim-manual-before.log`(수정 전 재현), `setup10-preflight-shim-manual.log`(MCP 15건), `setup10-shim-manual-broker.log`, `setup10-shim-manual-suites2.log`, `setup10-shim-manual-suites3.log`(시간 초과 재현).
+
+## 작업 12 (S15P31D108-113): 최종 연결 상태
+
+```powershell
+devlink setup status --output json
+devlink --config C:\work\profile\config.json setup status --output jsonl
+```
+
+`verify_connection`은 최대 20초 동안 읽기 전용으로 확인한다. 현재 브로커와 중앙 WebSocket, 선택한 Agent 신원, 브로커 자격 파일, 프로젝트 MCP 설정이 모두 일치할 때 `setupReady=true`와 종료 0을 반환한다. Host 세션 바인딩 여부는 `hostSession` 및 `collaborationReady`에 별도로 표시한다. 브로커 인증 거부와 확인된 신원 불일치는 즉시 실패하며, 아직 확인되지 않은 신원은 제한시간까지 다시 조회한다.
+
+이전 빌드에서 시작되어 `/v1/setup-connection`이 없는 브로커는 `broker=unhealthy`로 표시한다. setup에서는 SETUP_BROKER_START_FAILED와 `inspect_local_broker`로 중단하므로 해당 브로커를 중지한 뒤 다시 실행한다. MCP 적용으로 Host 재시작이 필요하면 일반 `open_or_restart_host` 안내만 재시작 안내로 바꾸고 `inspect_connection_owner` 같은 연결 안내는 유지한다.
+
+`setup status`는 동일한 판정을 한 번 조회하고 JSON/JSONL에는 단계가 없는 최종 결과 한 건을 출력한다. 조회 성공은 준비 여부에 관계없이 종료 0이다. 임시 파일과 잠금 파일을 만들지 않고 브로커나 Host를 실행하지 않는다. MCP 런타임을 직접 지정해 설정했다면 같은 `--node-path` 및 `--mcp-entry`를 상태 조회에도 전달할 수 있다.

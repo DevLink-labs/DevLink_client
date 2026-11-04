@@ -28,6 +28,43 @@ pub(crate) fn router(token: Arc<String>, broker_url: String, reader: ContextRead
             reader,
         })
 }
+
+#[derive(Clone)]
+struct SetupApi {
+    local: Api,
+    runtime: Arc<crate::local::Runtime>,
+}
+
+pub(crate) fn setup_router(
+    token: Arc<String>,
+    broker_url: String,
+    reader: ContextReader,
+    runtime: Arc<crate::local::Runtime>,
+) -> Router {
+    Router::new()
+        .route("/v1/setup-connection", get(setup_connection))
+        .with_state(SetupApi {
+            local: Api {
+                token,
+                broker_url,
+                reader,
+            },
+            runtime,
+        })
+}
+
+async fn setup_connection(State(api): State<SetupApi>, request: Request) -> Response {
+    let (id, instance) =
+        match crate::context_api::authenticate(&api.runtime.control_token, request).await {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+    if instance.as_str() != api.runtime.instance_id {
+        return axum::http::StatusCode::CONFLICT.into_response();
+    }
+    let data = observe(api.local, &id, None).await;
+    Json(json!({"requestId": id, "data": data})).into_response()
+}
 fn credentials(api: &Api) -> &'static str {
     match std::fs::symlink_metadata(crate::credentials::path(api.reader.config_path())) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
@@ -137,18 +174,38 @@ async fn connection(State(api): State<Api>, request: Request) -> Response {
         Ok(v) => v,
         Err(r) => return *r,
     };
+    let data = observe(api, &id, Some(&instance)).await;
+    Json(json!({"requestId":id,"data":data})).into_response()
+}
+
+async fn observe(api: Api, id: &Identifier, instance: Option<&Identifier>) -> Value {
+    let before = api.reader.central.context_snapshot().await;
+    let mut context = api.reader.diagnose_for(instance).await;
     let credential_api = api.clone();
     let credential_state = tokio::task::spawn_blocking(move || credentials(&credential_api))
         .await
         .unwrap_or("unknown");
-    let before = api.reader.central.context_snapshot().await;
-    let mut context = api.reader.diagnose(&instance).await;
     let after = api.reader.central.context_snapshot().await;
     if before.0 != after.0 || before.1 != after.1 {
         context = Err(IdentityError::Unavailable.into());
     }
-    let data = snapshot(after.1, context, credential_state, &id);
-    Json(json!({"requestId":id,"data":data})).into_response()
+    let principal = instance
+        .is_none()
+        .then(|| {
+            context
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("principal"))
+                .cloned()
+        })
+        .flatten();
+    let mut data = snapshot(after.1, context, credential_state, id);
+    if data["identity"] == "verified"
+        && let Some(principal) = principal
+    {
+        data["principal"] = principal;
+    }
+    data
 }
 
 #[cfg(test)]

@@ -480,7 +480,13 @@ impl TeamInput for Input {
         Ok(72)
     }
 }
-async fn injected(f: &Fixture, mode: u8) -> (setup::RunResult<()>, Vec<setup::ProgressEvent>) {
+async fn injected(
+    f: &Fixture,
+    mode: u8,
+) -> (
+    setup::RunResult<devlink_broker::setup_connection::Report>,
+    Vec<setup::ProgressEvent>,
+) {
     let calls = Arc::new(AtomicUsize::new(0));
     let input = Input {
         calls: calls.clone(),

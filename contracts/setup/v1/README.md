@@ -306,7 +306,7 @@ Registration.ensure(context, selection) -> PublicRegistrationState
 
 2026-11-04 CLI 통합: [작업 10 사용법·실행 경로·확인·복구](../../../rust/docs/setup.md#작업-10-프로젝트-mcp-설정-통합).
 `--apply-mcp`는 이번 실행에서 확인한 계획 적용을 허용한다. 수동 모드/미검증 Host는 예시만 반환한다.
-적용 후 최종 연결 집계는 12번 후속 범위이며 현재 `verify_connection`에서 종료 3이다.
+적용 후 `verify_connection`은 12번의 연결 집계로 설정 준비 여부를 판단한다.
 오류의 `mcpConfig`에 앞 단계의 적용 결과를, `mcpError`에는 제공자 outcome/rollback/백업 근거를 보존한다.
 사전 검사 충돌 시 `mcpError.conflict`에 대상 경로(`targetPath`)와 토큰 값이 없는 제안 항목(`proposed`)을 반환한다.
 
@@ -331,7 +331,7 @@ McpConfig.inspect({toolType, targetPath, brokerFile, executable}) -> ConfigInspe
 Connection.inspect({configPath, targetPath, toolType, deadline}) -> ConnectionSnapshot
 ```
 
-setup과 `setup status`가 같은 집계 규칙을 사용한다. 조회 때문에 fresh/recover 세션을 만들거나 기존 Host 소유권을 교체하면 안 된다. 현재 `GET /health`만으로는 신원 검증/Host 소유권까지 알 수 없으므로 provider가 공개 가능한 읽기 전용 신원 진단을 제공하기 전에는 해당 항목을 unknown으로 반환한다. 임의의 `/status` endpoint가 이미 있다고 가정하지 않는다.
+setup과 `setup status`가 같은 집계 규칙을 사용한다. CLI는 OS 잠금과 인증된 `GET /health`로 브로커를 확인하고, 동일 인스턴스의 제어 토큰으로 `GET /v1/setup-connection`에서 현재 중앙 신원·자격·Host 세션을 조회한다. 프로젝트 설정은 `McpConfig.inspect`로 비교한다. 조회는 fresh/recover 세션을 만들거나 기존 Host 소유권을 교체하지 않는다.
 
 | 필드 | 값 / 근거 |
 | --- | --- |

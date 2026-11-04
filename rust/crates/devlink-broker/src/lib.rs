@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod session_api;
 pub mod sessions;
 pub mod setup_config;
+pub mod setup_connection;
 pub mod setup_mcp;
 pub mod setup_project;
 pub mod setup_tools;

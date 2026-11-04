@@ -47,8 +47,8 @@ pub fn parse() -> Cli {
 }
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run guided setup (execution foundation; stage integrations follow)
-    Setup(SetupArgs),
+    /// Run guided setup or inspect setup readiness
+    Setup(Box<SetupArgs>),
     /// Create a configuration file without overwriting existing settings
     Init,
     /// Start an independent background broker
@@ -286,7 +286,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
-        Commands::Setup(args) => setup_terminal::run(&path, args).await?,
+        Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
             if clear {
