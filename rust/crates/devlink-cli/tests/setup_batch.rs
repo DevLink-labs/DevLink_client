@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::Ordering,
 };
@@ -224,14 +224,38 @@ fn a_busy_profile_is_reported_before_reading_the_batch_password() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
+    verify_unattended_login_and_reuse(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an installed Node >=24 and the built MCP entry"]
+async fn unattended_setup_with_real_node_and_mcp_runtime() {
+    let node = PathBuf::from(std::env::var_os("DEVLINK_TEST_NODE").expect("set DEVLINK_TEST_NODE"));
+    let entry = PathBuf::from(
+        std::env::var_os("DEVLINK_TEST_MCP_ENTRY").expect("set DEVLINK_TEST_MCP_ENTRY"),
+    );
+    assert!(node.is_absolute() && node.is_file());
+    assert!(entry.is_absolute() && entry.is_file());
+    verify_unattended_login_and_reuse(Some((node, entry))).await;
+}
+
+async fn verify_unattended_login_and_reuse(runtime: Option<(PathBuf, PathBuf)>) {
+    struct StopBroker<'a>(&'a Fixture);
+    impl Drop for StopBroker<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.run(&["stop"], None);
+        }
+    }
+
     let app = Fixture::new().await;
+    let _stop = StopBroker(&app);
     let project = app._root.path();
     devlink_broker::credentials::set_private_permissions(project).unwrap();
     // Explicit login must call login even when a valid session is present.
     assert!(app.login().status.success());
     let bin = project.join("test-bin");
     let saved_host = tool_fixture::host(&bin, "codex", "codex-cli 0.166.0");
-    let (node, entry) = tool_fixture::mcp_runtime(&bin);
+    let (node, entry) = runtime.unwrap_or_else(|| tool_fixture::mcp_runtime(&bin));
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -270,6 +294,7 @@ async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
         .write_all(format!("{PASSWORD}\r\n").as_bytes())
         .unwrap();
     let login = child.wait_with_output().unwrap();
+    assert_eq!(login.status.code(), Some(3), "{}", text(&login));
 
     // The saved installation will now be outside PATH, with a different valid
     // installation available under the same command name.
@@ -298,9 +323,6 @@ async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
         .env("PATH", &alternate_path)
         .output()
         .unwrap();
-    let _ = app.run(&["stop"], None);
-
-    assert_eq!(login.status.code(), Some(3), "{}", text(&login));
     assert_no_secrets(&login);
     assert!(login.stderr.is_empty());
     let events: Vec<Value> = String::from_utf8(login.stdout)
