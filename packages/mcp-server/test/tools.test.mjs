@@ -60,6 +60,11 @@ test('all eight business tools use the common invocation/result path and trusted
   }
   const getTasks = broker.calls.find((c) => c.path === operationRoutes.get_tasks);
   assert.deepEqual(getTasks.body.arguments, { direction: 'received', limit: 20 });
+  const reject = { taskId: 'task-2', version: '0', status: 'REJECTED', rejectionReason: '  out of scope\n범위 밖 ' };
+  const rejected = await client.callTool({ name: 'update_task_status', arguments: reject });
+  assert.equal(rejected.isError, undefined);
+  const forwarded = broker.calls.findLast((c) => c.path === operationRoutes.update_task_status);
+  assert.deepEqual(forwarded.body.arguments, reject);
 });
 
 test('invalid inputs and actor overrides are rejected before any session or broker request', async (t) => {
@@ -74,6 +79,11 @@ test('invalid inputs and actor overrides are rejected before any session or brok
     ['register_agent', { name: 'x', toolType: 'unknown' }],
     ['update_task_status', { taskId: 'task', status: 'COMPLETED' }],
     ['update_task_status', { taskId: 'task', status: 'FAILED' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'REJECTED' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'REJECTED', rejectionReason: '   ' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'REJECTED', rejectionReason: 'no', partiallyModified: false }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'IN_PROGRESS', rejectionReason: 'no' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'FAILED', failureReason: 'x', partiallyModified: false, rejectionReason: 'no' }],
     ['get_tasks', { limit: 101 }],
     ['get_task_result', { taskId: 1 }],
     ['get_updates', { limit: 51 }],
