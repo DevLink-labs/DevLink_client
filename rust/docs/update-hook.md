@@ -1,6 +1,6 @@
 # Host 훅 업데이트 알림 — `devlink updates-hook`
 
-2026-11-04 (Asia/Seoul). Codex·Claude Code가 세션 시작과 프롬프트 제출 때 새 작업과 보낸 작업의 상태 변화를 문맥으로 받도록, [로컬 업데이트 피드](local-updates.md)를 짧은 사실 요약으로 내보내는 helper다. Host 설정 파일에 훅을 설치하는 일과 실제 Host 호출 검증은 범위 밖이다.
+2026-11-04 (Asia/Seoul). Codex·Claude Code가 세션 시작과 프롬프트 제출 때 새 작업과 보낸 작업의 상태 변화를 문맥으로 받도록, [로컬 업데이트 피드](local-updates.md)를 짧은 사실 요약으로 내보내는 helper다. Host 설정 파일에 훅을 설치하는 일은 범위 밖이다. 실제 Host에서의 문맥 주입은 [격리 PoC](#host-poc-결과)로 확인했다.
 
 ## 명령
 
@@ -58,7 +58,11 @@ Claude Code (`.claude/settings.json` 또는 `~/.claude/settings.json`):
 }
 ```
 
-Codex (`~/.codex/hooks.json` 또는 `<repo>/.codex/hooks.json`, 훅 신뢰 승인 필요):
+Codex는 사용자 계층 `~/.codex/hooks.json`에 둔다. 처음 실행할 때 대화형 Codex의 `/hooks`에서 훅을 신뢰 승인해야 하며, 명령이 바뀌면 다시 승인해야 한다. 사용자 계층에 두어도 helper는 작업 디렉터리가 bind된 프로젝트 밖이면 출력하지 않으므로 다른 프로젝트에 섞이지 않는다.
+
+프로젝트 계층 `<repo>/.codex/hooks.json`은 권장하지 않는다. Codex는 프로젝트 `.codex/`를 그 프로젝트가 신뢰된 경우에만 읽는데, 아래 PoC에서는 `-c projects.'<경로>'.trust_level="trusted"`와 `git init`을 적용해도 이 파일이 로드되지 않았다. 원인은 확정하지 못했다.
+
+Codex (`~/.codex/hooks.json`):
 
 ```json
 {
@@ -74,4 +78,17 @@ Codex (`~/.codex/hooks.json` 또는 `<repo>/.codex/hooks.json`, 훅 신뢰 승�
 - `cargo test -p devlink-broker --test update_hook`: 한 번만 보고, task별 최신 상태, 호출 사이에 늦게 도착한 낮은 version 무보고, 다른 팀·Agent·요청자 제외, 본문 미포함, Host별 cursor, 10개 상한, 미바인딩·프로젝트 밖·잠금 경합 시 소비 없이 무출력, 저장소 정리·손상 cursor 재시작 안내, 선택 팀 불일치와 잘못된 consumer 오류.
 - `update_hook::tests`: consumer 이름 제한과 목록 상한.
 - `cargo test -p devlink-cli --test cli_updates_hook`: 항상 종료 코드 0, 업데이트 없을 때 무출력, 잘못된 값의 stderr 안내, 저장소 오류는 session-start에서만 안내.
-- 미검증: 실제 Codex·Claude Code 프로세스가 이 출력을 문맥에 넣는지.
+
+## Host PoC 결과
+
+2026-11-04, develop `6e34434`, Windows 11. 임시 `--config`에 bind된 Agent와 합성 수신·알림 이벤트를 저장하고 비대화형으로 실행했다. 사용자 전역 DevLink·Claude·Codex 설정과 중앙 서버는 쓰지 않았다.
+
+| Host | 실행 방식 | 결과 |
+| --- | --- | --- |
+| Claude Code 2.1.310 | 프로젝트 `.claude/settings.json`, `claude -p --setting-sources project` | SessionStart·UserPromptSubmit 모두 요약이 모델 문맥에 들어감. 새 이벤트만 표시하고, 새 이벤트가 없으면 출력 없음 |
+| Codex 0.166.0 | `codex exec --dangerously-bypass-hook-trust`, `-c hooks.<Event>=[...]` | SessionStart·UserPromptSubmit 모두 실행됨. 모델이 task ID·Agent·상태를 정확히 요약함. 원문 복사 요청은 developer 메시지라는 이유로 거절 |
+| Codex 0.166.0 | 같은 명령, 프로젝트 `.codex/hooks.json` | 훅 미실행(cursor 미생성) |
+
+- 두 모델 모두 요약을 사용자 승인으로 해석하지 않았다.
+- prompt·resultText에 넣은 표식 문자열은 출력되지 않았고, Host별 cursor는 서로 독립이었다.
+- 미검증: `~/.codex/hooks.json` 파일 자체(PoC는 같은 비프로젝트 계층인 `-c` 지정만 확인), 대화형 세션(TUI)의 시작·재개·입력, 우회 플래그 없이 저장된 훅 신뢰로 실행하는 경우, 실제 중앙 서버에서 받은 이벤트.
