@@ -157,6 +157,21 @@ impl Feed {
         }
     }
 
+    /// Highest retained version of a sent task (later entry wins a tie). Notifications keep
+    /// late lower versions in history, so the newest batch alone can be stale.
+    pub(crate) fn latest_sent(&self, task_id: u64) -> Option<&TaskNotification> {
+        self.sent
+            .iter()
+            .filter(|event| event.task_id() == task_id)
+            .reduce(|best, event| {
+                if event.version() >= best.version() {
+                    event
+                } else {
+                    best
+                }
+            })
+    }
+
     /// Every retained entry; both stores are bounded, so one batch drains the feed.
     pub(crate) fn len(&self) -> usize {
         self.received.len() + self.sent.len()

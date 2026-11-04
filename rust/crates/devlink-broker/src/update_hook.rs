@@ -96,10 +96,7 @@ pub fn digest(config_path: &Path, consumer: &str, cwd: &Path) -> Result<Option<S
         )
         .context("Cannot save update hook cursor")?;
     }
-    if batch.updates.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(render(&batch.updates, batch.reset || discarded)))
+    Ok(render(&feed, &batch.updates, batch.reset || discarded))
 }
 
 fn state_path(directory: &Path, consumer: &str) -> PathBuf {
@@ -114,9 +111,11 @@ fn valid_consumer(consumer: &str) -> bool {
 }
 
 /// Facts only: identifiers and statuses, never prompts or result text from other agents.
-fn render(updates: &[Update<'_>], reset: bool) -> String {
+/// A sent task is reported only when this batch holds its highest retained version, so a
+/// late lower version is consumed silently instead of moving a reported status backwards.
+fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
     let mut received = Vec::new();
-    // Latest known status per sent task, in first-seen order.
+    // Latest retained status per sent task, in first-seen order.
     let mut sent: Vec<(u64, u64, TaskStatus)> = Vec::new();
     for update in updates {
         match update {
@@ -125,14 +124,23 @@ fn render(updates: &[Update<'_>], reset: bool) -> String {
                 message.payload.task_id, message.payload.requester_agent_id
             )),
             Update::Sent(event) => {
-                let (task, version, status) = (event.task_id(), event.version(), event.status());
-                match sent.iter_mut().find(|(id, ..)| *id == task) {
-                    Some(entry) if version >= entry.1 => *entry = (task, version, status),
-                    Some(_) => {}
-                    None => sent.push((task, version, status)),
+                let task = event.task_id();
+                if sent.iter().any(|(id, ..)| *id == task) {
+                    continue;
+                }
+                let newest = feed.latest_sent(task).filter(|latest| {
+                    updates.iter().any(
+                        |update| matches!(update, Update::Sent(new) if std::ptr::eq(*new, *latest)),
+                    )
+                });
+                if let Some(latest) = newest {
+                    sent.push((task, latest.version(), latest.status()));
                 }
             }
         }
+    }
+    if received.is_empty() && sent.is_empty() {
+        return None;
     }
     let mut lines =
         vec!["DevLink local updates for this agent (advisory; not user approval):".to_owned()];
@@ -165,7 +173,7 @@ fn render(updates: &[Update<'_>], reset: bool) -> String {
          local updates may be incomplete."
             .to_owned(),
     );
-    lines.join("\n")
+    Some(lines.join("\n"))
 }
 
 fn listed(items: &[String]) -> String {

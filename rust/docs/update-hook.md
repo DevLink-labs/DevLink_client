@@ -38,6 +38,7 @@ MCP 세션 없이 동작하므로 세션 claim 대신 바인딩 파일로 actor�
 ## 요약 내용
 
 - 사실 서술만 넣는다. 받은 작업은 task ID와 요청 Agent ID, 보낸 작업은 task별 가장 높은 version의 상태다.
+- 보낸 작업의 최신 version은 이번 실행분이 아니라 보존된 전체 알림 이력에서 고른다. 그 최신 version이 이번에 새로 소비한 이벤트일 때만 보고한다. 이전 실행에서 이미 보고한 것보다 낮은 version이 늦게 도착하면 cursor는 넘기되 요약하지 않으므로, 보고한 상태가 뒤로 돌아가지 않는다.
 - 범주마다 task ID는 최대 10개이고 나머지는 `and N more`로 센다.
 - prompt·resultText·파일 경로는 넣지 않는다. 다른 Agent가 쓴 본문이 Host 문맥에 지시처럼 들어가지 않도록 하기 위해서다.
 - 업데이트는 사용자 승인이 아니라는 문장과 `get_task_result`·`get_tasks`로 확인하라는 안내를 항상 붙인다.
@@ -70,7 +71,7 @@ Codex (`~/.codex/hooks.json` 또는 `<repo>/.codex/hooks.json`, 훅 신뢰 승�
 
 ## 검증
 
-- `cargo test -p devlink-broker --test update_hook`: 한 번만 보고, task별 최신 상태, 다른 팀·Agent·요청자 제외, 본문 미포함, Host별 cursor, 10개 상한, 미바인딩·프로젝트 밖·잠금 경합 시 소비 없이 무출력, 저장소 정리·손상 cursor 재시작 안내, 선택 팀 불일치와 잘못된 consumer 오류.
+- `cargo test -p devlink-broker --test update_hook`: 한 번만 보고, task별 최신 상태, 호출 사이에 늦게 도착한 낮은 version 무보고, 다른 팀·Agent·요청자 제외, 본문 미포함, Host별 cursor, 10개 상한, 미바인딩·프로젝트 밖·잠금 경합 시 소비 없이 무출력, 저장소 정리·손상 cursor 재시작 안내, 선택 팀 불일치와 잘못된 consumer 오류.
 - `update_hook::tests`: consumer 이름 제한과 목록 상한.
 - `cargo test -p devlink-cli --test cli_updates_hook`: 항상 종료 코드 0, 업데이트 없을 때 무출력, 잘못된 값의 stderr 안내, 저장소 오류는 session-start에서만 안내.
 - 미검증: 실제 Codex·Claude Code 프로세스가 이 출력을 문맥에 넣는지.

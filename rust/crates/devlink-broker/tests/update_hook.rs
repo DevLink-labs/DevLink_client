@@ -99,7 +99,7 @@ impl Fixture {
                     "started_at":"2026-11-04T10:00:00","completed_at":"2026-11-04T10:01:00"}})
         } else {
             json!({"type":"TASK_STATUS_CHANGED","event_id":event_id,"task_id":task_id,"version":version,
-                "payload":{"previous_status":"PENDING","status":status}})
+                "payload":{"previous_status":if status == "FAILED" {"IN_PROGRESS"} else {"PENDING"},"status":status}})
         };
         let event: TaskNotification = serde_json::from_value(value).unwrap();
         Notifications::open(&self.path)
@@ -222,4 +222,29 @@ async fn mismatched_selection_or_invalid_consumer_is_an_error() {
     let error = digest(&f.path, "codex", &f.project).unwrap_err();
     assert!(error.to_string().contains("does not match"), "{error}");
     assert!(!f.cursor_file("codex").exists());
+}
+
+#[tokio::test]
+async fn late_older_status_does_not_regress_digest() {
+    let f = Fixture::new();
+    f.notify(12, 201, 2, "COMPLETED").await;
+    assert!(f.digest("codex").unwrap().contains("#201 COMPLETED (v2)"));
+    f.notify(12, 201, 1, "IN_PROGRESS").await;
+    // The late event is consumed without reporting an older status.
+    assert_eq!(f.digest("codex"), None);
+
+    f.notify(12, 202, 3, "FAILED").await;
+    f.notify(12, 202, 2, "IN_PROGRESS").await;
+    f.receive(101, 1, 12).await;
+    f.notify(12, 201, 1, "IN_PROGRESS").await;
+    let text = f.digest("codex").unwrap();
+    assert!(
+        text.contains("#202 FAILED (v3)") && text.contains("#101"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("#201") && !text.contains("IN_PROGRESS"),
+        "{text}"
+    );
+    assert_eq!(f.digest("codex"), None);
 }
