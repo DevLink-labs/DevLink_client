@@ -512,6 +512,21 @@ pub struct SetupError {
 }
 
 impl SetupError {
+    pub(super) fn saved_tool_unavailable(path: PathBuf) -> Self {
+        let mut error = Self::new(
+            ErrorCode::ToolUnavailable,
+            Step::SelectTool,
+            Outcome::NotApplied,
+        );
+        error.location = Some(ErrorLocation {
+            file: path,
+            field: None,
+        });
+        error.message = "The saved Host could not be used. Restore its installation or select a replacement with interactive setup and --tool-path.";
+        error.recovery.action = "restore_or_reselect_saved_host";
+        error
+    }
+
     pub fn new(code: ErrorCode, step: Step, outcome: Outcome) -> Self {
         Self {
             code,

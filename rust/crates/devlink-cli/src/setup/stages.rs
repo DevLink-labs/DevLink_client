@@ -793,11 +793,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 Outcome::NotApplied,
             ));
         }
-        let preferred = self
+        let saved = snapshot.preferred().filter(|saved| {
+            self.auth.batch.is_some() && self.tools.requested == Some(saved.tool_type)
+        });
+        let batch_candidate = self
             .tools
             .batch_candidate
-            .as_ref()
-            .or_else(|| snapshot.preferred());
+            .clone()
+            .filter(|_| saved.is_none());
+        let preferred = batch_candidate.as_ref().or_else(|| snapshot.preferred());
         let pinned = self.tools.requested.or(snapshot.bound_tool);
         let requested = pinned.or_else(|| preferred.map(|s| s.tool_type));
         let explicit = requested.zip(self.tools.path.as_deref());
@@ -807,11 +811,15 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
         // choice is probed first; the full scan runs only when it is gone.
         self.tools.reports = match (pinned, requested) {
             (Some(tool), _) => {
-                let report = self
-                    .tools
-                    .search
-                    .detect_one(tool, preferred, explicit)
-                    .await;
+                let report = match saved {
+                    Some(saved) => self.tools.search.recheck_saved(saved).await,
+                    None => {
+                        self.tools
+                            .search
+                            .detect_one(tool, preferred, explicit)
+                            .await
+                    }
+                };
                 let mut reports = if self.tools.waiting {
                     std::mem::take(&mut self.tools.reports)
                 } else {
@@ -844,13 +852,25 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 .find(|r| r.tool_type == tool)
                 .and_then(|r| r.selected.clone())
         });
-        if let (Some(expected), Some(current)) = (&self.tools.batch_candidate, &selected)
+        if let (Some(expected), Some(current)) = (&batch_candidate, &selected)
             && expected != current
         {
             return self.tool_failure(SetupError::new(
                 ErrorCode::ToolSelectionConflict,
                 Step::SelectTool,
                 Outcome::NotApplied,
+            ));
+        }
+        if let Some(saved) = saved
+            && selected.is_none()
+        {
+            return self.tool_failure(SetupError::saved_tool_unavailable(
+                saved
+                    .executable
+                    .args
+                    .first()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| saved.executable.command.clone()),
             ));
         }
         if selected.is_none() && (self.tools.requested.is_some() || snapshot.bound_tool.is_some()) {
@@ -901,6 +921,19 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 Outcome::NotApplied,
             ));
         };
+        if self.auth.batch.is_some()
+            && batch_candidate.is_none()
+            && let Err(error) = self
+                .preflight_mcp(
+                    context,
+                    Step::SelectTool,
+                    selected.tool_type,
+                    Some(selected.clone()),
+                )
+                .await
+        {
+            return self.tool_failure(*error);
+        }
         let path = context.config_path.clone();
         let publish = selected.clone();
         let reuse_bound = snapshot.bound_tool == Some(selected.tool_type);
@@ -1593,19 +1626,26 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             ))
         })?
         .map_err(|error| Box::new(config_error(error)))?;
-        let report = self.tools.search.detect_one(tool, None, None).await;
-        let Some(host) = report.selected.clone() else {
-            let mut error = SetupError::new(
-                ErrorCode::ToolUnavailable,
-                Step::Validate,
-                Outcome::NotApplied,
-            );
-            error.tools = vec![report];
-            return Err(Box::new(error));
-        };
-        self.preflight_mcp(context, Step::Validate, tool, Some(host.clone()))
-            .await?;
-        self.tools.batch_candidate = Some(host);
+        // A saved executable can only be scoped after authentication and team
+        // verification. If there is no saved file, keep the early PATH check.
+        if matches!(
+            std::fs::symlink_metadata(setup_tools::path(&context.config_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
+            let report = self.tools.search.detect_one(tool, None, None).await;
+            let Some(host) = report.selected.clone() else {
+                let mut error = SetupError::new(
+                    ErrorCode::ToolUnavailable,
+                    Step::Validate,
+                    Outcome::NotApplied,
+                );
+                error.tools = vec![report];
+                return Err(Box::new(error));
+            };
+            self.preflight_mcp(context, Step::Validate, tool, Some(host.clone()))
+                .await?;
+            self.tools.batch_candidate = Some(host);
+        }
         if login {
             self.auth.credentials =
                 Some(self.input.request().await.map_err(|error| match error {

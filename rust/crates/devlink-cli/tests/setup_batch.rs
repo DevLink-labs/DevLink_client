@@ -143,7 +143,7 @@ async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
     // Explicit login must call login even when a valid session is present.
     assert!(app.login().status.success());
     let bin = project.join("test-bin");
-    tool_fixture::host(&bin, "codex", "codex-cli 0.166.0");
+    let saved_host = tool_fixture::host(&bin, "codex", "codex-cli 0.166.0");
     let (node, entry) = tool_fixture::mcp_runtime(&bin);
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
@@ -184,11 +184,33 @@ async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
         .unwrap();
     let login = child.wait_with_output().unwrap();
 
+    // The saved installation will now be outside PATH, with a different valid
+    // installation available under the same command name.
+    let alternate_bin = project.join("alternate-bin");
+    let alternate = tool_fixture::host(&alternate_bin, "codex", "codex-cli 0.166.0");
+    let alternate_path = std::env::join_paths(std::iter::once(alternate_bin).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let selection_file = devlink_broker::setup_tools::path(&app.path);
+    let saved_selection = fs::read(&selection_file).unwrap();
+    let saved_calls = fs::read_to_string(saved_host.with_extension("calls")).unwrap();
+
     plan["user"] = json!({"mode":"session"});
     plan["project"] = json!({"path":project});
     plan["agent"] = json!({"action":"use","id":"201"});
     plan["mcp"] = json!({"mode":"apply","targetPath":project.join(".codex/config.toml")});
-    let reuse = run(&plan, "json").output().unwrap();
+    let reuse = run(&plan, "json")
+        .env("PATH", &alternate_path)
+        .output()
+        .unwrap();
+    let reused_selection = fs::read(&selection_file).unwrap();
+    let reused_calls = fs::read_to_string(saved_host.with_extension("calls")).unwrap();
+    fs::remove_file(&saved_host).unwrap();
+    let unavailable = run(&plan, "json")
+        .env("PATH", &alternate_path)
+        .output()
+        .unwrap();
     let _ = app.run(&["stop"], None);
 
     assert_eq!(login.status.code(), Some(3), "{}", text(&login));
@@ -216,6 +238,21 @@ async fn unattended_login_creates_once_then_session_mode_reuses_the_agent() {
     assert_eq!(data["data"]["agentId"], "201");
     assert_eq!(data["data"]["connection"]["setupReady"], true);
     assert_eq!(data["stages"][1]["reused"], true);
+    assert_eq!(data["stages"][4]["reused"], true);
+    assert_eq!(reused_selection, saved_selection);
+    assert!(reused_calls.len() > saved_calls.len());
+    assert_eq!(unavailable.status.code(), Some(5), "{}", text(&unavailable));
+    assert_no_secrets(&unavailable);
+    let error: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "SETUP_TOOL_UNAVAILABLE");
+    assert_eq!(error["error"]["step"], "select_tool");
+    assert_eq!(
+        error["error"]["recovery"]["action"],
+        "restore_or_reselect_saved_host"
+    );
+    assert_eq!(error["stages"][5]["status"], "skipped");
+    assert_eq!(fs::read(&selection_file).unwrap(), saved_selection);
+    assert!(!alternate.with_extension("calls").exists());
     assert_eq!(app.state.create_calls.load(Ordering::SeqCst), 1);
     assert_eq!(app.state.token_calls.load(Ordering::SeqCst), 1);
     assert_eq!(

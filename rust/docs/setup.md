@@ -709,4 +709,6 @@ devlink setup --non-interactive --input .\setup-v1.json --output jsonl
 
 `user.mode=session`은 저장된 세션을 확인한다. `user.mode=login`은 `--password-stdin`으로 비밀번호 한 줄을 받아 새로 로그인한다. `serverUrl`은 새 프로필의 서버 주소로 사용하며, 이미 설정된 프로필에서는 같은 origin인지 확인한다. 다른 서버를 대상으로 할 때는 해당 서버용 `--config`를 선택한다.
 
+인증과 팀 확인 후 같은 서버·사용자·팀·프로젝트에 저장된 `tool.type`의 Host를 재검사한다. PATH 밖의 경로도 유효하면 재사용한다. 해당 선택이 없을 때만 PATH와 기본 설치 디렉터리를 탐색한다. 저장된 Host를 사용할 수 없으면 `SETUP_TOOL_UNAVAILABLE`과 복구 안내를 반환한다. 설치를 복구하거나 대화형 `setup --tool <TYPE> --tool-path <FILE>`로 교체 경로를 명시한다. Agent 생성·토큰 발급 전에 선택한 Host와 MCP 설정을 확인한다.
+
 `timeoutMs`는 입력 읽기와 검증부터 최종 결과까지 적용된다. 기본값은 60초다. 제한시간이 지나면 이후 단계는 건너뛰고 이미 완료한 단계와 확인한 Agent ID를 결과에 남긴다. Agent 확인 뒤 토큰 단계에서 중단되면 바인딩 저장 여부를 단정하지 않고 register_agent를 `outcome:unknown`으로 표시한다. 결과가 불확실한 등록이나 토큰 발급은 자동으로 다시 요청하지 않는다.
