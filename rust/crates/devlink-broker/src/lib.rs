@@ -34,3 +34,5 @@ pub mod tool_discovery;
 pub mod update_hook;
 pub mod updates;
 pub mod user_auth;
+#[cfg(windows)]
+mod win_acl;

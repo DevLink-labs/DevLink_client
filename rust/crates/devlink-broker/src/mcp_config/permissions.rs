@@ -45,30 +45,5 @@ pub(super) fn copy_host_permissions(source: &Path, target: &Path) -> Result<()> 
 }
 #[cfg(windows)]
 pub(super) fn copy_host_permissions(source: &Path, target: &Path) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-    let mut child=Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",
-        "$ErrorActionPreference='Stop'; $acl=[System.IO.File]::GetAccessControl($env:DEVLINK_CONFIG_ACL_SOURCE); $copy=New-Object System.Security.AccessControl.FileSecurity; $copy.SetSecurityDescriptorSddlForm($acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access),[System.Security.AccessControl.AccessControlSections]::Access); [System.IO.File]::SetAccessControl($env:DEVLINK_CONFIG_ACL_TARGET,$copy)"])
-        .env("DEVLINK_CONFIG_ACL_SOURCE",source).env("DEVLINK_CONFIG_ACL_TARGET",target)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x08000000)
-        .spawn().map_err(|_| unsafe_file())?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(unsafe_file())
-                };
-            }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unsafe_file());
-            }
-        }
-    }
+    crate::win_acl::copy_dacl(source, target).map_err(|_| unsafe_file())
 }
