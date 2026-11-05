@@ -37,7 +37,9 @@ async fn serve_context_request(stream: &mut tokio::net::TcpStream, agent: Option
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut head = [0; 4096];
     let count = stream.peek(&mut head).await.unwrap();
-    if !head[..count].starts_with(b"GET /api/v1/agents/me ") {
+    // The broker also pulls question/answer arrivals on the same origin after READY.
+    let messages = head[..count].starts_with(b"GET /api/v1/agents/me/task-messages?");
+    if !messages && !head[..count].starts_with(b"GET /api/v1/agents/me ") {
         return false;
     }
     let mut request = Vec::new();
@@ -55,6 +57,12 @@ async fn serve_context_request(stream: &mut tokio::net::TcpStream, agent: Option
     let headers = String::from_utf8(request).unwrap().to_lowercase();
     assert!(headers.contains(&format!("authorization: bearer {TOKEN}\r\n")));
     assert!(!headers.contains("cookie:") && !headers.contains("origin:"));
+    if messages {
+        let body = serde_json::json!({"success":true,"data":{"items":[],"nextCursor":"cli-fixture","hasNext":false}})
+            .to_string();
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        return true;
+    }
     let body = match agent {
         Some(id) => {
             serde_json::json!({"success":true,"data":{"agentId":id,"ownerUserId":3,"teamId":1,
@@ -199,7 +207,20 @@ async fn cli_persists_tasks_before_ack_and_deduplicates_after_restart() {
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         for attempt in 1..=2 {
-            let (stream, _) = listener.accept().await.unwrap();
+            // Skip only the broker's question/answer pulls; any other request still has to
+            // be the WebSocket upgrade this test expects.
+            let stream = loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let prefix = b"GET /api/v1/agents/me/task-messages?";
+                let mut head = [0; 64];
+                while stream.peek(&mut head).await.unwrap() < prefix.len() {
+                    sleep(Duration::from_millis(1)).await;
+                }
+                if !head.starts_with(prefix) {
+                    break stream;
+                }
+                assert!(serve_context_request(&mut stream, Some(12)).await);
+            };
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let event_id = format!("cli-task-{attempt}");
             for message in [

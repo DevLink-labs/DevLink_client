@@ -11,6 +11,8 @@ export const operationRoutes = {
   get_tasks: '/v1/tasks/list',
   get_task_result: '/v1/tasks/result',
   get_updates: '/v1/updates',
+  ask_question: '/v1/tasks/questions',
+  answer_question: '/v1/tasks/answers',
 } as const;
 export type BrokerOperation = keyof typeof operationRoutes;
 

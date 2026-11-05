@@ -296,6 +296,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 let _broker = config::lock(&directory.join("broker.lock"))
                     .context("Stop the broker before clearing notifications")?;
                 devlink_broker::notifications::Notifications::clear_config(&path)?;
+                // Question/answer arrivals are local notices too; their central cursor is kept.
+                devlink_broker::task_messages::TaskMessages::clear_config(&path)?;
                 print_json(&serde_json::json!({"cleared":true,"centralTasksChanged":false}))?;
                 return Ok(());
             }
@@ -480,6 +482,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                     println!(
                         "Inbox rejects : {} (last: {:?})",
                         inbox.rejected_events, inbox.last_error
+                    );
+                }
+                if let Some(sync) = health.task_messages
+                    && (sync.rejected_events > 0 || sync.failed_pulls > 0)
+                {
+                    println!(
+                        "Question/answer sync: {} rejected, {} failed pulls (last: {}); verify with get_task_result",
+                        sync.rejected_events,
+                        sync.failed_pulls,
+                        sync.last_error.as_deref().unwrap_or("none")
                     );
                 }
                 if let Some(count) = health.notification_rejections {

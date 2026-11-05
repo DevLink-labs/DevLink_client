@@ -66,6 +66,8 @@ enum CreateArguments {
 struct CanonicalArguments {
     receiver_agent_id: String,
     prompt: String,
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    request_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +78,9 @@ struct LegacyArguments {
     description: String,
     #[serde(default, deserialize_with = "crate::sessions::present")]
     task_context: Option<String>,
+    /// Caller idempotency key: a key returned earlier or one the caller chose.
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    request_key: Option<String>,
 }
 
 /// 중앙 서버로 전송할 프롬프트 JSON 페이로드
@@ -90,11 +95,19 @@ struct Prompt<'a> {
 
 impl CreateArguments {
     fn command(&self, principal: &Principal) -> Result<CreateTaskCommand, TaskError> {
+        let key = match self {
+            Self::Legacy(args) => &args.request_key,
+            Self::Canonical(args) => &args.request_key,
+        };
+        // An empty request_key means "broker mints one", so an explicit "" is invalid.
+        if key.as_deref().is_some_and(str::is_empty) {
+            return Err(validation());
+        }
         match self {
             Self::Legacy(args) => args.command(principal),
             Self::Canonical(args) => {
                 let command = CreateTaskCommand {
-                    request_key: String::new(),
+                    request_key: args.request_key.clone().unwrap_or_default(),
                     requester_agent_id: principal
                         .agent_id
                         .as_ref()
@@ -128,7 +141,7 @@ impl LegacyArguments {
             return Err(validation());
         }
         let command = CreateTaskCommand {
-            request_key: String::new(),
+            request_key: self.request_key.clone().unwrap_or_default(),
             requester_agent_id: principal
                 .agent_id
                 .as_ref()

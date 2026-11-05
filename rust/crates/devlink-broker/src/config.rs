@@ -37,6 +37,9 @@ pub struct Config {
     /// 중앙 서버 인증 응답 제한 시간 (ms, 기본값: 5000)
     #[serde(default = "auth_timeout")]
     pub auth_timeout_ms: u64,
+    /// 질문·답변 안전망 pull 주기 (ms, 기본값: 60000, 실제 대기는 ±1/6 무작위)
+    #[serde(default = "task_message_sync_interval")]
+    pub task_message_sync_interval_ms: u64,
 }
 
 pub(crate) const DEFAULT_LOCAL_PORT: u16 = 43127;
@@ -52,6 +55,9 @@ fn max_delay() -> u64 {
 }
 fn auth_timeout() -> u64 {
     5000
+}
+fn task_message_sync_interval() -> u64 {
+    60000
 }
 
 /// Safe field diagnostics, shared by config commands and setup.
@@ -84,6 +90,7 @@ impl Default for Config {
             reconnect_initial_ms: initial_delay(),
             reconnect_max_ms: max_delay(),
             auth_timeout_ms: auth_timeout(),
+            task_message_sync_interval_ms: task_message_sync_interval(),
         }
     }
 }
@@ -140,6 +147,12 @@ impl Config {
             return Err(invalid(
                 "authTimeoutMs",
                 "authTimeoutMs must be between 100 and 60000",
+            ));
+        }
+        if !(1000..=3_600_000).contains(&self.task_message_sync_interval_ms) {
+            return Err(invalid(
+                "taskMessageSyncIntervalMs",
+                "taskMessageSyncIntervalMs must be between 1000 and 3600000",
             ));
         }
         if self.local_port == 80 {

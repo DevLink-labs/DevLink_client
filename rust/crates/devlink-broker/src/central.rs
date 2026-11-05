@@ -108,6 +108,7 @@ pub struct CentralState {
     presence: SharedPresence,
     inbox: Option<Inbox>,
     notifications: Option<crate::notifications::Notifications>,
+    task_messages: Option<crate::task_messages::TaskMessages>,
     subject_changes: watch::Sender<u64>,
     auth_failures: watch::Sender<u64>,
 }
@@ -139,6 +140,7 @@ impl CentralState {
             presence,
             inbox: None,
             notifications: None,
+            task_messages: None,
             context_client: None,
             subject_changes: watch::channel(0).0,
             auth_failures: watch::channel(0).0,
@@ -156,6 +158,18 @@ impl CentralState {
     ) -> Self {
         self.notifications = Some(notifications);
         self
+    }
+
+    /// Question/answer pull trigger. READY and valid notices only signal; the worker pulls.
+    pub fn with_task_messages(mut self, store: crate::task_messages::TaskMessages) -> Self {
+        self.task_messages = Some(store);
+        self
+    }
+
+    pub fn task_message_diagnostics(&self) -> Option<crate::task_messages::TaskMessageDiagnostics> {
+        self.task_messages
+            .as_ref()
+            .map(crate::task_messages::TaskMessages::diagnostics)
     }
 
     pub fn notification_rejections(&self) -> Option<u64> {
@@ -830,6 +844,22 @@ async fn session(
                             }
                             continue;
                         }
+                        if ready && crate::protocol::TaskMessageNotice::recognizes(&text) {
+                            let auth = handle.state.inner.read().await;
+                            if auth.generation != handle.generation { return Outcome::Stopped; }
+                            if auth.status != ConnectionStatus::Connected { return Outcome::AuthFailed; }
+                            let Some(identity) = &auth.identity else { return Outcome::ProtocolViolation; };
+                            // A body-less pull signal: no ACK, no cursor change, no task action.
+                            // Misrouted or malformed notices are counted, and the safety-net pull
+                            // still recovers anything they referred to.
+                            if let Some(store) = &handle.state.task_messages {
+                                match serde_json::from_str::<crate::protocol::TaskMessageNotice>(&text) {
+                                    Ok(notice) if notice.is_valid() && notice.receiver_agent_id == identity.agent_id => store.signal(),
+                                    _ => store.reject(),
+                                }
+                            }
+                            continue;
+                        }
                         if !ready {
                             match serde_json::from_str::<ServerMessage>(&text) {
                                 Ok(ServerMessage::BrokerReady(payload)) if payload.is_valid() => {
@@ -860,6 +890,10 @@ async fn session(
                                     if !handle.set_status(ConnectionStatus::Connected).await {
                                         let _ = timeout(Duration::from_secs(1), socket.close(None)).await;
                                         return Outcome::Stopped;
+                                    }
+                                    // Every connect/reconnect catches up on messages missed offline.
+                                    if let Some(store) = &handle.state.task_messages {
+                                        store.signal();
                                     }
                                 }
                                 _ => {

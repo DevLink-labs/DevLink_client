@@ -129,6 +129,79 @@ impl TaskCreatedMessage {
     }
 }
 
+/// 질문·답변 알림의 종류 (`TASK_QUESTION_CREATED` / `TASK_ANSWER_CREATED`)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TaskMessageNoticeType {
+    TaskQuestionCreated,
+    TaskAnswerCreated,
+}
+
+/// 원본 TaskEvent 종류. 알림 type과 짝이 맞아야 한다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TaskMessageType {
+    Question,
+    Answer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMessageNoticePayload {
+    /// 원본 TaskEvent.id 문자열 (task-messages 응답의 eventId와 같은 값)
+    pub task_event_id: String,
+    /// 해당 Task 안의 이벤트 순서 (양의 정수 문자열)
+    pub sequence: String,
+    pub event_type: TaskMessageType,
+}
+
+/// 같은 Task의 상대 Agent가 질문·답변을 남겼다는 중앙 알림.
+///
+/// 본문이 없으며 `GET /api/v1/agents/me/task-messages`를 조회하라는 신호로만 쓴다.
+/// ACK를 보내지 않고, 이 알림만으로 cursor를 바꾸거나 작업을 수락·응답하지 않는다.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMessageNotice {
+    /// 중앙 Outbox UUID. 재시도 시 같은 값으로 다시 온다.
+    pub event_id: String,
+    #[serde(rename = "type")]
+    pub kind: TaskMessageNoticeType,
+    pub task_id: u64,
+    pub receiver_agent_id: u64,
+    pub payload: TaskMessageNoticePayload,
+}
+
+impl TaskMessageNotice {
+    /// 질문·답변 알림 type인지 본문을 해석하지 않고 판별한다.
+    pub fn recognizes(text: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| {
+            matches!(
+                v.get("type").and_then(serde_json::Value::as_str),
+                Some("TASK_QUESTION_CREATED" | "TASK_ANSWER_CREATED")
+            )
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let id = |value: u64| value > 0 && value <= i64::MAX as u64;
+        uuid::Uuid::parse_str(&self.event_id).is_ok()
+            && id(self.task_id)
+            && id(self.receiver_agent_id)
+            && crate::task_client::numeric_id(&self.payload.task_event_id).is_some()
+            && crate::task_client::numeric_id(&self.payload.sequence).is_some()
+            && matches!(
+                (self.kind, self.payload.event_type),
+                (
+                    TaskMessageNoticeType::TaskQuestionCreated,
+                    TaskMessageType::Question
+                ) | (
+                    TaskMessageNoticeType::TaskAnswerCreated,
+                    TaskMessageType::Answer
+                )
+            )
+    }
+}
+
 impl ClientMessage {
     /// 주어진 접속 상태로 `AGENT_PRESENCE` 메시지를 생성합니다.
     pub fn agent_presence(status: PresenceStatus) -> Self {
@@ -374,5 +447,47 @@ mod tests {
             assert!(serde_json::from_str::<ServerMessage>(&raw).is_err());
         }
         assert!(serde_json::from_str::<ServerMessage>(&format!("{pong} {{}}")).is_err());
+    }
+
+    #[test]
+    fn task_message_notice_is_a_strict_body_less_signal() {
+        let base = serde_json::json!({"event_id":"d339c442-5a5f-44db-9e9b-127309187c21",
+            "type":"TASK_QUESTION_CREATED","task_id":100,"receiver_agent_id":2,
+            "payload":{"task_event_id":"502","sequence":"13","event_type":"QUESTION"}});
+        let text = base.to_string();
+        assert!(TaskMessageNotice::recognizes(&text));
+        let notice: TaskMessageNotice = serde_json::from_str(&text).unwrap();
+        assert!(notice.is_valid());
+        assert_eq!(serde_json::to_value(&notice).unwrap(), base);
+        let mut answer = base.clone();
+        answer["type"] = serde_json::json!("TASK_ANSWER_CREATED");
+        answer["payload"]["event_type"] = serde_json::json!("ANSWER");
+        assert!(
+            serde_json::from_value::<TaskMessageNotice>(answer)
+                .unwrap()
+                .is_valid()
+        );
+        assert!(!TaskMessageNotice::recognizes(
+            r#"{"type":"TASK_CREATED","event_id":"x"}"#
+        ));
+        for (pointer, value) in [
+            ("/type", serde_json::json!("TASK_ANSWER_CREATED")),
+            ("/event_id", serde_json::json!("not-a-uuid")),
+            ("/task_id", serde_json::json!(0)),
+            ("/payload/task_event_id", serde_json::json!("0502")),
+            ("/payload/sequence", serde_json::json!("-1")),
+        ] {
+            let mut invalid = base.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                !serde_json::from_value::<TaskMessageNotice>(invalid)
+                    .is_ok_and(|notice| notice.is_valid()),
+                "{pointer}"
+            );
+        }
+        // A body or unknown field is never accepted as part of the signal.
+        let mut body = base;
+        body["payload"]["message"] = serde_json::json!("secret");
+        assert!(serde_json::from_value::<TaskMessageNotice>(body).is_err());
     }
 }
