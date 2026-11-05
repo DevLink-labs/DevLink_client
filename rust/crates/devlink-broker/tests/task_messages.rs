@@ -407,3 +407,41 @@ async fn foreign_cursor_403_resyncs_once_and_a_repeated_cursor_stops_the_round()
         Some("c1")
     );
 }
+
+#[tokio::test]
+async fn an_agent_after_sixteen_empty_scopes_still_stores_its_pulls() {
+    let mut f = Fixture::new().await;
+    // Sixteen earlier Agents on this server pulled nothing but left their cursors.
+    for agent in 1001..=1016 {
+        f.store
+            .apply(&f.origin, agent, vec![], format!("old-{agent}"))
+            .await
+            .unwrap();
+    }
+    f.central.page(
+        "-",
+        200,
+        ok(
+            vec![item(501, 1, "QUESTION"), item(502, 2, "ANSWER")],
+            "c1",
+            false,
+        ),
+    );
+    f.start(Duration::from_secs(3600)).await;
+    let _socket = f.accept().await;
+    f.wait("seventeenth agent pull", |f| f.events().len() == 2)
+        .await;
+    assert_eq!(f.central.log(), [None]);
+    assert_eq!(
+        f.store.cursor(&f.origin, 12).await.unwrap().as_deref(),
+        Some("c1")
+    );
+    for agent in 1001..=1016 {
+        assert_eq!(
+            f.store.cursor(&f.origin, agent).await.unwrap(),
+            Some(format!("old-{agent}"))
+        );
+    }
+    assert_eq!(f.store.diagnostics().failed_pulls, 0);
+    stored_without_body(&f.path);
+}

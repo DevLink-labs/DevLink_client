@@ -41,7 +41,9 @@
 - 범위는 (중앙 origin, READY Agent ID)이고 범위마다 `cursor`와 도착 정보 목록을 둔다. 도착 정보는 `eventId`·`taskId`·`sequence`·`eventType`·`createdAt`뿐이다. 응답에 본문 같은 다른 필드가 와도 저장하지 않는다.
 - 한 페이지의 항목과 `nextCursor`를 한 번의 교체로 저장한다. 저장에 실패하면 cursor가 그대로라서 다음 조회가 같은 위치에서 다시 시작한다.
 - `eventId`로 중복을 제거한다. 이미 있는 eventId가 다른 내용으로 다시 오면 기존 기록을 유지하고 `rejectedEvents`로 센다.
-- 상한: 전체 4,096건, 범위 16개, 파일 8MiB. 페이지를 저장하다 상한을 넘게 되면, 저장 전에 2,048건을 한 번에 지운다. 현재가 아닌 범위(Agent 재등록이나 서버 주소 변경으로 남은 옛 범위)를 큰 것부터 먼저 지우고, 모자라면 현재 범위의 가장 오래된 기록을 지운다. 새 페이지는 정리 뒤에 넣으므로 아무도 보기 전에 지워지지 않는다. 오래 쓴 Agent도 새 질문·답변을 계속 받는다. 현재 범위를 지울 때만 로컬 업데이트 cursor가 처음부터 다시 시작(`cursorReset`)하며, 이는 2,048건마다 한 번이다.
+- 상한: 전체 4,096건, 파일 8MiB. 범위 개수에는 상한이 없다. Agent 재등록이나 테스트 서버 변경으로 범위가 계속 늘어도 현재 Agent의 동기화는 멈추지 않고, 옛 범위의 cursor도 그대로 남는다.
+- 범위는 조회한 순서로 저장하고, 조회한 범위를 맨 뒤로 옮긴다. 파일이 8MiB를 넘게 될 때만 가장 오래전에 조회한 범위를 통째로 지운다. 현재 범위는 지우지 않는다. 지운 범위의 Agent가 돌아오면 그 범위만 처음부터 다시 조회한다. cursor 하나가 최대 64KiB이므로, 이 정리는 범위가 백 개 이상 쌓인 뒤에야 일어난다.
+- 이벤트 상한(4,096건): 페이지를 저장하다 이 상한을 넘게 되면, 저장 전에 2,048건을 한 번에 지운다. 현재가 아닌 범위(Agent 재등록이나 서버 주소 변경으로 남은 옛 범위)를 큰 것부터 먼저 지우고, 모자라면 현재 범위의 가장 오래된 기록을 지운다. 새 페이지는 정리 뒤에 넣으므로 아무도 보기 전에 지워지지 않는다. 오래 쓴 Agent도 새 질문·답변을 계속 받는다. 현재 범위를 지울 때만 로컬 업데이트 cursor가 처음부터 다시 시작(`cursorReset`)하며, 이는 2,048건마다 한 번이다.
 - 지운 이력은 `get_task_result`로 본다. cursor 없이 처음부터 재동기화하면 지운 항목이 새 항목으로 맨 뒤에 다시 들어올 수 있다. 재동기화는 cursor 거부 때만 일어나므로 드물다.
 - `devlink notifications --clear`(브로커 중지 상태)로 도착 정보를 비울 수 있으며, 이때 중앙 cursor는 남겨 전체 재동기화를 하지 않는다.
 - 손상된 파일은 덮어쓰지 않는다. 브로커는 계속 실행되며 `lastError: TASK_MESSAGE_STORE_INVALID`로 보고하고, `get_updates`는 503 `LOCAL_UPDATES_UNAVAILABLE`이 된다.
@@ -64,7 +66,8 @@
 
 ## 검증
 
-- `cargo test -p devlink-broker --test task_messages`: mock 중앙 WebSocket·HTTP로 READY 직후 pull과 hasNext 이어 읽기, Bearer·limit 전달, 다른 Agent 앞 알림 거부(pull·응답 없음), 알림 신호의 ACK 없음, 중복 eventId 제거, 여러 알림 합치기, 재접속 READY로 놓친 항목 복구, 저장된 cursor 400·403 시 처음부터 재동기화, 같은 cursor 반복 중단, 5xx 실패 후 cursor 유지와 안전망 주기 재시도, 잘못된 페이지에서 cursor 유지, 저장 파일에 본문·토큰 없음과 비공개 권한.
-- `task_messages::tests`: 중복·충돌·범위 분리, clear 후 cursor 유지, 상한 도달 시 옛 범위 우선·큰 범위 우선 정리, 상한에서 들어온 100건 페이지 전체 보존, 손상 파일 비덮어쓰기, cursor 문자·길이와 jitter 범위.
+- `cargo test -p devlink-broker --test task_messages`: mock 중앙 WebSocket·HTTP로 READY 직후 pull과 hasNext 이어 읽기, Bearer·limit 전달, 다른 Agent 앞 알림 거부(pull·응답 없음), 알림 신호의 ACK 없음, 중복 eventId 제거, 여러 알림 합치기, 재접속 READY로 놓친 항목 복구, 저장된 cursor 400·403 시 처음부터 재동기화, 같은 cursor 반복 중단, 5xx 실패 후 cursor 유지와 안전망 주기 재시도, 잘못된 페이지에서 cursor 유지, 저장 파일에 본문·토큰 없음과 비공개 권한, 빈 조회 범위 16개가 있어도 17번째 Agent의 조회 결과 저장과 기존 cursor 보존.
+- `--test task_updates`·`--test update_hook`: 빈 조회 범위 16개 뒤에도 현재 Agent의 질문·답변이 `get_updates`와 훅 요약에 나타남.
+- `task_messages::tests`: 중복·충돌·범위 분리, clear 후 cursor 유지, 16개를 넘는 새 범위 저장과 기존 cursor 보존, 조회 순서 유지, 크기 상한에서 가장 오래전 조회 범위만 정리(현재 범위는 유지), 상한 도달 시 옛 범위 우선·큰 범위 우선 정리, 상한에서 들어온 100건 페이지 전체 보존, 손상 파일 비덮어쓰기, cursor 문자·길이와 jitter 범위.
 - `devlink-cli --test cli_broker`: 실제 CLI 브로커가 READY 뒤 같은 origin으로 task-messages를 조회해도 기존 작업 생성·수신·heartbeat 흐름이 그대로인지 mock 중앙에서 확인한다.
 - `protocol::tests::task_message_notice_is_a_strict_body_less_signal`: 알림 형식·짝·본문 거부.

@@ -311,3 +311,32 @@ async fn digest_counts_new_questions_and_answers_per_task_without_text() {
     let text = f.digest("codex").unwrap();
     assert!(text.contains("on 1 task(s): #301 (1 question)."), "{text}");
 }
+
+#[tokio::test]
+async fn digest_reports_arrivals_after_sixteen_other_scopes_pulled_empty() {
+    let f = Fixture::new();
+    let store = TaskMessages::open(&f.path).unwrap();
+    for agent in 1001..=1016 {
+        store
+            .apply(ORIGIN, agent, vec![], "old".into())
+            .await
+            .unwrap();
+    }
+    store
+        .apply(
+            ORIGIN,
+            12,
+            vec![TaskMessage {
+                event_id: "1".into(),
+                task_id: 300,
+                sequence: "1".into(),
+                event_type: TaskMessageType::Question,
+                created_at: "2026-11-05T10:00:00Z".into(),
+            }],
+            "c1".into(),
+        )
+        .await
+        .unwrap();
+    let text = f.digest("codex").unwrap();
+    assert!(text.contains("on 1 task(s): #300 (1 question)."), "{text}");
+}

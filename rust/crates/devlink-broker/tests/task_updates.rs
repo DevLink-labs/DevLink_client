@@ -585,3 +585,33 @@ async fn question_and_answer_arrivals_follow_other_sources_without_bodies() {
     assert_eq!(ids.len(), 3);
     assert_eq!(ids[1..], ["503", "502"]);
 }
+
+#[tokio::test]
+async fn arrivals_show_after_sixteen_other_scopes_pulled_empty() {
+    let f = Fixture::new().await;
+    let session = f.claim(true).await;
+    // Re-registered Agents and other test servers each left an empty pull behind.
+    for agent in 1001..=1008 {
+        arrive(&f.path, ORIGIN, agent, &[], "old").await;
+    }
+    for port in 11..=18 {
+        arrive(&f.path, &format!("ws://127.0.0.1:{port}"), 12, &[], "old").await;
+    }
+    // The seventeenth scope is this session's Agent.
+    arrive(
+        &f.path,
+        ORIGIN,
+        12,
+        &[(501, "QUESTION"), (502, "ANSWER")],
+        "c1",
+    )
+    .await;
+    let page = f.page(&session, json!({})).await;
+    assert_eq!(
+        page["updates"],
+        json!([
+            {"eventId":"501","kind":"TASK_QUESTION_CREATED","direction":"received","taskId":"300","sequence":"501"},
+            {"eventId":"502","kind":"TASK_ANSWER_CREATED","direction":"received","taskId":"300","sequence":"502"},
+        ])
+    );
+}

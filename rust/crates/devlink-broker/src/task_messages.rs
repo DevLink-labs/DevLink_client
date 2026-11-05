@@ -31,7 +31,6 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// first; get_task_result stays authoritative for retired history.
 pub const MAX_EVENTS: usize = 4096;
 const EVICT_BATCH: usize = MAX_EVENTS / 2;
-const MAX_SCOPES: usize = 16;
 /// Central signs cursors up to 64 KiB; anything longer is a protocol error.
 const MAX_CURSOR: usize = 64 * 1024;
 const MAX_CREATED_AT: usize = 64;
@@ -95,7 +94,7 @@ fn cursor_valid(cursor: &str) -> bool {
 fn read(path: &Path) -> Result<Snapshot> {
     let snapshot: Snapshot = private_file::read(path, MAX_BYTES)?.unwrap_or_else(empty);
     ensure!(
-        snapshot.schema_version == 1 && snapshot.scopes.len() <= MAX_SCOPES,
+        snapshot.schema_version == 1,
         "Invalid task message snapshot"
     );
     let mut scopes = HashSet::new();
@@ -142,6 +141,27 @@ fn evict(scopes: &mut [Scope], current: usize, amount: usize) -> usize {
     freed
 }
 
+/// Keep the encoded snapshot within `limit` by forgetting whole scopes, least recently
+/// pulled first. Scopes are kept in pull order with the current one last, so the current
+/// scope is never forgotten and every other cursor survives until the file would really
+/// overflow. Only a forgotten scope restarts from the beginning if its Agent returns.
+fn fit(snapshot: &mut Snapshot, limit: usize) -> Result<usize> {
+    let mut size = serde_json::to_vec(&*snapshot)
+        .context("Cannot encode task message snapshot")?
+        .len();
+    let mut forgotten = 0;
+    while size > limit && snapshot.scopes.len() > 1 {
+        let scope = snapshot.scopes.remove(0);
+        // One array element plus its separating comma.
+        size -= serde_json::to_vec(&scope)
+            .context("Cannot encode task message scope")?
+            .len()
+            + 1;
+        forgotten += 1;
+    }
+    Ok(forgotten)
+}
+
 #[derive(Default)]
 struct Counters {
     rejected: AtomicU64,
@@ -169,12 +189,14 @@ pub struct TaskMessages {
     counters: Arc<Counters>,
 }
 
-/// Outcome of storing one page: newly retained, dropped and retired (oldest) records.
+/// Outcome of storing one page: newly retained, dropped and retired (oldest) records, and
+/// least recently pulled scopes forgotten to keep the file within its size limit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Applied {
     pub added: usize,
     pub dropped: usize,
     pub evicted: usize,
+    pub forgotten_scopes: usize,
 }
 
 impl TaskMessages {
@@ -274,26 +296,24 @@ impl TaskMessages {
             let _disk = config::lock(&store.path.with_extension("lock"))?;
             let mut snapshot = read(&store.path)?;
             let total: usize = snapshot.scopes.iter().map(|s| s.events.len()).sum();
-            let index = match snapshot
+            // Keep scopes in pull order: the current one moves last, so `fit` forgets the
+            // least recently pulled scope first. No scope count limit: an Agent re-registered
+            // or pointed at a new server many times still syncs.
+            let scope = match snapshot
                 .scopes
                 .iter()
                 .position(|s| s.origin == origin && s.agent_id == agent_id)
             {
-                Some(index) => index,
-                None => {
-                    ensure!(
-                        snapshot.scopes.len() < MAX_SCOPES,
-                        "Too many task message scopes"
-                    );
-                    snapshot.scopes.push(Scope {
-                        origin,
-                        agent_id,
-                        cursor: None,
-                        events: Vec::new(),
-                    });
-                    snapshot.scopes.len() - 1
-                }
+                Some(index) => snapshot.scopes.remove(index),
+                None => Scope {
+                    origin,
+                    agent_id,
+                    cursor: None,
+                    events: Vec::new(),
+                },
             };
+            snapshot.scopes.push(scope);
+            let index = snapshot.scopes.len() - 1;
             let mut applied = Applied::default();
             let fresh: HashSet<&str> = items
                 .iter()
@@ -322,6 +342,7 @@ impl TaskMessages {
                 }
             }
             snapshot.scopes[index].cursor = Some(next_cursor);
+            applied.forgotten_scopes = fit(&mut snapshot, MAX_BYTES)?;
             ensure!(
                 !store.stopped.load(Ordering::Acquire),
                 "Task message store stopped"
@@ -653,6 +674,7 @@ mod tests {
                 added: 1,
                 dropped: 0,
                 evicted: EVICT_BATCH,
+                forgotten_scopes: 0,
             }
         );
         let events = TaskMessages::events_config(&path, &origin, 12).unwrap();
@@ -694,6 +716,7 @@ mod tests {
                 added: 1,
                 dropped: 0,
                 evicted: EVICT_BATCH,
+                forgotten_scopes: 0,
             }
         );
         assert_eq!(
@@ -803,6 +826,116 @@ mod tests {
                 .len(),
             4000 - EVICT_BATCH
         );
+    }
+
+    #[tokio::test]
+    async fn new_scopes_past_sixteen_still_sync_and_keep_every_earlier_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = TaskMessages::open(&path).unwrap();
+        let origin = endpoint_url("ws://127.0.0.1:9").unwrap();
+        // Sixteen re-registered Agents (or test servers) leave empty pulls behind.
+        for agent in 1..=16 {
+            store
+                .apply(&origin, agent, vec![], format!("old-{agent}"))
+                .await
+                .unwrap();
+        }
+        let other = endpoint_url("ws://127.0.0.1:10").unwrap();
+        store
+            .apply(&other, 1, vec![], "other".into())
+            .await
+            .unwrap();
+        // The next Agent's arrivals are stored like any other.
+        let applied = store
+            .apply(
+                &origin,
+                17,
+                vec![
+                    message(1, TaskMessageType::Question),
+                    message(2, TaskMessageType::Answer),
+                ],
+                "c1".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            applied,
+            Applied {
+                added: 2,
+                ..Applied::default()
+            }
+        );
+        assert_eq!(
+            TaskMessages::events_config(&path, &origin, 17)
+                .unwrap()
+                .len(),
+            2
+        );
+        for agent in 1..=16 {
+            assert_eq!(
+                store.cursor(&origin, agent).await.unwrap(),
+                Some(format!("old-{agent}"))
+            );
+        }
+        assert_eq!(
+            store.cursor(&other, 1).await.unwrap().as_deref(),
+            Some("other")
+        );
+        // Scopes are kept in pull order: a pulled scope moves last.
+        store
+            .apply(&origin, 1, vec![], "old-1b".into())
+            .await
+            .unwrap();
+        let order: Vec<_> = read(&TaskMessages::path(&path))
+            .unwrap()
+            .scopes
+            .iter()
+            .map(|s| (s.origin == origin, s.agent_id))
+            .collect();
+        assert_eq!(order.len(), 18);
+        assert_eq!(order[0], (true, 2));
+        assert_eq!(order[16..], [(true, 17), (true, 1)]);
+    }
+
+    #[test]
+    fn size_limit_forgets_least_recently_pulled_scopes_never_the_current_one() {
+        let scope = |agent_id, cursor: &str| Scope {
+            origin: "ws://127.0.0.1:9/ws/broker".into(),
+            agent_id,
+            cursor: Some(cursor.into()),
+            events: vec![message(agent_id, TaskMessageType::Question)],
+        };
+        let snapshot = || Snapshot {
+            schema_version: 1,
+            scopes: vec![
+                scope(1, &"a".repeat(1000)),
+                scope(2, "b"),
+                scope(3, &"c".repeat(1000)),
+            ],
+        };
+        let size = |s: &Snapshot| serde_json::to_vec(s).unwrap().len();
+        let agents = |s: &Snapshot| s.scopes.iter().map(|s| s.agent_id).collect::<Vec<_>>();
+        // Within the limit nothing is forgotten.
+        let mut within = snapshot();
+        let limit = size(&within);
+        assert_eq!(fit(&mut within, limit).unwrap(), 0);
+        assert_eq!(agents(&within), [1, 2, 3]);
+        // One byte over forgets only the least recently pulled scope; the size math is exact.
+        let mut over = snapshot();
+        assert_eq!(fit(&mut over, limit - 1).unwrap(), 1);
+        assert_eq!(agents(&over), [2, 3]);
+        let mut exact = snapshot();
+        exact.scopes.remove(0);
+        assert_eq!(size(&over), size(&exact));
+        // The running size is exact: a limit equal to the size without the first scope
+        // forgets one, one byte less forgets two.
+        assert_eq!(fit(&mut snapshot(), size(&exact)).unwrap(), 1);
+        assert_eq!(fit(&mut snapshot(), size(&exact) - 1).unwrap(), 2);
+        // However small the limit, the current (last) scope is kept.
+        let mut tiny = snapshot();
+        assert_eq!(fit(&mut tiny, 1).unwrap(), 2);
+        assert_eq!(agents(&tiny), [3]);
     }
 
     #[test]
