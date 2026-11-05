@@ -26,7 +26,7 @@
 | register_agent | `{}`로 CLI가 준비한 기존 Agent 확인·bind. name(1–100자), toolType(`codex / claude_code`), role(1–500자)은 각각 선택이며 전달 시 중앙 정보와 정확히 일치해야 함. 중앙 생성·수정·토큰 회전 없음 |
 | list_agents | 빈 객체 |
 | create_task | recipientAgentId 1–128자, title 1–200자, description 1–16000자, 선택 taskContext 1–16000자 |
-| update_task_status | taskId, version, status `IN_PROGRESS / FAILED` 필수. FAILED에는 failureReason·partiallyModified 필수. IN_PROGRESS에는 실패 필드를 넣지 않음. 선택 requestKey는 알려진 상관 키이며 멱등 키가 아님 |
+| update_task_status | taskId, version, status `IN_PROGRESS / FAILED / REJECTED` 필수. FAILED에는 failureReason·partiallyModified 필수. REJECTED에는 rejectionReason 필수이며 실패 필드를 넣지 않음(중앙은 PENDING 작업만 거절 허용). IN_PROGRESS에는 실패 필드·rejectionReason을 넣지 않음. 거절은 사용자가 명시적으로 거절을 결정했을 때만 사용. 선택 requestKey는 알려진 상관 키이며 멱등 키가 아님 |
 | complete_task | taskId·version·resultText 필수. 선택 taskFiles 배열/null: relativePath(최대 500 UTF-16 코드 단위)·changeType(ADDED/MODIFIED/DELETED/RENAMED), 선택 diffText(문자열/null). 선택 requestKey |
 | get_tasks | direction `sent / received`(기본 received), 선택 status `PENDING / IN_PROGRESS / COMPLETED / FAILED / REJECTED`, limit 1–100(기본 20), 선택 cursor 1–512자. 응답 items·nextCursor 사용 |
 | get_task_result | taskId 1–128자, 선택 requestKey. 현재 version·원문 prompt·resultText·taskFiles·events 보존 |

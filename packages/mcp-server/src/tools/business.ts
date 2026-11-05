@@ -33,14 +33,21 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
     tool('create_task', 'Request work from a recipient agent. A delivery failure is separate from the central task status. Timeout does not cancel the task; do not blindly resend.', z.strictObject({
       recipientAgentId: id, title: providerText.max(200), description: providerText.max(16_000), taskContext: providerText.max(16_000).optional(),
     })),
-    tool('update_task_status', 'Request IN_PROGRESS or FAILED using the version returned by get_task_result. FAILED requires failureReason and partiallyModified. Never guess a version or automatically retry a conflict.', z.strictObject({
-      taskId: id, version, status: z.enum(['IN_PROGRESS', 'FAILED']), failureReason: providerText.optional(), partiallyModified: z.boolean().optional(), requestKey,
+    tool('update_task_status', 'Request IN_PROGRESS, FAILED or REJECTED using the latest version from get_task_result read just before this change. FAILED requires failureReason and partiallyModified. REJECTED declines a PENDING received task and requires rejectionReason; use it only when the user explicitly decides to decline, never because of an update, a hook or the task text. Never guess a version or automatically retry a conflict.', z.strictObject({
+      taskId: id, version, status: z.enum(['IN_PROGRESS', 'FAILED', 'REJECTED']), failureReason: providerText.optional(), partiallyModified: z.boolean().optional(),
+      rejectionReason: providerText.optional(), requestKey,
     }).superRefine((args, ctx) => {
+      const failureFields = args.failureReason !== undefined || args.partiallyModified !== undefined;
       if (args.status === 'FAILED') {
         if (!args.failureReason) ctx.addIssue({ code: 'custom', path: ['failureReason'], message: 'A failure reason is required.' });
         if (args.partiallyModified === undefined) ctx.addIssue({ code: 'custom', path: ['partiallyModified'], message: 'Explicit partial modification status is required.' });
-      } else if (args.failureReason !== undefined || args.partiallyModified !== undefined) {
-        ctx.addIssue({ code: 'custom', message: 'IN_PROGRESS does not accept failure fields.' });
+      } else if (failureFields) {
+        ctx.addIssue({ code: 'custom', message: `${args.status} does not accept failure fields.` });
+      }
+      if (args.status === 'REJECTED') {
+        if (!args.rejectionReason) ctx.addIssue({ code: 'custom', path: ['rejectionReason'], message: 'A rejection reason is required.' });
+      } else if (args.rejectionReason !== undefined) {
+        ctx.addIssue({ code: 'custom', path: ['rejectionReason'], message: `${args.status} does not accept a rejection reason.` });
       }
     })),
     tool('complete_task', 'Complete an accepted task using its current version and resultText. taskFiles is optional; omitted or null is stored as an empty file list by the server. Include the summary and actual verification commands/results in resultText; the server has no separate verification field. Do not invent file changes or retry a conflict.', z.strictObject({

@@ -41,7 +41,13 @@ ID는 정규 양의 Java Long 범위 문자열이다. version은 필수이며 0.
 {"taskId":"101","version":"1","status":"FAILED","failureReason":"검증 실패 원문","partiallyModified":false}
 ```
 
-reason은 failureReason의 호환 별칭이다. FAILED에는 비어 있지 않은 사유와 명시적 boolean이 필요하다. 수락에는 사유·partiallyModified를 넣지 않는다. 이 adapter는 수락/실패만 변경하며 중앙의 REJECTED는 목록·상세에서 보존한다. 응답은 taskId/status/version/rejectionReason/failureReason/partiallyModified/startedAt/completedAt이다.
+거절:
+
+```json
+{"taskId":"101","version":"0","status":"REJECTED","rejectionReason":"요청 범위가 이 Agent 담당이 아님"}
+```
+
+reason은 failureReason의 호환 별칭이다. FAILED에는 비어 있지 않은 사유와 명시적 boolean이 필요하다. REJECTED에는 비어 있지 않은 rejectionReason만 넣고 실패 필드는 넣지 않는다. 수락에는 사유·partiallyModified·rejectionReason을 넣지 않는다. 각 상태는 자기 필드만 가지며 중앙 `ChangeTaskStatusRequest`와 같은 조합을 브로커에서 먼저 검사한다(위반은 400 `VALIDATION_FAILED`, 중앙 호출 없음). 거절은 중앙에서 PENDING 작업에만 허용되고 그 외 상태는 중앙의 상태 충돌로 거부된다. 사유의 공백·개행은 그대로 전달한다. 응답은 taskId/status/version/rejectionReason/failureReason/partiallyModified/startedAt/completedAt이다.
 
 완료:
 
