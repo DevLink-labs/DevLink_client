@@ -210,7 +210,7 @@ impl ToolSearch {
         report
     }
 
-    fn launcher(&self, tool: ToolType, path: &Path) -> Option<HostExecutable> {
+    fn launcher(&self, _tool: ToolType, path: &Path) -> Option<HostExecutable> {
         let path = path.canonicalize().ok()?;
         if !path.is_file() {
             return None;
@@ -223,7 +223,7 @@ impl ToolSearch {
             {
                 // Resolve npm shims to Node + a known package entry; never execute batch text.
                 let parent = path.parent()?;
-                let entry = parent.join(package_entry(tool)).canonicalize().ok()?;
+                let entry = parent.join(package_entry(_tool)).canonicalize().ok()?;
                 if !entry.is_file() {
                     return None;
                 }
