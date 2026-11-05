@@ -172,11 +172,16 @@ impl Preparation {
             } else {
                 "open_host_then_register_agent"
             };
+            let mut next_actions = Vec::new();
+            if prepared.context.tool.tool_type == crate::sessions::ToolType::Codex {
+                next_actions.push("trust_codex_project");
+            }
+            next_actions.push(next);
             Ok(ConfigurationResult {
                 config: applied,
                 runtime_verified: true,
                 host_session: "not_checked",
-                next_actions: vec![next],
+                next_actions,
             })
         })
         .await
@@ -191,18 +196,20 @@ fn error(code: &'static str) -> ConfigError {
 // During version/stdio probes and user input they are released and checked again.
 fn check_context(context: &Context) -> Result<(File, File)> {
     let state = config::state_directory(&context.config_path);
-    let account = config::try_lock(&state.join("account.lock"))
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?
+    let account_path = state.join("account.lock");
+    let account = config::try_lock(&account_path)
+        .map_err(|e| ConfigError::unsafe_at(&account_path, e))?
         .ok_or_else(|| error("SETUP_AUTH_BUSY"))?;
-    let control = config::try_lock(&state.join("control.lock"))
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?
+    let control_path = state.join("control.lock");
+    let control = config::try_lock(&control_path)
+        .map_err(|e| ConfigError::unsafe_at(&control_path, e))?
         .ok_or_else(|| error("SETUP_CONFIG_BUSY"))?;
     let binding = agent_profile::inspection_binding(&context.config_path)
         .map_err(|_| error("SETUP_PROFILE_CONFLICT"))?
         .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
     let current = config::Config::load(&context.config_path)
         .and_then(|c| user_auth::origin(&c))
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+        .map_err(|e| ConfigError::unsafe_at(&context.config_path, e))?;
     if current.as_str() != context.origin
         || binding.origin != context.origin
         || binding.user_id != context.user_id
@@ -228,14 +235,18 @@ fn check_context(context: &Context) -> Result<(File, File)> {
     if selected.preferred() != Some(&context.tool) {
         return Err(error("SETUP_PROFILE_CONFLICT"));
     }
-    if !local::running(&context.config_path).map_err(|_| error("SETUP_UNSAFE_FILE"))? {
+    if !local::running(&context.config_path)
+        .map_err(|e| ConfigError::unsafe_at(&state.join("broker.lock"), e))?
+    {
         return Err(error("SETUP_BROKER_START_FAILED"));
     }
     let runtime = local::Runtime::load(&context.config_path)
         .map_err(|_| error("SETUP_BROKER_START_FAILED"))?;
-    let descriptor =
-        credentials::load(&context.config_path).map_err(|_| error("SETUP_UNSAFE_FILE"))?;
-    let url = url::Url::parse(&descriptor.broker_url).map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+    let descriptor_path = credentials::path(&context.config_path);
+    let descriptor = credentials::load(&context.config_path)
+        .map_err(|e| ConfigError::unsafe_at(&descriptor_path, e))?;
+    let url = url::Url::parse(&descriptor.broker_url)
+        .map_err(|_| error("SETUP_UNSAFE_FILE").at(&descriptor_path))?;
     if runtime.pid != context.broker_pid
         || runtime.instance_id != context.broker_instance
         || url.scheme() != "http"
@@ -247,13 +258,13 @@ fn check_context(context: &Context) -> Result<(File, File)> {
     Ok((account, control))
 }
 fn file_hash(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+    let mut file = File::open(path).map_err(|_| error("SETUP_UNSAFE_FILE").at(path))?;
     let mut digest = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
         let n = file
             .read(&mut buffer)
-            .map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+            .map_err(|_| error("SETUP_UNSAFE_FILE").at(path))?;
         if n == 0 {
             break;
         }
@@ -262,15 +273,15 @@ fn file_hash(path: &Path) -> Result<[u8; 32]> {
     Ok(digest.finalize().into())
 }
 fn fingerprints(context: &Context, input: &PlanInput) -> Result<Fingerprint> {
-    let profile = private_file::read_bytes(&agent_profile::path(&context.config_path), 16_384)
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?
+    let profile_path = agent_profile::path(&context.config_path);
+    let profile = private_file::read_bytes(&profile_path, 16_384)
+        .map_err(|e| ConfigError::unsafe_at(&profile_path, e))?
         .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
-    let credentials = private_file::read_bytes(
-        &credentials::path(&context.config_path),
-        credentials::MAX_CREDENTIALS_SIZE as usize,
-    )
-    .map_err(|_| error("SETUP_UNSAFE_FILE"))?
-    .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
+    let descriptor_path = credentials::path(&context.config_path);
+    let credentials =
+        private_file::read_bytes(&descriptor_path, credentials::MAX_CREDENTIALS_SIZE as usize)
+            .map_err(|e| ConfigError::unsafe_at(&descriptor_path, e))?
+            .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
     Ok(Fingerprint {
         profile: Sha256::digest(profile).into(),
         credentials: Sha256::digest(credentials).into(),
@@ -525,7 +536,7 @@ async fn probe_runtime(executable: &Executable) -> Result<()> {
     }
     let mut child = command(executable)
         .args([
-            mcp_config::launch_path(Path::new(&executable.args[0])),
+            mcp_config::host_path(Path::new(&executable.args[0])),
             "--transport".into(),
             "stdio".into(),
         ])

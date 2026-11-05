@@ -25,6 +25,9 @@ pub struct Config {
     /// 로컬 제어 HTTP 서버 바인딩 포트 (기본값: 43127)
     #[serde(default = "default_port")]
     pub local_port: u16,
+    /// A new setup profile must save the first port it successfully binds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_port_pending: bool,
     /// 재연결 초기 대기 시간 (ms, 기본값: 2000)
     #[serde(default = "initial_delay")]
     pub reconnect_initial_ms: u64,
@@ -39,8 +42,10 @@ pub struct Config {
     pub task_message_sync_interval_ms: u64,
 }
 
+pub(crate) const DEFAULT_LOCAL_PORT: u16 = 43127;
+
 fn default_port() -> u16 {
-    43127
+    DEFAULT_LOCAL_PORT
 }
 fn initial_delay() -> u64 {
     2000
@@ -81,6 +86,7 @@ impl Default for Config {
             agent: "codex".into(),
             auto_reconnect: true,
             local_port: default_port(),
+            local_port_pending: false,
             reconnect_initial_ms: initial_delay(),
             reconnect_max_ms: max_delay(),
             auth_timeout_ms: auth_timeout(),
@@ -153,6 +159,12 @@ impl Config {
             return Err(invalid(
                 "localPort",
                 "localPort cannot be 80 because HTTP default port is rejected by MCP endpoint validation",
+            ));
+        }
+        if self.local_port_pending && self.local_port != 0 {
+            return Err(invalid(
+                "localPort",
+                "Pending port assignment requires localPort 0",
             ));
         }
         Ok(())
@@ -232,6 +244,27 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let file = prepare_json(path, value, false)?;
     file.persist(path)
         .map_err(|_| anyhow::anyhow!("Cannot replace JSON file"))?;
+    Ok(())
+}
+
+/// Called with control.lock held, after authenticating the broker on its bound port.
+pub(crate) fn save_setup_port(path: &Path, port: u16) -> Result<()> {
+    anyhow::ensure!(
+        crate::credentials::ensure_safe_target_if_exists(path)?,
+        "Setup configuration is missing"
+    );
+    crate::credentials::verify_trusted_writer_permissions(path)?;
+    let mut config = Config::load(path)?;
+    if config.local_port_pending {
+        config.local_port = port;
+        config.local_port_pending = false;
+        config.validate()?;
+        prepare_json(path, &config, true)?
+            .persist(path)
+            .map_err(|_| anyhow::anyhow!("Cannot save the assigned broker port"))?;
+        #[cfg(unix)]
+        File::open(directory(path))?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -359,6 +392,7 @@ pub fn set(path: &Path, key: &str, raw: &str) -> Result<()> {
     let existing: Config = serde_json::from_slice(&bytes).map_err(|_| {
         anyhow::anyhow!("Invalid config JSON, unknown field or incorrect value type")
     })?;
+    anyhow::ensure!(key != "localPortPending", "Unknown config key");
     let mut value = serde_json::to_value(existing)?;
     let field = value.get_mut(key).context("Unknown config key")?;
     *field = if field.is_string() {
@@ -366,8 +400,11 @@ pub fn set(path: &Path, key: &str, raw: &str) -> Result<()> {
     } else {
         serde_json::from_str(raw).map_err(|_| anyhow::anyhow!("Invalid JSON config value"))?
     };
-    let config: Config = serde_json::from_value(value)
+    let mut config: Config = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("Incorrect config value type or range"))?;
+    if key == "localPort" {
+        config.local_port_pending = false;
+    }
     config.validate()?;
     atomic_json(path, &config)
 }

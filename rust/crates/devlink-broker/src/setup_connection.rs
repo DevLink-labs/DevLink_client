@@ -7,7 +7,6 @@ use crate::{
     mcp_config::{self, InspectionInput, InspectionStatus, McpConfig},
     sessions::{IdentityError, ToolType},
     setup_mcp::{self, Options, PreflightContext},
-    setup_tools::{self, SelectionBinding},
 };
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
@@ -281,21 +280,29 @@ fn inspect_mcp(
     selected: Option<&crate::tool_discovery::SelectedTool>,
 ) -> (PathBuf, InspectionStatus) {
     let project = PathBuf::from(&binding.project_root);
-    let target = mcp_config::project_target(binding.tool, &project);
-    let stored = setup_tools::inspect(
-        path,
-        &SelectionBinding {
-            origin: binding.origin.clone(),
-            user_id: binding.user_id,
-            team_id: binding.team_id,
-            project_root: project.clone(),
-        },
-    )
-    .ok();
-    let launcher = selected
-        .or_else(|| stored.as_ref()?.preferred())
-        .filter(|tool| tool.tool_type == binding.tool)
-        .map(|tool| tool.executable.command.clone());
+    let target = options
+        .target
+        .clone()
+        .unwrap_or_else(|| mcp_config::project_target(binding.tool, &project));
+    if selected.is_none() {
+        let status = McpConfig::inspect_configured(
+            binding.tool,
+            &project,
+            &target,
+            &credentials::path(path),
+            options.node.as_deref(),
+            options.entry.as_deref(),
+        )
+        .unwrap_or_else(|error| {
+            if error.code == "SETUP_MCP_CONFIG_CONFLICT" {
+                InspectionStatus::Conflict
+            } else {
+                InspectionStatus::Unknown
+            }
+        });
+        return (target, status);
+    }
+    let launcher = selected.map(|tool| tool.executable.command.clone());
     let context = PreflightContext {
         config_path: path.into(),
         project,

@@ -20,11 +20,13 @@ use axum::{
 };
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    net::TcpListener,
     sync::RwLock,
     time::{Instant, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
+
+mod ports;
+pub use ports::PortFailure;
 
 /// 로컬 HTTP API 핸들러에서 공유하는 상태
 #[derive(Clone)]
@@ -81,9 +83,7 @@ pub async fn run(path: &Path) -> Result<()> {
     };
 
     // 로컬 제어용 루프백(127.0.0.1) TCP 포트 바인딩
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.local_port))
-        .await
-        .context("Cannot bind broker loopback port; check for a port conflict")?;
+    let listener = ports::bind(&config).await?;
     let bound_port = listener.local_addr()?.port();
     let broker_url = format!("http://127.0.0.1:{bound_port}");
 

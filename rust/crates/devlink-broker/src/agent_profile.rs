@@ -304,6 +304,12 @@ fn stopped(config_path: &Path) -> Result<crate::broker_control::StoppedGuard> {
 
 /// Local-machine, per-central-user lock. It is not a claim of server-wide policy.
 fn owner_lock(origin: &str, user: u64) -> Result<File> {
+    try_owner_lock(origin, user)?.context(
+        "Another broker or setup operation is active for this central user on this machine",
+    )
+}
+
+fn try_owner_lock(origin: &str, user: u64) -> Result<Option<File>> {
     let digest = Sha256::digest(format!("{origin}\0{user}"));
     let directory = dirs::data_local_dir()
         .context("Cannot locate private broker owner directory")?
@@ -315,9 +321,7 @@ fn owner_lock(origin: &str, user: u64) -> Result<File> {
     if std::fs::symlink_metadata(&lock).is_ok() {
         credentials::verify_path_safety(&lock)?;
     }
-    config::lock(&lock).context(
-        "Another broker or setup operation is active for this central user on this machine",
-    )
+    config::try_lock(&lock)
 }
 
 fn rotate_mcp_if_present(config_path: &Path) -> Result<()> {

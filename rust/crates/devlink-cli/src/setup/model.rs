@@ -136,7 +136,7 @@ pub enum ErrorCode {
     TeamBindingConflict,
     #[serde(rename = "SETUP_TEAM_STORAGE_FAILED")]
     TeamStorageFailed,
-    #[serde(rename = "SETUP_PROJECT_PATH_INVALID")]
+    #[serde(rename = "SETUP_PROJECT_INVALID")]
     ProjectPathInvalid,
     #[serde(rename = "SETUP_PROJECT_BINDING_CONFLICT")]
     ProjectBindingConflict,
@@ -207,7 +207,8 @@ impl ErrorCode {
             Self::ToolRequired => 2,
             Self::ToolUnavailable | Self::ToolStorageFailed => 5,
             Self::ToolBindingConflict | Self::ToolSelectionConflict => 6,
-            Self::BrokerStartFailed | Self::AgentStorageFailed | Self::McpConfigWriteFailed => 5,
+            Self::BrokerStartFailed => 7,
+            Self::AgentStorageFailed | Self::McpConfigWriteFailed => 5,
             Self::AgentBindingConflict
             | Self::AgentAlreadyExists
             | Self::McpConfigConflict
@@ -221,7 +222,7 @@ impl ErrorCode {
             Self::InputRequired => "Required setup input is missing.",
             Self::InputInvalid => "Setup input is invalid.",
             Self::RegistrationUnknown => {
-                "Agent registration outcome is unknown. Run devlink agent list, then recover with setup --agent-id <ID>. Creation was not retried."
+                "Agent registration outcome is unknown. Run devlink agent list, then recover with setup --agent-id <ID>. If no Agent exists after checking the server for delayed creation, advanced recovery is devlink agent reset-pending --accept-duplicate-risk. Resetting allows a later create and can lead to duplicates."
             }
             Self::TokenRequired => {
                 "The known Agent requires explicit token preparation. Rerun setup --issue-token (or use devlink agent token) after inspecting the saved ID. An uncertain issuance is never replayed automatically."
@@ -237,13 +238,13 @@ impl ErrorCode {
                 "Choose a configuration file outside the internal runtime directory and rerun setup with --config."
             }
             Self::UnsafeFile => {
-                "A setup file or directory is unsafe or unreadable. Inspect the indicated path and repair its ownership, permissions, or contents before retrying. Existing files were preserved."
+                "A setup file or directory is unsafe or unreadable. Check the reported path and its ownership and permissions. On Windows, use a project, profile, or runtime location protected from other users writing to it. See the Windows paths section of rust/docs/setup.md."
             }
             Self::ConfigBusy => {
                 "Another setup or configuration operation is using this profile. Wait for it to finish, then rerun setup."
             }
             Self::BrokerBusy => {
-                "The broker is running or starting. Stop this profile's broker before creating configuration or changing Agent credentials."
+                "The broker is running or starting. Stop the broker using this profile or central account before creating configuration or changing Agent credentials."
             }
             Self::ConfigStorageFailed => {
                 "Configuration storage failed. Inspect the indicated path and existing file before retrying; setup did not remove it."
@@ -262,7 +263,7 @@ impl ErrorCode {
                 "Another connection replaced this Agent's broker connection."
             }
             Self::InboxFailed => "The broker could not persist the local inbox.",
-            Self::Timeout => "Connection verification did not complete within the time limit.",
+            Self::Timeout => "The setup stage did not complete within the time limit.",
             Self::ProtocolError => {
                 "The provider response or current Agent identity could not be verified."
             }
@@ -381,7 +382,7 @@ impl ErrorCode {
             Self::TeamListResourceNotFound => "inspect_central_team_data",
             Self::TeamBindingConflict => "inspect_agent_binding",
             Self::TeamStorageFailed => "inspect_team_selection",
-            Self::ProjectPathInvalid => "choose_existing_project_directory",
+            Self::ProjectPathInvalid => "choose_existing_project",
             Self::ProjectBindingConflict => "inspect_project_binding",
             Self::ProjectStorageFailed => "inspect_agent_profile",
             Self::ToolRequired => "select_detected_tool",
@@ -389,7 +390,7 @@ impl ErrorCode {
             Self::ToolBindingConflict => "inspect_agent_binding",
             Self::ToolStorageFailed => "inspect_tool_selection",
             Self::ToolSelectionConflict => "inspect_tool_selection_then_retry",
-            Self::BrokerStartFailed => "inspect_broker_then_retry",
+            Self::BrokerStartFailed => "inspect_local_broker",
             Self::McpConfigConflict => "review_mcp_diff",
             Self::McpConfigWriteFailed => "inspect_mcp_backup",
             Self::ManualActionRequired => "apply_manual_mcp_config",
@@ -510,6 +511,20 @@ pub struct SetupError {
 }
 
 impl SetupError {
+    pub(super) fn broker_port_failure(file: PathBuf, message: &'static str) -> Self {
+        let mut error = Self::new(
+            ErrorCode::BrokerStartFailed,
+            Step::StartBroker,
+            Outcome::NotApplied,
+        );
+        error.location = Some(ErrorLocation {
+            file,
+            field: Some("localPort"),
+        });
+        error.message = message;
+        error
+    }
+
     pub(super) fn saved_tool_unavailable(path: PathBuf) -> Self {
         let mut error = Self::new(
             ErrorCode::ToolUnavailable,

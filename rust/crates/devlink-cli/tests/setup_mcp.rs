@@ -440,16 +440,7 @@ async fn cli_requires_review_applies_explicitly_and_then_reuses_configuration_be
     assert_eq!(f.profile(), original);
     assert_eq!(f.calls(), (1, 1));
 
-    let status = [
-        "setup",
-        "status",
-        "--output",
-        "jsonl",
-        "--node-path",
-        f.options.node.as_ref().unwrap().to_str().unwrap(),
-        "--mcp-entry",
-        f.options.entry.as_ref().unwrap().to_str().unwrap(),
-    ];
+    let status = ["setup", "status", "--output", "jsonl"];
     let output = f.app.run(&status, None);
     assert!(output.status.success(), "{}", text(&output));
     assert_no_secrets(&output);
@@ -583,6 +574,145 @@ async fn preflight_rejects_existing_host_conflict_before_agent_or_token_creation
     assert!(!agent_profile::path(&app.path).exists());
     assert!(!credentials::path(&app.path).exists());
     assert_no_secrets(&output);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_reports_a_fixed_port_conflict_and_can_retry_with_another_fixed_port() {
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let free = local::Runtime::load(&f.app.path).unwrap().port;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied = listener.local_addr().unwrap().port();
+    assert!(f.app.run(&["stop"], None).status.success());
+    assert!(
+        f.app
+            .run(&["config", "set", "localPort", &occupied.to_string()], None)
+            .status
+            .success()
+    );
+    let args = [
+        "setup",
+        "--output",
+        "json",
+        "--project",
+        f.context.project.to_str().unwrap(),
+        "--tool",
+        "claude-code",
+        "--tool-path",
+        f.context.tool.executable.command.to_str().unwrap(),
+        "--node-path",
+        f.options.node.as_ref().unwrap().to_str().unwrap(),
+        "--mcp-entry",
+        f.options.entry.as_ref().unwrap().to_str().unwrap(),
+        "--apply-mcp",
+    ];
+    let output = f.app.run(&args, None);
+    assert_eq!(output.status.code(), Some(7), "{}", text(&output));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["step"], "start_broker");
+    assert_eq!(value["error"]["code"], "SETUP_BROKER_START_FAILED");
+    assert_eq!(value["error"]["outcome"], "not_applied");
+    assert_eq!(value["error"]["location"]["field"], "localPort");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("port is in use or the OS denied the bind")
+    );
+    assert_eq!(value["error"]["recovery"]["action"], "inspect_local_broker");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("config set localPort <FREE_PORT>")
+    );
+    assert!(!f.target().exists());
+    assert_no_secrets(&output);
+
+    assert!(
+        f.app
+            .run(&["config", "set", "localPort", &free.to_string()], None)
+            .status
+            .success()
+    );
+    let output = f.app.run(&args, None);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert_eq!(local::Runtime::load(&f.app.path).unwrap().port, free);
+    assert_eq!(f.calls(), (1, 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preflight_reports_the_runtime_directory_with_unsafe_permissions() {
+    let app = Fixture::new().await;
+    let root = app._root.path();
+    credentials::set_private_permissions(root).unwrap();
+    let host =
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+    let (node, _) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
+    let shared = root.join("shared");
+    fs::create_dir(&shared).unwrap();
+    let entry = shared.join("index.js");
+    fs::write(&entry, "").unwrap();
+    #[cfg(windows)]
+    assert!(
+        std::process::Command::new("icacls.exe")
+            .arg(&shared)
+            .args(["/grant", "*S-1-5-32-545:(M)"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+    }
+
+    for format in ["json", "human"] {
+        let output = app.run(
+            &[
+                "setup",
+                "--output",
+                format,
+                "--project",
+                root.to_str().unwrap(),
+                "--tool",
+                "claude-code",
+                "--tool-path",
+                host.to_str().unwrap(),
+                "--node-path",
+                node.to_str().unwrap(),
+                "--mcp-entry",
+                entry.to_str().unwrap(),
+                "--create-agent",
+                "--apply-mcp",
+            ],
+            None,
+        );
+        assert_eq!(output.status.code(), Some(5), "{}", text(&output));
+        if format == "json" {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["error"]["step"], "validate");
+            assert_eq!(value["error"]["code"], "SETUP_UNSAFE_FILE");
+            let reported = PathBuf::from(value["error"]["location"]["file"].as_str().unwrap());
+            #[cfg(windows)]
+            assert_eq!(
+                reported.canonicalize().unwrap(),
+                shared.canonicalize().unwrap()
+            );
+            #[cfg(unix)]
+            assert_eq!(
+                reported.canonicalize().unwrap(),
+                entry.canonicalize().unwrap()
+            );
+        } else {
+            assert!(text(&output).contains("Location: "));
+            assert!(text(&output).contains("shared"));
+        }
+        assert_no_secrets(&output);
+    }
+    assert_eq!(app.state.create_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(app.state.token_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

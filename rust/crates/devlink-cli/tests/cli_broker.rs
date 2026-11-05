@@ -865,13 +865,26 @@ async fn crash_releases_os_lock_and_stale_runtime_is_recovered() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn occupied_port_fails_and_releases_lock() {
+    let other = Fixture::new();
+    other.ok(&["start"]);
+    let first = other.health().await;
     let f = Fixture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    f.configure(|config| config.local_port = listener.local_addr().unwrap().port());
-    assert!(!f.run(&["start"]).status.success());
+    let occupied = Runtime::load(&other.path).unwrap().port;
+    f.configure(|config| config.local_port = occupied);
+    let output = f.run(&["start"]);
+    assert!(!output.status.success());
+    assert!(
+        text(&output).contains("port is in use or the OS denied the bind"),
+        "{}",
+        text(&output)
+    );
+    assert!(text(&output).contains("config set localPort <FREE_PORT>"));
     assert!(!devlink_broker::local::running(&f.path).unwrap());
-    drop(listener);
+    f.ok(&["config", "set", "localPort", "0"]);
     f.ok(&["start"]);
+    assert_ne!(Runtime::load(&f.path).unwrap().port, occupied);
+    assert_eq!(Config::load(&f.path).unwrap().local_port, 0);
+    assert_eq!(other.health().await.instance_id, first.instance_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1879,17 +1892,28 @@ async fn unreachable_server_and_stop_during_backoff() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_local_token_survives_normal_restart() {
+async fn first_setup_port_and_mcp_local_token_survive_normal_restart() {
     // 1. 기존 테스트 fixture를 활용해 임시 설정을 만든다.
     let f = Fixture::new();
+    #[cfg(windows)]
+    let _default_port = match std::net::TcpListener::bind(("127.0.0.1", 43127)) {
+        Ok(listener) => Some(listener),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            None
+        }
+        Err(error) => panic!("Cannot verify the preferred Windows port: {error}"),
+    };
 
-    // 2. 사용 가능한 포트를 선택해 두 번의 실행에 동일하게 사용한다.
-    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reserved.local_addr().unwrap().port();
-    drop(reserved);
-
+    // 2. 새 setup 프로필처럼 첫 기동에서 바인딩한 포트를 저장하도록 한다.
+    devlink_broker::credentials::set_private_permissions(f.path.parent().unwrap()).unwrap();
     f.configure(|config| {
-        config.local_port = port;
+        config.local_port = 0;
+        config.local_port_pending = true;
     });
 
     // 3. 실제 CLI start로 브로커를 시작한다.
@@ -1902,6 +1926,27 @@ async fn mcp_local_token_survives_normal_restart() {
     let broker_url1 = creds1.broker_url;
 
     let runtime1 = Runtime::load(&f.path).unwrap();
+    let saved = Config::load(&f.path).unwrap();
+    assert_eq!(saved.local_port, runtime1.port);
+    assert_ne!(saved.local_port, 0);
+    #[cfg(windows)]
+    {
+        assert_ne!(saved.local_port, 43127);
+        assert!((1024..=49151).contains(&saved.local_port));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let configured = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+        let mut endpoints = configured
+            .split_whitespace()
+            .map(|port| port.parse::<u16>().unwrap());
+        let first = endpoints.next().unwrap();
+        let last = endpoints.next().unwrap();
+        assert!(!(first..=last).contains(&saved.local_port));
+    }
+    assert!(!saved.local_port_pending);
+    devlink_broker::credentials::verify_private_permissions(&f.path).unwrap();
+    let saved_bytes = std::fs::read(&f.path).unwrap();
     let instance_id1 = runtime1.instance_id;
 
     // 5. 실제 CLI stop으로 종료한다.
@@ -1936,6 +1981,8 @@ async fn mcp_local_token_survives_normal_restart() {
     );
     // - runtime instanceId 변경
     let runtime2 = Runtime::load(&f.path).unwrap();
+    assert_eq!(runtime2.port, runtime1.port);
+    assert_eq!(std::fs::read(&f.path).unwrap(), saved_bytes);
     assert!(
         runtime2.instance_id != instance_id1,
         "Runtime instanceId must change after restart"
