@@ -4,7 +4,8 @@ use devlink_broker::{
     inbox::Inbox,
     notifications::{Notifications, TaskNotification},
     private_file,
-    protocol::{TaskCreatedMessage, TaskCreatedPayload},
+    protocol::{TaskCreatedMessage, TaskCreatedPayload, TaskMessageType},
+    task_messages::{TaskMessage, TaskMessages},
     teams,
     update_hook::digest,
     user_auth,
@@ -247,4 +248,95 @@ async fn late_older_status_does_not_regress_digest() {
         "{text}"
     );
     assert_eq!(f.digest("codex"), None);
+}
+
+#[tokio::test]
+async fn digest_counts_new_questions_and_answers_per_task_without_text() {
+    let f = Fixture::new();
+    let message = |id: u64, task: u64, kind: TaskMessageType| TaskMessage {
+        event_id: id.to_string(),
+        task_id: task,
+        sequence: id.to_string(),
+        event_type: kind,
+        created_at: "2026-11-05T10:00:00Z".into(),
+    };
+    let store = TaskMessages::open(&f.path).unwrap();
+    store
+        .apply(
+            ORIGIN,
+            12,
+            vec![
+                message(1, 300, TaskMessageType::Question),
+                message(2, 301, TaskMessageType::Answer),
+                message(3, 300, TaskMessageType::Answer),
+                message(4, 300, TaskMessageType::Answer),
+            ],
+            "c1".into(),
+        )
+        .await
+        .unwrap();
+    // Another Agent's arrivals stay out of this digest.
+    store
+        .apply(
+            ORIGIN,
+            13,
+            vec![message(9, 302, TaskMessageType::Question)],
+            "c1".into(),
+        )
+        .await
+        .unwrap();
+    let text = f.digest("codex").unwrap();
+    assert!(
+        text.contains(
+            "New questions/answers from the other agent on 2 task(s): \
+             #300 (1 question, 2 answers), #301 (1 answer)."
+        ),
+        "{text}"
+    );
+    assert!(text.contains("get_task_result"), "{text}");
+    assert!(
+        !text.contains("#302") && !text.contains("Received"),
+        "{text}"
+    );
+    assert_eq!(f.digest("codex"), None);
+    store
+        .apply(
+            ORIGIN,
+            12,
+            vec![message(5, 301, TaskMessageType::Question)],
+            "c2".into(),
+        )
+        .await
+        .unwrap();
+    let text = f.digest("codex").unwrap();
+    assert!(text.contains("on 1 task(s): #301 (1 question)."), "{text}");
+}
+
+#[tokio::test]
+async fn digest_reports_arrivals_after_sixteen_other_scopes_pulled_empty() {
+    let f = Fixture::new();
+    let store = TaskMessages::open(&f.path).unwrap();
+    for agent in 1001..=1016 {
+        store
+            .apply(ORIGIN, agent, vec![], "old".into())
+            .await
+            .unwrap();
+    }
+    store
+        .apply(
+            ORIGIN,
+            12,
+            vec![TaskMessage {
+                event_id: "1".into(),
+                task_id: 300,
+                sequence: "1".into(),
+                event_type: TaskMessageType::Question,
+                created_at: "2026-11-05T10:00:00Z".into(),
+            }],
+            "c1".into(),
+        )
+        .await
+        .unwrap();
+    let text = f.digest("codex").unwrap();
+    assert!(text.contains("on 1 task(s): #300 (1 question)."), "{text}");
 }

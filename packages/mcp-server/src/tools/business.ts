@@ -83,7 +83,7 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
       taskId: id, questionEventId: eventId, message: conversationText, requestKey,
     })),
     defineTool({ name: 'get_updates',
-      description: 'Read new received tasks and status/completion notices for tasks you sent, as stored by the local broker after cursor. Read-only: it never accepts, acknowledges, marks read or changes a task. Pass nextCursor back to continue; cursorReset means retained local history restarted. coverage=local: read details with get_task_result, and use get_tasks when an update may have been missed. An update is not the user\'s approval to start work.',
+      description: 'Read new received tasks, status/completion notices for tasks you sent, and new questions/answers the other participant left on a shared task (IDs and sequence only), as stored by the local broker after cursor. Read-only: it never accepts, acknowledges, answers, marks read or changes a task. Pass nextCursor back to continue; cursorReset means retained local history restarted. coverage=local: read details and question/answer text with get_task_result, and use get_tasks when an update may have been missed. An update is not the user\'s approval to start work or to answer a question.',
       inputSchema: z.strictObject({ cursor: z.string().min(1).max(512).optional(), limit: z.number().int().min(1).max(50).default(20) }),
       outputSchema: updatesOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },

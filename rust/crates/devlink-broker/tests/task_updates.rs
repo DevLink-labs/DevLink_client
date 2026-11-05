@@ -5,9 +5,10 @@ use devlink_broker::{
     inbox::Inbox,
     notifications::{Notifications, TaskNotification},
     private_file,
-    protocol::{TaskCreatedMessage, TaskCreatedPayload},
+    protocol::{TaskCreatedMessage, TaskCreatedPayload, TaskMessageType},
     session_api,
     sessions::{ReadyIdentityProvider, SessionManager},
+    task_messages::{TaskMessage, TaskMessages},
     updates,
 };
 use serde_json::{Value, json};
@@ -486,4 +487,131 @@ async fn a_different_connected_subject_invalidates_local_reads() {
     let (status, data) = f.updates(&session, json!({})).await;
     assert_eq!(status, 409, "{data}");
     assert_eq!(data["error"]["code"], "SESSION_EXPIRED");
+}
+
+async fn arrive(path: &Path, origin: &str, agent: u64, ids: &[(u64, &str)], cursor: &str) {
+    let items = ids
+        .iter()
+        .map(|(id, kind)| TaskMessage {
+            event_id: id.to_string(),
+            task_id: 300,
+            sequence: id.to_string(),
+            event_type: if *kind == "QUESTION" {
+                TaskMessageType::Question
+            } else {
+                TaskMessageType::Answer
+            },
+            created_at: "2026-11-05T10:00:00Z".into(),
+        })
+        .collect();
+    TaskMessages::open(path)
+        .unwrap()
+        .apply(origin, agent, items, cursor.into())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn question_and_answer_arrivals_follow_other_sources_without_bodies() {
+    let f = Fixture::new().await;
+    let session = f.claim(true).await;
+    receive(&f.path, ORIGIN, 12, created(101, 1, 12)).await;
+    let before = f.page(&session, json!({})).await;
+    assert!(
+        before["nextCursor"]
+            .as_str()
+            .unwrap()
+            .starts_with("v2.1.0.0.")
+    );
+
+    arrive(
+        &f.path,
+        ORIGIN,
+        12,
+        &[(501, "QUESTION"), (502, "ANSWER")],
+        "c1",
+    )
+    .await;
+    // Another Agent's or origin's arrivals never widen this view.
+    arrive(&f.path, ORIGIN, 13, &[(601, "QUESTION")], "c1").await;
+    arrive(&f.path, "ws://127.0.0.1:10", 12, &[(701, "QUESTION")], "c1").await;
+    let page = f
+        .page(&session, json!({"cursor": before["nextCursor"]}))
+        .await;
+    assert_eq!(page["cursorReset"], false);
+    assert_eq!(
+        page["updates"],
+        json!([
+            {"eventId":"501","kind":"TASK_QUESTION_CREATED","direction":"received","taskId":"300","sequence":"501"},
+            {"eventId":"502","kind":"TASK_ANSWER_CREATED","direction":"received","taskId":"300","sequence":"502"},
+        ])
+    );
+    assert!(
+        page["nextCursor"]
+            .as_str()
+            .unwrap()
+            .starts_with("v2.1.0.2.")
+    );
+
+    // Paging crosses into the new source without gaps.
+    let first = f.page(&session, json!({"limit":2})).await;
+    assert_eq!(first["hasMore"], true);
+    let rest = f
+        .page(&session, json!({"cursor": first["nextCursor"], "limit":2}))
+        .await;
+    assert_eq!(rest["updates"][0]["eventId"], "502");
+    assert_eq!(rest["hasMore"], false);
+
+    // Clearing arrivals resets old cursors instead of skipping a re-stored record.
+    TaskMessages::clear_config(&f.path).unwrap();
+    arrive(
+        &f.path,
+        ORIGIN,
+        12,
+        &[(503, "QUESTION"), (502, "ANSWER")],
+        "c2",
+    )
+    .await;
+    let reset = f
+        .page(&session, json!({"cursor": page["nextCursor"]}))
+        .await;
+    assert_eq!(reset["cursorReset"], true);
+    let ids: Vec<_> = reset["updates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["eventId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[1..], ["503", "502"]);
+}
+
+#[tokio::test]
+async fn arrivals_show_after_sixteen_other_scopes_pulled_empty() {
+    let f = Fixture::new().await;
+    let session = f.claim(true).await;
+    // Re-registered Agents and other test servers each left an empty pull behind.
+    for agent in 1001..=1008 {
+        arrive(&f.path, ORIGIN, agent, &[], "old").await;
+    }
+    for port in 11..=18 {
+        arrive(&f.path, &format!("ws://127.0.0.1:{port}"), 12, &[], "old").await;
+    }
+    // The seventeenth scope is this session's Agent.
+    arrive(
+        &f.path,
+        ORIGIN,
+        12,
+        &[(501, "QUESTION"), (502, "ANSWER")],
+        "c1",
+    )
+    .await;
+    let page = f.page(&session, json!({})).await;
+    assert_eq!(
+        page["updates"],
+        json!([
+            {"eventId":"501","kind":"TASK_QUESTION_CREATED","direction":"received","taskId":"300","sequence":"501"},
+            {"eventId":"502","kind":"TASK_ANSWER_CREATED","direction":"received","taskId":"300","sequence":"502"},
+        ])
+    );
 }

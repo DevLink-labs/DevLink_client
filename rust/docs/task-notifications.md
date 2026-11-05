@@ -13,7 +13,7 @@ devlink --config C:\profiles\codex.json status
 
 저장 작업은 별도 blocking worker와 bounded queue(16개)를 사용해 WebSocket heartbeat/control을 막지 않는다. 접수한 쓰기는 소켓 세션이 종료되어도 공유된 16개 permit 아래에서 계속 처리한다. 같은 프로필의 쓰기는 async mutex로 직렬화하며, 이전 프로세스와의 OS 파일 try-lock 경합은 즉시 거부·계수하고 기존 기록을 유지한다. malformed·conflicting·queue full·디스크 오류는 health/status의 `notificationRejections`에 반영하고 기존 중앙 업무·연결·상세 조회는 유지한다. 오류로 작업을 FAILED로 만들거나 자동 수락·업무 재실행·중앙 재전달하지 않는다. 이전 세대 소켓의 새 메시지는 기록하지 않는다. 이미 현재 신원으로 접수된 기록은 그 origin/Agent 범위에만 보관한다.
 
-보관 상한은 1024 이벤트·16MiB다. 상한에 도달하면 기존 최고 version을 지우며 새 상태를 낮추지 않고 새 기록을 거부하고 중앙 조회를 안내한다. 운영자가 로컬 기록만 초기화하려면 브로커를 중지한 뒤 `devlink --config <file> notifications --clear`를 실행한다. 실행 중 clear는 거부하며 중앙 작업·결과는 변경하지 않는다. 손상된 기록은 자동 덮어쓰기하지 않고 CLI에 `NOTIFICATION_STORE_UNAVAILABLE`과 중앙 조회 안내를 표시한다.
+보관 상한은 1024 이벤트·16MiB다. 상한에 도달하면 기존 최고 version을 지우며 새 상태를 낮추지 않고 새 기록을 거부하고 중앙 조회를 안내한다. 운영자가 로컬 기록만 초기화하려면 브로커를 중지한 뒤 `devlink --config <file> notifications --clear`를 실행한다. 같은 명령이 질문·답변 도착 정보(`task-messages.json`)도 비우되 중앙 cursor는 유지한다([task-messages](task-messages.md)). 실행 중 clear는 거부하며 중앙 작업·결과는 변경하지 않는다. 손상된 기록은 자동 덮어쓰기하지 않고 CLI에 `NOTIFICATION_STORE_UNAVAILABLE`과 중앙 조회 안내를 표시한다.
 
 ## 검증
 
