@@ -105,6 +105,8 @@ pub struct Health {
     pub notification_rejections: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbox: Option<crate::inbox::InboxDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_messages: Option<crate::task_messages::TaskMessageDiagnostics>,
     pub service: String,
     pub api_version: u32,
     pub pid: u32,

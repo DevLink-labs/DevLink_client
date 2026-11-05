@@ -1,6 +1,6 @@
 # Host 훅 업데이트 알림 — `devlink updates-hook`
 
-2026-11-04 (Asia/Seoul). Codex·Claude Code가 세션 시작과 프롬프트 제출 때 새 작업과 보낸 작업의 상태 변화를 문맥으로 받도록, [로컬 업데이트 피드](local-updates.md)를 짧은 사실 요약으로 내보내는 helper다. Host 설정 파일에 훅을 설치하는 일은 범위 밖이다. 실제 Host에서의 문맥 주입은 [격리 PoC와 실제 서버 설치 검증](#host-poc-결과)으로 확인했다.
+2026-11-04 (Asia/Seoul), 2026-11-05 갱신(S15P31D108-167). Codex·Claude Code가 세션 시작과 프롬프트 제출 때 새 작업, 보낸 작업의 상태 변화, 같은 Task의 새 질문·답변을 문맥으로 받도록, [로컬 업데이트 피드](local-updates.md)를 짧은 사실 요약으로 내보내는 helper다. Host 설정 파일에 훅을 설치하는 일은 범위 밖이다. 실제 Host에서의 문맥 주입은 [격리 PoC와 실제 서버 설치 검증](#host-poc-결과)으로 확인했다.
 
 ## 명령
 
@@ -25,22 +25,22 @@ MCP 세션 없이 동작하므로 세션 claim 대신 바인딩 파일로 actor�
 - `agent-profile.json`에 bind된 Agent가 없으면 조용히 끝난다.
 - 바인딩·선택 팀·origin·프로젝트 경로 검사는 [`inspection_binding`](../crates/devlink-broker/src/agent_profile.rs)과 같다. 선택 팀이 바인딩과 다르거나 프로젝트 경로가 사라졌으면 오류다.
 - 현재 작업 디렉터리가 bind된 프로젝트 루트 안에 없으면 조용히 끝난다. 사용자 전역 훅으로 설치해도 다른 프로젝트에 이 Agent의 작업이 섞이지 않는다.
-- 피드는 `get_updates`와 같다(`Feed::load`). 현재 origin·Agent·팀의 받은 작업과 보낸 작업 알림만 포함하고 중앙은 호출하지 않는다.
+- 피드는 `get_updates`와 같다(`Feed::load`). 현재 origin·Agent·팀의 받은 작업, 보낸 작업 알림, 질문·답변 도착 정보만 포함하고 중앙은 호출하지 않는다.
 
 ## cursor와 동시성
 
-- Host마다 `.devlink-runtime/updates-<host>.json`(`{"schemaVersion":1,"cursor":"v1...."}`)에 별도 cursor를 둔다. Codex가 읽은 업데이트도 Claude Code에는 다시 나온다. MCP `get_updates`의 cursor와도 독립이다.
-- 실행마다 남은 항목을 모두 소비한다. 두 저장소는 각각 1024건으로 제한되므로 한 번에 읽어도 된다.
+- Host마다 `.devlink-runtime/updates-<host>.json`(`{"schemaVersion":1,"cursor":"v2...."}`)에 별도 cursor를 둔다. 이전에 저장한 v1 cursor도 그대로 이어 읽는다. Codex가 읽은 업데이트도 Claude Code에는 다시 나온다. MCP `get_updates`의 cursor와도 독립이다.
+- 실행마다 남은 항목을 모두 소비한다. 수신함·알림은 각각 1024건, 질문·답변은 4096건으로 제한되므로 한 번에 읽어도 된다. 질문·답변이 상한에 닿아 오래된 절반을 정리하면 cursor가 맞지 않아 위의 재시작 안내와 함께 남은 항목을 다시 나열한다.
 - cursor를 먼저 저장한 뒤 요약을 출력한다. Host가 출력을 버리면 그 요약은 다시 나오지 않으며, 이때는 `get_updates`·`get_tasks`로 확인한다. 중복보다 누락을 택한 것은 같은 알림이 프롬프트마다 반복되는 것을 막기 위해서다.
 - `updates-<host>.lock`을 기다리지 않고 시도한다. 같은 Host의 다른 세션이 동시에 실행 중이면 이번 실행은 조용히 건너뛰고 다음 실행이 이어받는다. 같은 Host의 여러 세션은 cursor를 공유하므로 업데이트는 먼저 실행된 세션 하나에만 나온다.
 - 저장소가 정리·교체되어 cursor가 맞지 않거나 cursor 파일을 해석할 수 없으면 처음부터 다시 나열하고 요약에 `Local update history was cleared or replaced`를 넣는다.
 
 ## 요약 내용
 
-- 사실 서술만 넣는다. 받은 작업은 task ID와 요청 Agent ID, 보낸 작업은 task별 가장 높은 version의 상태다.
+- 사실 서술만 넣는다. 받은 작업은 task ID와 요청 Agent ID, 보낸 작업은 task별 가장 높은 version의 상태, 질문·답변은 task별 새 질문·답변 개수다(예: `- New questions/answers from the other agent on 1 task(s): #300 (1 question, 2 answers). Read them with get_task_result; answer only when the user wants you to.`).
 - 보낸 작업의 최신 version은 이번 실행분이 아니라 보존된 전체 알림 이력에서 고른다. 그 최신 version이 이번에 새로 소비한 이벤트일 때만 보고한다. 이전 실행에서 이미 보고한 것보다 낮은 version이 늦게 도착하면 cursor는 넘기되 요약하지 않으므로, 보고한 상태가 뒤로 돌아가지 않는다.
 - 범주마다 task ID는 최대 10개이고 나머지는 `and N more`로 센다.
-- prompt·resultText·파일 경로는 넣지 않는다. 다른 Agent가 쓴 본문이 Host 문맥에 지시처럼 들어가지 않도록 하기 위해서다.
+- prompt·resultText·질문·답변 본문·파일 경로는 넣지 않는다. 다른 Agent가 쓴 본문이 Host 문맥에 지시처럼 들어가지 않도록 하기 위해서다.
 - 업데이트는 사용자 승인이 아니라는 문장과 `get_task_result`·`get_tasks`로 확인하라는 안내를 항상 붙인다.
 
 ## Host 설정 예시
@@ -77,7 +77,7 @@ Codex (`~/.codex/hooks.json` 또는 `<repo>/.codex/hooks.json`):
 
 ## 검증
 
-- `cargo test -p devlink-broker --test update_hook`: 한 번만 보고, task별 최신 상태, 호출 사이에 늦게 도착한 낮은 version 무보고, 다른 팀·Agent·요청자 제외, 본문 미포함, Host별 cursor, 10개 상한, 미바인딩·프로젝트 밖·잠금 경합 시 소비 없이 무출력, 저장소 정리·손상 cursor 재시작 안내, 선택 팀 불일치와 잘못된 consumer 오류.
+- `cargo test -p devlink-broker --test update_hook`: task별 질문·답변 개수와 다른 Agent 제외, 한 번만 보고, task별 최신 상태, 호출 사이에 늦게 도착한 낮은 version 무보고, 다른 팀·Agent·요청자 제외, 본문 미포함, Host별 cursor, 10개 상한, 미바인딩·프로젝트 밖·잠금 경합 시 소비 없이 무출력, 저장소 정리·손상 cursor 재시작 안내, 선택 팀 불일치와 잘못된 consumer 오류.
 - `update_hook::tests`: consumer 이름 제한과 목록 상한.
 - `cargo test -p devlink-cli --test cli_updates_hook`: 항상 종료 코드 0, 업데이트 없을 때 무출력, 잘못된 값의 stderr 안내, 저장소 오류는 session-start에서만 안내.
 
