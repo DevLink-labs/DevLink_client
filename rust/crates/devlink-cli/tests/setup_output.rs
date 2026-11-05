@@ -19,6 +19,9 @@ fn progress() -> ProgressEvent {
         outcome: Outcome::NotApplied,
         required_inputs: Vec::new(),
         team_choices: Vec::new(),
+        agent_choices: Vec::new(),
+        tools: Vec::new(),
+        mcp_plan: None,
     }
 }
 

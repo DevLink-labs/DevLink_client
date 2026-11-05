@@ -169,6 +169,17 @@ pub fn session_path(config_path: &Path) -> PathBuf {
     config::state_directory(config_path).join("user-session.json")
 }
 
+/// Local setup continuity only; this does not replace a live central identity check.
+pub(crate) fn setup_session_matches(
+    config_path: &Path,
+    origin: &str,
+    user_id: u64,
+) -> Result<bool> {
+    Ok(private_file::read::<Snapshot>(&session_path(config_path), LIMIT)?.is_some_and(|s|
+        s.schema_version == 1 && s.origin == origin && matches!(s.state,
+            SessionState::Authenticated { user, cookie } if user.user_id == user_id && valid_user(&user) && valid_cookie(&cookie))))
+}
+
 pub fn validate_config(config_path: &Path) -> Result<()> {
     config_origin(config_path).map(|_| ())
 }
@@ -407,6 +418,15 @@ impl UserClient {
         self.exchange(Method::GET, path, None, None).await
     }
 
+    pub(crate) async fn get_with_query<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        self.exchange_with_query(Method::GET, path, None, None, query)
+            .await
+    }
+
     pub async fn post<T: DeserializeOwned>(&mut self, path: &str, body: Value) -> Result<T> {
         let prepared = self.prepare_post().await?;
         self.post_prepared(path, body, prepared).await
@@ -433,6 +453,18 @@ impl UserClient {
         body: Option<Value>,
         csrf: Option<Csrf>,
     ) -> Result<T> {
+        self.exchange_with_query(method, path, body, csrf, &[])
+            .await
+    }
+
+    async fn exchange_with_query<T: DeserializeOwned>(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        csrf: Option<Csrf>,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
         ensure!(
             path.starts_with("/api/v1/")
                 && !path.contains(['?', '#', '\\'])
@@ -441,6 +473,9 @@ impl UserClient {
         );
         let mut url = self.origin.clone();
         url.set_path(path);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
         let mut request = self.client.request(method, url);
         if let Some(body) = body {
             request = request.json(&body);
@@ -518,6 +553,7 @@ fn rejection(status: u16, code: Option<&str>) -> anyhow::Error {
         Some("VALIDATION_FAILED") => "VALIDATION_FAILED",
         Some("ACCESS_DENIED") => "ACCESS_DENIED",
         Some("RESOURCE_NOT_FOUND") => "RESOURCE_NOT_FOUND",
+        Some("AGENT_ALREADY_EXISTS") if status == 409 => "AGENT_ALREADY_EXISTS",
         _ => match status {
             401 => "AUTHENTICATION_REQUIRED",
             403 => "ACCESS_DENIED",
@@ -557,14 +593,7 @@ pub async fn login_for_setup(
     password: &str,
     expected_origin: &str,
 ) -> Result<LoginResult> {
-    let mut client = UserClient::load(config_path)?;
-    require_setup_origin(&client, expected_origin)?;
-    if client.local_problem.is_some() {
-        return Err(fault(
-            AuthFaultKind::SessionConflict,
-            "The local session changed; inspect it before signing in",
-        ));
-    }
+    let mut client = setup_login_client(config_path, expected_origin)?;
     let mut expired_now = false;
     if matches!(client.snapshot.state, SessionState::Authenticated { .. }) {
         match client.verify_session().await {
@@ -592,6 +621,30 @@ pub async fn login_for_setup(
                 error
             }
         })
+}
+
+/// An explicit batch login always authenticates the supplied account.
+pub async fn login_for_setup_explicit(
+    config_path: &Path,
+    email: &str,
+    password: &str,
+    expected_origin: &str,
+) -> Result<User> {
+    validate_login_input(email, password)?;
+    let client = setup_login_client(config_path, expected_origin)?;
+    login_with_client(client, config_path, email, password).await
+}
+
+fn setup_login_client(config_path: &Path, expected_origin: &str) -> Result<UserClient> {
+    let client = UserClient::load(config_path)?;
+    require_setup_origin(&client, expected_origin)?;
+    if client.local_problem.is_some() {
+        return Err(fault(
+            AuthFaultKind::SessionConflict,
+            "The local session changed; inspect it before signing in",
+        ));
+    }
+    Ok(client)
 }
 
 async fn login_with_client(
@@ -625,6 +678,12 @@ async fn login_with_client(
         }
         crate::agent_profile::before_login_publish(config_path, verified.user_id)?;
         client.csrf().await?; // Login rotates the session and the CSRF token.
+        if config_origin(config_path)? != client.origin {
+            return Err(fault(
+                AuthFaultKind::SessionConflict,
+                "The configured server changed during sign-in",
+            ));
+        }
         client.snapshot = Snapshot {
             schema_version: 1,
             origin: client.origin.to_string(),

@@ -2,6 +2,7 @@ pub mod agent_api;
 pub mod agent_context;
 pub mod agent_profile;
 pub mod broker;
+pub mod broker_control;
 pub mod business_api;
 pub mod central;
 #[cfg(test)]
@@ -19,10 +20,19 @@ pub mod protocol;
 pub mod session_api;
 pub mod sessions;
 pub mod setup_config;
+pub mod setup_connection;
+pub mod setup_mcp;
+pub mod setup_project;
+pub mod setup_tools;
 pub mod task_api;
 pub mod task_client;
 pub mod task_operations;
 pub mod task_requests;
 pub mod task_routes;
 pub mod teams;
+pub mod tool_discovery;
+pub mod update_hook;
+pub mod updates;
 pub mod user_auth;
+#[cfg(windows)]
+mod win_acl;

@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State, WebSocketUpgrade, ws::Message},
+    extract::{Path, Query, State, WebSocketUpgrade, ws::Message},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,11 @@ use std::{
     },
 };
 use tokio::{net::TcpListener, task::JoinHandle};
+#[path = "tool_fixture.rs"]
+pub mod tool_fixture;
+pub fn test_tool() -> &'static std::path::Path {
+    tool_fixture::codex()
+}
 
 pub const PASSWORD: &str = "test-password-do-not-print";
 pub const COOKIE: &str = "post-login-cookie-do-not-print";
@@ -45,9 +50,16 @@ pub struct MockState {
     pub tokens: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
     pub create_calls: Arc<AtomicUsize>,
     pub token_calls: Arc<AtomicUsize>,
+    pub token_requests: Arc<AtomicUsize>,
     pub create_mode: Arc<AtomicU8>,
+    pub agent_list_mode: Arc<AtomicU8>,
+    pub pause_create: Arc<AtomicBool>,
+    pub create_entered: Arc<tokio::sync::Notify>,
+    pub create_resume: Arc<tokio::sync::Notify>,
     pub token_mode: Arc<AtomicU8>,
     pub wrong_context: Arc<AtomicBool>,
+    pub agent_context_mode: Arc<AtomicU8>,
+    pub agent_context_calls: Arc<AtomicUsize>,
     pub csrf_failure: Arc<AtomicBool>,
     pub csrf_mode: Arc<AtomicU8>,
     pub pause_token: Arc<AtomicBool>,
@@ -202,32 +214,80 @@ async fn agent_create(
     if state.create_mode.load(Ordering::SeqCst) == 3 {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
     }
+    if state.create_mode.load(Ordering::SeqCst) == 4 {
+        return failure(StatusCode::CONFLICT, "DUPLICATE_REQUEST");
+    }
     assert!(body.get("ownerUserId").is_none() && body.get("agentId").is_none());
-    let count = state.agents.lock().unwrap().len();
-    let id = 201 + count as u64;
-    let user = user(&state)["userId"].as_u64().unwrap();
-    let mut agent = agent_value(
-        id,
-        user,
-        team,
-        body["name"].as_str().unwrap(),
-        body["toolType"].clone(),
-        body["projectName"].clone(),
+    assert_eq!(
+        body.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["name", "projectName", "roleDescription", "toolType"]
     );
-    agent["roleDescription"] = body["roleDescription"].clone();
-    state.agents.lock().unwrap().insert(id, agent.clone());
+    let fixed = [
+        agent_for(&state, 301).unwrap(),
+        agent_for(&state, 302).unwrap(),
+    ];
+    let agent = {
+        let mut stored = state.agents.lock().unwrap();
+        if stored.values().chain(fixed.iter()).any(|agent| {
+            agent["teamId"] == team
+                && agent["name"] == body["name"]
+                && agent["toolType"] == body["toolType"]
+        }) {
+            return failure(StatusCode::CONFLICT, "AGENT_ALREADY_EXISTS");
+        }
+        let count = stored.len();
+        let id = 201 + count as u64;
+        let user = user(&state)["userId"].as_u64().unwrap();
+        let mut agent = agent_value(
+            id,
+            user,
+            team,
+            body["name"].as_str().unwrap(),
+            body["toolType"].clone(),
+            body["projectName"].clone(),
+        );
+        agent["roleDescription"] = body["roleDescription"].clone();
+        stored.insert(id, agent.clone());
+        agent
+    };
+    if state.pause_create.load(Ordering::SeqCst) {
+        state.create_entered.notify_one();
+        state.create_resume.notified().await;
+    }
     if state.create_mode.load(Ordering::SeqCst) == 1 {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
     }
     success(agent)
 }
+#[derive(serde::Deserialize)]
+struct AgentListQuery {
+    #[serde(rename = "ownedByMe", default)]
+    owned_by_me: bool,
+}
 async fn agent_list(
     Path(team): Path<u64>,
     State(state): State<MockState>,
+    Query(query): Query<AgentListQuery>,
     headers: HeaderMap,
 ) -> Response {
     assert!(authorized(&state, &headers, false));
-    assert_eq!(team, 71);
+    assert!(team_for(&state, team).is_some());
+    state.calls.lock().unwrap().push(
+        if query.owned_by_me {
+            "agents_owned"
+        } else {
+            "agents_all"
+        }
+        .into(),
+    );
+    let mode = state.agent_list_mode.load(Ordering::SeqCst);
+    if mode == 1 {
+        return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
+    }
     let mut agents = state
         .agents
         .lock()
@@ -237,6 +297,18 @@ async fn agent_list(
         .collect::<Vec<_>>();
     agents.push(agent_for(&state, 301).unwrap());
     agents.push(agent_for(&state, 302).unwrap());
+    if query.owned_by_me && mode != 2 {
+        agents.retain(|agent| {
+            agent["ownerUserId"] == user(&state)["userId"] && agent["teamId"] == team
+        });
+    }
+    if mode == 3 {
+        agents.push(agents[0].clone());
+    }
+    if mode == 4 {
+        agents.push(agent_for(&state, 303).unwrap());
+    }
+    agents.sort_by_key(|agent| agent["agentId"].as_u64().unwrap());
     success(json!(agents))
 }
 async fn agent_get(
@@ -258,6 +330,7 @@ async fn agent_token(
     headers: HeaderMap,
 ) -> Response {
     assert!(authorized(&state, &headers, true));
+    state.token_requests.fetch_add(1, Ordering::SeqCst);
     if state.pause_token.load(Ordering::SeqCst) {
         state.token_entered.notify_one();
         state.token_resume.notified().await;
@@ -268,6 +341,9 @@ async fn agent_token(
     if agent["ownerUserId"] != user(&state)["userId"] {
         return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
     }
+    if state.token_mode.load(Ordering::SeqCst) == 3 {
+        return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
+    }
     let count = state.token_calls.fetch_add(1, Ordering::SeqCst) + 1;
     let token = format!("{AGENT_SECRET}-{id}-{count}");
     let mut tokens = state.tokens.lock().unwrap();
@@ -276,6 +352,12 @@ async fn agent_token(
     drop(tokens);
     if state.token_mode.load(Ordering::SeqCst) == 1 {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED");
+    }
+    if state.token_mode.load(Ordering::SeqCst) == 2 {
+        return success(json!({"agentId":301,"token":token}));
+    }
+    if state.token_mode.load(Ordering::SeqCst) == 4 {
+        return success(json!({"agentId":id,"token":format!("{AGENT_SECRET}\ninvalid")}));
     }
     success(json!({"agentId":id,"token":token}))
 }
@@ -289,6 +371,13 @@ fn token_agent(state: &MockState, headers: &HeaderMap) -> Option<u64> {
 }
 async fn agent_context(State(state): State<MockState>, headers: HeaderMap) -> Response {
     assert!(!headers.contains_key("cookie"));
+    state.agent_context_calls.fetch_add(1, Ordering::SeqCst);
+    match state.agent_context_mode.load(Ordering::SeqCst) {
+        1 => return failure(StatusCode::SERVICE_UNAVAILABLE, "PRIVATE_CONTEXT_FAILURE"),
+        2 => return (StatusCode::OK, "private-invalid-json").into_response(),
+        3 => return (StatusCode::FOUND, [("location", "/sink")]).into_response(),
+        _ => {}
+    }
     let Some(mut id) = token_agent(&state, &headers) else {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
     };
@@ -304,6 +393,7 @@ async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    use devlink_broker::protocol::{ClientMessage, HeartbeatPing, ServerMessage};
     use futures_util::StreamExt;
     let Some(id) = token_agent(&state, &headers) else {
         return failure(StatusCode::UNAUTHORIZED, "AUTHENTICATION_REQUIRED");
@@ -313,11 +403,12 @@ async fn websocket(
         let ready=json!({"type":"BROKER_READY","payload":{"connection_id":format!("profile-{id}"),"agent_id":id}});
         if socket.send(Message::Text(ready.to_string().into())).await.is_err(){return;}
         while let Some(Ok(message))=socket.next().await{
-            if let Message::Text(text)=message
-                && let Ok(value)=serde_json::from_str::<Value>(&text)
-                    && value["type"]=="HEARTBEAT_PING"{
-                        let pong=json!({"type":"HEARTBEAT_PONG","payload":{"ping_id":value["payload"]["ping_id"]}});
-                        if socket.send(Message::Text(pong.to_string().into())).await.is_err(){break;}
+                if let Message::Text(text)=message
+                    && let Ok(ClientMessage::Heartbeat(HeartbeatPing::Ping { ping_id })) =
+                        serde_json::from_str(&text)
+                {
+                    let pong = serde_json::to_string(&ServerMessage::heartbeat_pong(ping_id)).unwrap();
+                    if socket.send(Message::Text(pong.into())).await.is_err() { break; }
             }
         }
     })
@@ -551,6 +642,28 @@ pub fn run_at(path: &std::path::Path, args: &[&str], input: Option<&str>) -> Out
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Existing auth/team/project fixtures use a synthetic --version-only Host.
+    let guided_setup =
+        args.contains(&"setup") && !args.windows(2).any(|pair| pair == ["setup", "status"]);
+    if guided_setup && !args.contains(&"--tool") && !args.contains(&"--tool-path") {
+        command
+            .args(["--tool", "codex", "--tool-path"])
+            .arg(test_tool());
+    }
+    // Setup now checks its MCP runtime before any central mutation. Keep account
+    // tests independent of a developer's Node installation and TypeScript build.
+    if guided_setup {
+        // Account fixtures use their own project, never the developer checkout's
+        // Host settings. Project cwd behavior is tested with direct commands.
+        command.current_dir(path.parent().unwrap());
+        let options = tool_fixture::default_mcp_options();
+        if !args.contains(&"--node-path") {
+            command.arg("--node-path").arg(options.node.unwrap());
+        }
+        if !args.contains(&"--mcp-entry") {
+            command.arg("--mcp-entry").arg(options.entry.unwrap());
+        }
+    }
     let mut child = command.spawn().unwrap();
     if let Some(input) = input {
         child

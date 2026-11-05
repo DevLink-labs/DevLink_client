@@ -27,6 +27,15 @@ expansion cannot redirect the selected executable, script or credential file.
 
 ## API
 
+Setup integration also exposes `mcp_config::preflight(input, inspect_target)`.
+It validates the same paths/permissions and, when `inspect_target` is true, the
+existing Host entry through the provider's merge parser. It rejects conflicts
+without writing or retaining an apply plan. The future descriptor may be absent;
+an existing descriptor must still be safe and valid. Setup calls this before
+Agent/token creation, probes the runtime separately, and repeats validation in
+the existing plan/apply path. Manual mode uses `inspect_target=false` because it
+only returns guidance rather than merging into the current Host file.
+
 ```rust,ignore
 use devlink_broker::mcp_config::{McpConfig, VerifiedHost, PlanInput, InspectionInput};
 let mut provider = McpConfig::new(VerifiedHost::new(tool_type, detected_version)?);

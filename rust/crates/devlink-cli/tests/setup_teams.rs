@@ -53,21 +53,34 @@ fn multiple(f: &Fixture) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_single_team_is_verified_saved_privately_and_then_reused_without_rewriting() {
     let f = fixture().await;
-    let value = parsed(&f, &["setup", "--output", "json"], 3);
+    let value = parsed(&f, &["setup", "--output", "json"], 2);
     assert_eq!(value["stages"][2]["status"], "succeeded");
     assert_eq!(value["stages"][2]["reused"], false);
-    assert_eq!(value["error"]["step"], "bind_project");
+    assert_eq!(value["error"]["step"], "register_agent");
     assert_eq!(value["error"]["known"]["teamId"], "71");
     assert_eq!(
         *f.state.calls.lock().unwrap(),
-        ["me", "me", "team_list", "team_detail", "team_members"]
+        [
+            "me",
+            "me",
+            "team_list",
+            "team_detail",
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
+        ]
     );
     let path = teams::selection_path(&f.path);
     credentials::verify_private_permissions(&path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
     multiple(&f);
-    let value = parsed(&f, &["setup", "--output", "json"], 3);
+    let value = parsed(&f, &["setup", "--output", "json"], 2);
     assert_eq!(value["stages"][2]["reused"], true);
     assert_eq!(value["stages"][2]["outcome"], "not_applied");
     assert_eq!(bytes, std::fs::read(&path).unwrap());
@@ -100,7 +113,7 @@ async fn explicit_joined_team_overrides_saved_selection_without_changing_other_c
     selected(&f, 51, 71);
     multiple(&f);
     let mcp = credentials::publish(&f.path, "http://127.0.0.1:43127").unwrap();
-    let value = parsed(&f, &["setup", "--team-id", "72", "--output", "json"], 3);
+    let value = parsed(&f, &["setup", "--team-id", "72", "--output", "json"], 2);
     assert_eq!(value["error"]["known"]["teamId"], "72");
     assert_eq!(
         teams::stored_selection(&f.path).unwrap().unwrap().team_id,
@@ -130,7 +143,7 @@ async fn another_users_foreign_origins_and_departed_teams_are_not_reused() {
         );
     }
     f.state.joined.store(false, Ordering::SeqCst);
-    let value = parsed(&f, &["setup", "--output", "json"], 3);
+    let value = parsed(&f, &["setup", "--output", "json"], 2);
     assert_eq!(value["stages"][2]["reused"], false);
     let s = teams::stored_selection(&f.path).unwrap().unwrap();
     assert_eq!((s.user_id, s.team_id), (51, 71));
@@ -240,7 +253,19 @@ async fn agent_binding_conflicts_preserve_selector_agent_and_mcp_including_pendi
         json!({"kind":"create_pending","name":"Pending","tool":"CODEX","project_name":"Project"}),
     );
     assert_eq!(
-        parsed(&f, &["setup", "--team-id", "72", "--output", "json"], 3)["stages"][2]["status"],
+        parsed(
+            &f,
+            &[
+                "setup",
+                "--team-id",
+                "72",
+                "--project",
+                f.path.parent().unwrap().to_str().unwrap(),
+                "--output",
+                "json",
+            ],
+            3
+        )["stages"][2]["status"],
         "succeeded"
     );
 }
@@ -455,7 +480,13 @@ impl TeamInput for Input {
         Ok(72)
     }
 }
-async fn injected(f: &Fixture, mode: u8) -> (setup::RunResult<()>, Vec<setup::ProgressEvent>) {
+async fn injected(
+    f: &Fixture,
+    mode: u8,
+) -> (
+    setup::RunResult<devlink_broker::setup_connection::Report>,
+    Vec<setup::ProgressEvent>,
+) {
     let calls = Arc::new(AtomicUsize::new(0));
     let input = Input {
         calls: calls.clone(),
@@ -468,7 +499,19 @@ async fn injected(f: &Fixture, mode: u8) -> (setup::RunResult<()>, Vec<setup::Pr
         &SetupContext {
             config_path: f.path.clone(),
         },
-        SetupStages::new(NoLoginInput).with_team_input(input),
+        SetupStages::new(NoLoginInput)
+            .with_team_input(input)
+            .with_project(devlink_broker::setup_project::ProjectOptions {
+                path: Some(f._root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .with_mcp(account_server::tool_fixture::mcp_options(
+                &f._root.path().join("mcp-runtime"),
+            ))
+            .with_tool(
+                Some(devlink_broker::sessions::ToolType::Codex),
+                Some(account_server::test_tool().to_path_buf()),
+            ),
         |event| {
             events.push(event.clone());
             Ok(())
@@ -484,7 +527,7 @@ async fn interactive_selection_emits_choices_resumes_only_team_step_and_checks_m
     let f = fixture().await;
     multiple(&f);
     let (result, events) = injected(&f, 0).await;
-    assert_eq!(result.exit_code, 3);
+    assert_eq!(result.exit_code, 2);
     let waiting = events
         .iter()
         .find(|e| e.step_status == StageStatus::WaitingInput)
@@ -580,7 +623,7 @@ async fn invalid_team_arguments_are_redacted_and_long_ids_remain_exact() {
             "--output",
             "json",
         ],
-        3,
+        2,
     );
     assert_eq!(value["error"]["known"]["teamId"], "9223372036854775807");
     assert_eq!(

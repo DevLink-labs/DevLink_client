@@ -53,6 +53,8 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
     let f = fixture().await;
     assert!(f.login().status.success());
     f.state.calls.lock().unwrap().clear();
+    let (node, entry) =
+        account_server::tool_fixture::mcp_runtime(&f._root.path().join("mcp-runtime"));
     let mut child = Command::new(env!("CARGO_BIN_EXE_devlink"))
         .arg("--config")
         .arg(&f.path)
@@ -64,6 +66,14 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
             "--output",
             "json",
         ])
+        .args(["--tool", "codex", "--tool-path"])
+        .arg(account_server::test_tool())
+        .arg("--node-path")
+        .arg(node)
+        .arg("--mcp-entry")
+        .arg(entry)
+        .arg("--project")
+        .arg(f._root.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -78,21 +88,34 @@ async fn valid_session_reuses_server_identity_without_reading_an_open_password_p
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let value = parsed(&child.wait_with_output().unwrap(), 3);
+    let value = parsed(&child.wait_with_output().unwrap(), 2);
     assert_eq!(value["stages"][1]["status"], "succeeded");
     assert_eq!(value["stages"][1]["reused"], true);
-    assert_eq!(value["error"]["step"], "bind_project");
+    assert_eq!(value["error"]["step"], "register_agent");
     assert_eq!(value["error"]["known"]["userId"], "51");
     assert_eq!(
         *f.state.calls.lock().unwrap(),
-        ["me", "me", "team_list", "team_detail", "team_members"]
+        [
+            "me",
+            "me",
+            "team_list",
+            "team_detail",
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
+        ]
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_session_logs_in_with_csrf_verifies_me_and_stores_only_the_session() {
     let f = fixture().await;
-    let value = parsed(&sign_in(&f, PASSWORD), 3);
+    let value = parsed(&sign_in(&f, PASSWORD), 2);
     assert_eq!(value["stages"][1]["status"], "succeeded");
     assert_eq!(value["stages"][1]["reused"], false);
     assert_eq!(value["error"]["known"]["userId"], "51");
@@ -106,7 +129,14 @@ async fn missing_session_logs_in_with_csrf_verifies_me_and_stores_only_the_sessi
             "me",
             "team_list",
             "team_detail",
-            "team_members"
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
         ]
     );
     let saved: Value = private_file::read(&user_auth::session_path(&f.path), 16_384)
@@ -127,7 +157,7 @@ async fn confirmed_expiry_allows_explicit_login_without_retrying_the_expired_coo
     assert!(f.login().status.success());
     f.state.expired.store(true, Ordering::SeqCst);
     f.state.calls.lock().unwrap().clear();
-    let value = parsed(&sign_in(&f, PASSWORD), 3);
+    let value = parsed(&sign_in(&f, PASSWORD), 2);
     assert_eq!(value["stages"][1]["reused"], false);
     assert_eq!(
         *f.state.calls.lock().unwrap(),
@@ -140,7 +170,14 @@ async fn confirmed_expiry_allows_explicit_login_without_retrying_the_expired_coo
             "me",
             "team_list",
             "team_detail",
-            "team_members"
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "me",
+            "team_detail",
+            "team_members",
+            "agents_owned"
         ]
     );
 }
@@ -336,14 +373,25 @@ async fn interactive_adapter_waits_outside_the_flow_and_reuses_a_session_created
         &SetupContext {
             config_path: f.path.clone(),
         },
-        SetupStages::new(input),
+        SetupStages::new(input)
+            .with_project(devlink_broker::setup_project::ProjectOptions {
+                path: Some(f._root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .with_mcp(account_server::tool_fixture::mcp_options(
+                &f._root.path().join("mcp-runtime"),
+            ))
+            .with_tool(
+                Some(devlink_broker::sessions::ToolType::Codex),
+                Some(account_server::test_tool().to_path_buf()),
+            ),
         |event| {
             events.push(event.clone());
             Ok(())
         },
     )
     .await;
-    assert_eq!(result.exit_code, 3);
+    assert_eq!(result.exit_code, 2);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(result.stages[1].reused);
     assert_eq!(

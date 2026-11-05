@@ -54,6 +54,27 @@ fn assert_failure(path: &Path, code: &str, exit: i32, field: Option<&str>) -> Va
 }
 
 #[test]
+fn explicit_batch_server_initializes_a_new_profile_and_preserves_an_existing_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("profile/config.json");
+    let server = "wss://central.example.test/ws/broker";
+    setup_config::preflight_server(&path, Some(server)).unwrap();
+    assert!(!path.parent().unwrap().exists());
+    let prepared = setup_config::prepare_with_server(&path, Some(server)).unwrap();
+    assert!(prepared.created);
+    assert_eq!(Config::load(&path).unwrap().server_url, server);
+    let original = fs::read(&path).unwrap();
+    let reused =
+        setup_config::prepare_with_server(&path, Some("wss://central.example.test")).unwrap();
+    assert!(!reused.created);
+    assert_eq!(reused.config.server_url, server);
+    let conflict =
+        setup_config::preflight_server(&path, Some("wss://other.example.test")).unwrap_err();
+    assert_eq!(conflict.kind, setup_config::FailureKind::ServerConflict);
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
 fn fresh_setup_creates_private_defaults_and_preserves_them_on_second_run() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("프로필 with spaces/config.json");
@@ -311,6 +332,83 @@ fn concurrent_setup_processes_publish_defaults_at_most_once() {
     assert_eq!(created, 1);
     Config::load(&path).unwrap();
     credentials::verify_private_permissions(&path).unwrap();
+}
+
+#[tokio::test]
+async fn setup_excludes_the_same_profile_until_cancellation_or_process_exit() {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let path = profile.join("config.json");
+    let alias = profile.join("other-config.json");
+    let independent = root.path().join("other-profile/config.json");
+    let lock = config::state_directory(&path).join("setup.lock");
+
+    for forced_exit in [false, true] {
+        let mut first = tokio::process::Command::new(env!("CARGO_BIN_EXE_devlink"))
+            .arg("--config")
+            .arg(&path)
+            .args([
+                "setup",
+                "--output",
+                "jsonl",
+                "--email",
+                "tester@example.invalid",
+                "--password-stdin",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(first.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let line = lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("setup exited early");
+                let event: Value = serde_json::from_str(&line).unwrap();
+                if event["step"] == "authenticate" && event["stepStatus"] == "running" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("first setup did not reach authentication");
+
+        let busy = assert_failure(&alias, "SETUP_CONFIG_BUSY", 6, None);
+        assert_eq!(busy["error"]["location"]["file"], lock.to_str().unwrap());
+        assert_eq!(busy["stages"][0]["outcome"], "not_applied");
+        assert_eq!(busy["stages"][1]["status"], "skipped");
+        assert!(!alias.exists());
+        assert_eq!(setup(&independent, "json").status.code(), Some(4));
+
+        let status = Command::new(env!("CARGO_BIN_EXE_devlink"))
+            .arg("--config")
+            .arg(&path)
+            .args(["setup", "status", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert_eq!(result(&status)["data"]["connection"]["broker"], "stopped");
+
+        if forced_exit {
+            first.kill().await.unwrap();
+        } else {
+            drop(first.stdin.take());
+            let exit = tokio::time::timeout(Duration::from_secs(30), first.wait())
+                .await
+                .expect("setup did not exit after EOF")
+                .unwrap();
+            assert_eq!(exit.code(), Some(130));
+        }
+        assert!(lock.is_file());
+        assert_eq!(setup(&path, "json").status.code(), Some(4));
+    }
 }
 
 #[cfg(windows)]

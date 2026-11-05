@@ -23,7 +23,7 @@ const samples = {
   create_task: { recipientAgentId: 'agent-b', title: 'Check interface', description: 'Review draft contract' },
   update_task_status: { taskId: 'task-1', version: '0', status: 'IN_PROGRESS' },
   complete_task: { taskId: 'task-1', version: '1', resultText: 'Done\nVerification: npm test passed', taskFiles: [{ relativePath: 'src/example.ts', changeType: 'MODIFIED', diffText: '- old\n+ new' }] },
-  get_tasks: {}, get_task_result: { taskId: 'task-1' },
+  get_tasks: {}, get_task_result: { taskId: 'task-1' }, get_updates: {},
 };
 async function connected(t, { brokerClient, extensions } = {}) {
   const broker = await fakeBroker();
@@ -42,10 +42,10 @@ async function invalid(client, name, args) {
   } catch (error) { assert.equal(error.code, -32602); }
 }
 
-test('all seven tools use the common invocation/result path and trusted broker context', async (t) => {
+test('all eight business tools use the common invocation/result path and trusted broker context', async (t) => {
   const { client, broker } = await connected(t);
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 10);
+  assert.equal(listed.tools.length, 11);
   assert.equal(broker.calls.length, 0);
   for (const [name, args] of Object.entries(samples)) {
     const result = await client.callTool({ name, arguments: args });
@@ -60,6 +60,11 @@ test('all seven tools use the common invocation/result path and trusted broker c
   }
   const getTasks = broker.calls.find((c) => c.path === operationRoutes.get_tasks);
   assert.deepEqual(getTasks.body.arguments, { direction: 'received', limit: 20 });
+  const reject = { taskId: 'task-2', version: '0', status: 'REJECTED', rejectionReason: '  out of scope\n범위 밖 ' };
+  const rejected = await client.callTool({ name: 'update_task_status', arguments: reject });
+  assert.equal(rejected.isError, undefined);
+  const forwarded = broker.calls.findLast((c) => c.path === operationRoutes.update_task_status);
+  assert.deepEqual(forwarded.body.arguments, reject);
 });
 
 test('invalid inputs and actor overrides are rejected before any session or broker request', async (t) => {
@@ -74,8 +79,15 @@ test('invalid inputs and actor overrides are rejected before any session or brok
     ['register_agent', { name: 'x', toolType: 'unknown' }],
     ['update_task_status', { taskId: 'task', status: 'COMPLETED' }],
     ['update_task_status', { taskId: 'task', status: 'FAILED' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'REJECTED' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'REJECTED', rejectionReason: '   ' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'REJECTED', rejectionReason: 'no', partiallyModified: false }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'IN_PROGRESS', rejectionReason: 'no' }],
+    ['update_task_status', { taskId: 'task', version: '0', status: 'FAILED', failureReason: 'x', partiallyModified: false, rejectionReason: 'no' }],
     ['get_tasks', { limit: 101 }],
     ['get_task_result', { taskId: 1 }],
+    ['get_updates', { limit: 51 }],
+    ['get_updates', { cursor: '' }],
     ['complete_task', { taskId: 'task', result: { summary: '' } }],
   ]) await invalid(client, name, args);
   assert.equal(broker.calls.length, 0);
@@ -101,7 +113,7 @@ test('a functional module extends registration without changing the registry; un
     handler: async () => { if (name === 'throws_secret') throw new Error('secret raw internal detail'); return { privateToken: 'secret raw internal detail' }; },
   }))];
   const { client, broker } = await connected(t, { extensions: examples });
-  assert.equal((await client.listTools()).tools.length, 13);
+  assert.equal((await client.listTools()).tools.length, 14);
   assert.deepEqual((await client.callTool({ name: 'example_echo', arguments: { message: 'hello' } })).structuredContent, { message: 'hello' });
   for (const name of ['throws_secret', 'invalid_output']) {
     const result = await client.callTool({ name, arguments: {} });
@@ -119,7 +131,7 @@ test('missing broker settings produce a tool error while diagnostics remain usab
   const result = await client.callTool({ name: 'register_agent', arguments: samples.register_agent });
   assert.equal(result.structuredContent.error.code, 'CREDENTIAL_FILE_INVALID');
   assert.equal((await client.callTool({ name: 'devlink_ping', arguments: {} })).structuredContent.status, 'ok');
-  assert.equal((await client.listTools()).tools.length, 10);
+  assert.equal((await client.listTools()).tools.length, 11);
   assert.equal(broker.calls.length, 0);
 });
 
@@ -146,7 +158,7 @@ for (const mode of ['legacy', { pin: '2026-07-28' }]) {
     transport.stderr.on('data', (chunk) => { logs += chunk; });
     t.after(async () => { await client.close(); try { await file.cleanup(); } finally { await broker.close(); } });
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 10);
+    assert.equal((await client.listTools()).tools.length, 11);
     await invalid(client, 'create_task', { ...samples.create_task, teamId: 'forged' });
     await client.callTool({ name: 'devlink_ping', arguments: {} });
     assert.equal(broker.calls.length, 0);

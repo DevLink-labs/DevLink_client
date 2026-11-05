@@ -106,6 +106,14 @@ pub enum ErrorCode {
     AuthRejected,
     #[serde(rename = "SETUP_CENTRAL_UNAVAILABLE")]
     CentralUnavailable,
+    #[serde(rename = "SETUP_CENTRAL_AUTH_FAILED")]
+    CentralAuthFailed,
+    #[serde(rename = "SETUP_CONNECTION_REPLACED")]
+    ConnectionReplaced,
+    #[serde(rename = "SETUP_INBOX_FAILED")]
+    InboxFailed,
+    #[serde(rename = "SETUP_TIMEOUT")]
+    Timeout,
     #[serde(rename = "SETUP_PROTOCOL_ERROR")]
     ProtocolError,
     #[serde(rename = "SETUP_AUTH_SESSION_CONFLICT")]
@@ -128,6 +136,42 @@ pub enum ErrorCode {
     TeamBindingConflict,
     #[serde(rename = "SETUP_TEAM_STORAGE_FAILED")]
     TeamStorageFailed,
+    #[serde(rename = "SETUP_PROJECT_PATH_INVALID")]
+    ProjectPathInvalid,
+    #[serde(rename = "SETUP_PROJECT_BINDING_CONFLICT")]
+    ProjectBindingConflict,
+    #[serde(rename = "SETUP_PROJECT_STORAGE_FAILED")]
+    ProjectStorageFailed,
+    #[serde(rename = "SETUP_TOOL_REQUIRED")]
+    ToolRequired,
+    #[serde(rename = "SETUP_TOOL_UNAVAILABLE")]
+    ToolUnavailable,
+    #[serde(rename = "SETUP_TOOL_BINDING_CONFLICT")]
+    ToolBindingConflict,
+    #[serde(rename = "SETUP_TOOL_STORAGE_FAILED")]
+    ToolStorageFailed,
+    #[serde(rename = "SETUP_TOOL_SELECTION_CONFLICT")]
+    ToolSelectionConflict,
+    #[serde(rename = "SETUP_BROKER_START_FAILED")]
+    BrokerStartFailed,
+    #[serde(rename = "SETUP_AGENT_BINDING_CONFLICT")]
+    AgentBindingConflict,
+    #[serde(rename = "SETUP_AGENT_REJECTED")]
+    AgentRejected,
+    #[serde(rename = "SETUP_AGENT_ALREADY_EXISTS")]
+    AgentAlreadyExists,
+    #[serde(rename = "SETUP_AGENT_FORBIDDEN")]
+    AgentForbidden,
+    #[serde(rename = "SETUP_AGENT_STORAGE_FAILED")]
+    AgentStorageFailed,
+    #[serde(rename = "SETUP_MCP_CONFIG_CONFLICT")]
+    McpConfigConflict,
+    #[serde(rename = "SETUP_MCP_CONFIG_WRITE_FAILED")]
+    McpConfigWriteFailed,
+    #[serde(rename = "SETUP_MANUAL_ACTION_REQUIRED")]
+    ManualActionRequired,
+    #[serde(rename = "SETUP_PROFILE_CONFLICT")]
+    ProfileConflict,
 }
 
 impl ErrorCode {
@@ -137,12 +181,17 @@ impl ErrorCode {
             | Self::InputInvalid
             | Self::ConfigInvalid
             | Self::ConfigPathInvalid => 2,
-            Self::RegistrationUnknown | Self::TokenRequired | Self::StepUnavailable => 3,
+            Self::RegistrationUnknown
+            | Self::TokenRequired
+            | Self::StepUnavailable
+            | Self::ManualActionRequired => 3,
             Self::InternalError => 1,
             Self::UnsafeFile | Self::ConfigStorageFailed => 5,
             Self::ConfigBusy | Self::BrokerBusy => 6,
-            Self::AuthRequired | Self::AuthRejected => 4,
-            Self::CentralUnavailable | Self::ProtocolError => 7,
+            Self::AuthRequired | Self::AuthRejected | Self::CentralAuthFailed => 4,
+            Self::ConnectionReplaced => 6,
+            Self::InboxFailed => 5,
+            Self::CentralUnavailable | Self::ProtocolError | Self::Timeout => 7,
             Self::AuthSessionConflict | Self::AuthBusy => 6,
             Self::AuthStorageFailed => 5,
             Self::Cancelled => 130,
@@ -152,6 +201,18 @@ impl ErrorCode {
             Self::TeamListResourceNotFound => 7,
             Self::TeamBindingConflict => 6,
             Self::TeamStorageFailed => 5,
+            Self::ProjectPathInvalid => 2,
+            Self::ProjectBindingConflict => 6,
+            Self::ProjectStorageFailed => 5,
+            Self::ToolRequired => 2,
+            Self::ToolUnavailable | Self::ToolStorageFailed => 5,
+            Self::ToolBindingConflict | Self::ToolSelectionConflict => 6,
+            Self::BrokerStartFailed | Self::AgentStorageFailed | Self::McpConfigWriteFailed => 5,
+            Self::AgentBindingConflict
+            | Self::AgentAlreadyExists
+            | Self::McpConfigConflict
+            | Self::ProfileConflict => 6,
+            Self::AgentRejected | Self::AgentForbidden => 4,
         }
     }
 
@@ -160,9 +221,11 @@ impl ErrorCode {
             Self::InputRequired => "Required setup input is missing.",
             Self::InputInvalid => "Setup input is invalid.",
             Self::RegistrationUnknown => {
-                "Agent registration outcome is unknown. Inspect your existing Agents."
+                "Agent registration outcome is unknown. Run devlink agent list, then recover with setup --agent-id <ID>. Creation was not retried."
             }
-            Self::TokenRequired => "The known Agent requires explicit token issuance.",
+            Self::TokenRequired => {
+                "The known Agent requires explicit token preparation. Rerun setup --issue-token (or use devlink agent token) after inspecting the saved ID. An uncertain issuance is never replayed automatically."
+            }
             Self::StepUnavailable => {
                 "This setup stage is not available in this build. Use the existing individual commands."
             }
@@ -177,7 +240,7 @@ impl ErrorCode {
                 "A setup file or directory is unsafe or unreadable. Inspect the indicated path and repair its ownership, permissions, or contents before retrying. Existing files were preserved."
             }
             Self::ConfigBusy => {
-                "Another configuration operation holds the control lock. Wait for it to finish, then rerun setup."
+                "Another setup or configuration operation is using this profile. Wait for it to finish, then rerun setup."
             }
             Self::BrokerBusy => {
                 "The broker is running or starting. Stop this profile's broker before creating configuration or changing Agent credentials."
@@ -194,8 +257,14 @@ impl ErrorCode {
             Self::CentralUnavailable => {
                 "The central service is temporarily unavailable. Check the connection and retry; this is not evidence of session expiry."
             }
+            Self::CentralAuthFailed => "Central Agent authentication was rejected.",
+            Self::ConnectionReplaced => {
+                "Another connection replaced this Agent's broker connection."
+            }
+            Self::InboxFailed => "The broker could not persist the local inbox.",
+            Self::Timeout => "Connection verification did not complete within the time limit.",
             Self::ProtocolError => {
-                "The central authentication response could not be verified. Inspect the provider contract before retrying."
+                "The provider response or current Agent identity could not be verified."
             }
             Self::AuthSessionConflict => {
                 "The central origin or stored session changed. Inspect the profile, then restart setup or sign in explicitly with devlink auth login."
@@ -206,9 +275,7 @@ impl ErrorCode {
             Self::AuthBusy => {
                 "Another user session operation holds the account lock. Wait for it to finish, then rerun setup."
             }
-            Self::Cancelled => {
-                "Setup input was cancelled. Inspect the completed stages before resuming."
-            }
+            Self::Cancelled => "Setup was cancelled. Inspect the completed stages before resuming.",
             Self::TeamRequired => "Choose a joined team using --team-id or the terminal selection.",
             Self::TeamMembershipRequired => {
                 "No joined teams were found. Use devlink team create --name <NAME> or devlink team join, then rerun setup."
@@ -224,6 +291,60 @@ impl ErrorCode {
             }
             Self::TeamStorageFailed => {
                 "The team selection or Agent binding could not be read or saved. Inspect private profile files before retrying."
+            }
+            Self::ProjectPathInvalid => {
+                "Choose an existing project directory with --project. File paths and missing directories are not accepted."
+            }
+            Self::ProjectBindingConflict => {
+                "The profile belongs to another local project. Inspect devlink agent status and explicitly bind an owned Agent, or choose a separate --config profile. The existing profile was preserved."
+            }
+            Self::ProjectStorageFailed => {
+                "The existing project binding could not be read. Inspect the private Agent profile before retrying; it was preserved."
+            }
+            Self::ToolRequired => {
+                "Choose an available tool using --tool codex or --tool claude-code, or the terminal selection."
+            }
+            Self::ToolUnavailable => {
+                "The requested Host or MCP runtime is unavailable. Check Node >=24 with --node-path and a built DevLink entry with --mcp-entry. Install Codex or Claude Code using the reported official installation link, reopen the terminal, then rerun setup --tool codex or setup --tool claude-code. Use --tool-path for an installation outside PATH. For unsupported pnpm/yarn shim layouts, specify the package's native executable or use a native installation. No AI session was started."
+            }
+            Self::ToolBindingConflict => {
+                "The selected tool conflicts with the existing Agent binding. Inspect devlink agent status and explicitly bind an owned Agent, or use a separate profile."
+            }
+            Self::ToolStorageFailed => {
+                "The private tool selection could not be read or saved. Inspect the indicated file before retrying."
+            }
+            Self::ToolSelectionConflict => {
+                "The profile or tool selection changed while selecting a tool. Inspect the current selection and rerun setup explicitly."
+            }
+            Self::AgentBindingConflict => {
+                "Agent identity, metadata or binding differs. For changed display metadata, stop this profile's broker and rerun setup --agent-id <ID> to explicitly refresh the same owned Agent. Inspect other binding conflicts before retrying; no new Agent was created."
+            }
+            Self::AgentForbidden => {
+                "The selected Agent is not owned by the current user in the selected team, or access was denied. Select an owned Agent ID with --agent-id."
+            }
+            Self::AgentRejected => {
+                "Agent creation or selection was rejected. Check the current account, team and explicit Agent ID before retrying."
+            }
+            Self::AgentAlreadyExists => {
+                "This team already has an Agent with the same name and tool type, possibly owned by another user. Choose a different --agent-name with --create-agent, or inspect the owned Agent list and rerun setup --agent-id <ID>. No Agent was selected and no token was issued."
+            }
+            Self::AgentStorageFailed => {
+                "Agent profile storage failed. Inspect the preserved profile and known Agent ID before retrying; do not create blindly."
+            }
+            Self::McpConfigConflict => {
+                "DevLink MCP configuration conflicts with the existing file or reviewed plan. Inspect the proposed entry and target; existing settings were preserved."
+            }
+            Self::McpConfigWriteFailed => {
+                "MCP configuration could not be verified after writing. Inspect the reported outcome, backup and rollback before retrying."
+            }
+            Self::ManualActionRequired => {
+                "Review the manual DevLink configuration, apply it to the suggested project file, then reopen the trusted Host. No Host configuration was written by manual mode."
+            }
+            Self::ProfileConflict => {
+                "The profile, broker, runtime or selected tool changed. Inspect the current binding and rerun setup; an old plan was not applied."
+            }
+            Self::BrokerStartFailed => {
+                "Broker startup or identity verification failed. Inspect devlink status, the profile and local port. Use devlink stop for a verified running broker before changing its profile or credentials; no unknown process was force-stopped."
             }
         }
     }
@@ -245,6 +366,10 @@ impl ErrorCode {
             Self::AuthRequired => "login",
             Self::AuthRejected => "login",
             Self::CentralUnavailable => "check_network_then_retry",
+            Self::CentralAuthFailed => "stop_then_reauthenticate_agent",
+            Self::ConnectionReplaced => "inspect_connection_owner",
+            Self::InboxFailed => "repair_inbox_then_restart",
+            Self::Timeout => "inspect_status_then_retry",
             Self::ProtocolError => "check_provider_contract",
             Self::AuthSessionConflict => "inspect_profile_then_reauthenticate",
             Self::AuthStorageFailed => "inspect_private_session",
@@ -256,6 +381,24 @@ impl ErrorCode {
             Self::TeamListResourceNotFound => "inspect_central_team_data",
             Self::TeamBindingConflict => "inspect_agent_binding",
             Self::TeamStorageFailed => "inspect_team_selection",
+            Self::ProjectPathInvalid => "choose_existing_project_directory",
+            Self::ProjectBindingConflict => "inspect_project_binding",
+            Self::ProjectStorageFailed => "inspect_agent_profile",
+            Self::ToolRequired => "select_detected_tool",
+            Self::ToolUnavailable => "install_or_select_tool",
+            Self::ToolBindingConflict => "inspect_agent_binding",
+            Self::ToolStorageFailed => "inspect_tool_selection",
+            Self::ToolSelectionConflict => "inspect_tool_selection_then_retry",
+            Self::BrokerStartFailed => "inspect_broker_then_retry",
+            Self::McpConfigConflict => "review_mcp_diff",
+            Self::McpConfigWriteFailed => "inspect_mcp_backup",
+            Self::ManualActionRequired => "apply_manual_mcp_config",
+            Self::ProfileConflict => "inspect_profile_then_rebind",
+            Self::AgentBindingConflict => "inspect_agent_binding",
+            Self::AgentRejected => "inspect_owned_agents_then_use",
+            Self::AgentAlreadyExists => "rename_agent_or_select_owned_id",
+            Self::AgentForbidden => "select_owned_agent",
+            Self::AgentStorageFailed => "inspect_agent_profile",
         }
     }
 }
@@ -275,6 +418,7 @@ pub enum InputSource {
     HiddenPromptOrStdin,
     VerifiedTeamList,
     OwnedAgentList,
+    DetectedToolList,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -291,9 +435,20 @@ pub struct TeamChoice {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentChoice {
+    pub id: String,
+    pub name: String,
+    pub project_name: String,
+    pub tool_type: devlink_broker::sessions::ToolType,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnownIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<devlink_broker::sessions::ToolType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -330,15 +485,46 @@ pub struct SetupError {
     pub required_inputs: Vec<RequiredInput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub team_choices: Vec<TeamChoice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_choices: Vec<AgentChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_list_error: Option<ErrorCode>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<devlink_broker::tool_discovery::ToolDetection>,
     pub known: KnownIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ErrorLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_plan: Option<devlink_broker::mcp_config::ConfigPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual_config: Option<devlink_broker::mcp_config::ManualConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<devlink_broker::setup_mcp::ConfigurationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_error: Option<devlink_broker::mcp_config::ConfigError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<devlink_broker::setup_connection::Snapshot>,
     message: &'static str,
     retryable: bool,
     recovery: Recovery,
 }
 
 impl SetupError {
+    pub(super) fn saved_tool_unavailable(path: PathBuf) -> Self {
+        let mut error = Self::new(
+            ErrorCode::ToolUnavailable,
+            Step::SelectTool,
+            Outcome::NotApplied,
+        );
+        error.location = Some(ErrorLocation {
+            file: path,
+            field: None,
+        });
+        error.message = "The saved Host could not be used. Restore its installation or select a replacement with interactive setup and --tool-path.";
+        error.recovery.action = "restore_or_reselect_saved_host";
+        error
+    }
+
     pub fn new(code: ErrorCode, step: Step, outcome: Outcome) -> Self {
         Self {
             code,
@@ -346,8 +532,16 @@ impl SetupError {
             outcome,
             required_inputs: Vec::new(),
             team_choices: Vec::new(),
+            agent_choices: Vec::new(),
+            agent_list_error: None,
+            tools: Vec::new(),
             known: KnownIdentity::default(),
             location: None,
+            mcp_plan: None,
+            manual_config: None,
+            mcp_config: None,
+            mcp_error: None,
+            connection: None,
             message: code.message(),
             retryable: matches!(
                 code,
@@ -362,6 +556,13 @@ impl SetupError {
                     | ErrorCode::CentralUnavailable
                     | ErrorCode::TeamRequired
                     | ErrorCode::TeamForbidden
+                    | ErrorCode::ProjectPathInvalid
+                    | ErrorCode::ToolRequired
+                    | ErrorCode::ToolUnavailable
+                    | ErrorCode::BrokerStartFailed
+                    | ErrorCode::AgentForbidden
+                    | ErrorCode::AgentAlreadyExists
+                    | ErrorCode::ManualActionRequired
             ),
             recovery: Recovery {
                 action: code.recovery(),
@@ -376,6 +577,36 @@ impl SetupError {
 
     pub fn recovery_action(&self) -> &'static str {
         self.recovery.action
+    }
+
+    pub(super) fn interrupted(mut self, reason: ErrorCode, in_flight: bool) -> Self {
+        let interrupted_code = self.code;
+        let domain_recovery = in_flight
+            && matches!(
+                interrupted_code,
+                ErrorCode::RegistrationUnknown | ErrorCode::TokenRequired
+            );
+        if reason == ErrorCode::Timeout && domain_recovery {
+            return self;
+        }
+        let description = Self::new(reason, self.step, self.outcome);
+        self.code = reason;
+        self.message = description.message;
+        self.retryable = description.retryable;
+        if !domain_recovery {
+            self.recovery = description.recovery;
+        } else if reason == ErrorCode::Cancelled {
+            self.message = match interrupted_code {
+                ErrorCode::RegistrationUnknown => {
+                    "Setup was cancelled with an unconfirmed Agent creation. Inspect your Agents and resume with the verified ID."
+                }
+                ErrorCode::TokenRequired => {
+                    "Setup was cancelled with an unconfirmed token issuance. Inspect the saved Agent ID before explicitly issuing a token."
+                }
+                _ => description.message,
+            };
+        }
+        self
     }
 }
 
@@ -402,6 +633,12 @@ pub struct ProgressEvent {
     pub required_inputs: Vec<RequiredInput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub team_choices: Vec<TeamChoice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_choices: Vec<AgentChoice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<devlink_broker::tool_discovery::ToolDetection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_plan: Option<devlink_broker::mcp_config::ConfigPlan>,
 }
 
 /// Flattened variants enforce exactly one of data/error in a final result.

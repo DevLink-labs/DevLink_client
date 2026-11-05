@@ -630,3 +630,53 @@ fn stable_alias_in_writable_parent_cannot_receive_credentials() {
     );
     assert_eq!(fs::read_dir(&f.root).unwrap().count(), 0);
 }
+
+#[test]
+fn manual_guidance_uses_provider_formats_without_writing_host_files_or_credentials() {
+    let fixture = Fixture::new();
+    let original = fs::read(&fixture.broker).unwrap();
+    let token: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+        let input = fixture.input(tool);
+        let target = input.target_path.clone();
+        let manual = manual_config(input).unwrap();
+        assert!(!target.exists());
+        assert!(
+            !manual
+                .snippet
+                .contains(token["localToken"].as_str().unwrap())
+        );
+        assert!(manual.snippet.contains("DEVLINK_BROKER_FILE"));
+        assert_eq!(fs::read(&fixture.broker).unwrap(), original);
+    }
+}
+
+#[test]
+fn preflight_checks_both_host_formats_without_requiring_or_creating_credentials() {
+    let fixture = Fixture::new();
+    fs::remove_file(&fixture.broker).unwrap();
+    for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+        let input = fixture.input(tool);
+        preflight(input.clone(), true).unwrap();
+        assert!(!input.target_path.exists());
+        if let Some(parent) = input.target_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let conflict: &[u8] = match tool {
+            ToolType::Codex => b"[mcp_servers]\ndevlink={command='other'}\n",
+            ToolType::ClaudeCode => br#"{"mcpServers":{"devlink":{"command":"other"}}}"#,
+        };
+        fs::write(&input.target_path, conflict).unwrap();
+        let error = preflight(input.clone(), true).unwrap_err();
+        assert_eq!(error.code, "SETUP_MCP_CONFIG_CONFLICT");
+        let conflict_details = error.conflict.unwrap();
+        assert_eq!(
+            conflict_details.target_path,
+            input.target_path.canonicalize().unwrap()
+        );
+        assert_ne!(conflict_details.proposed["command"], "other");
+        assert_eq!(fs::read(&input.target_path).unwrap(), conflict);
+        preflight(input, false).unwrap();
+        assert!(!fixture.broker.exists());
+    }
+}

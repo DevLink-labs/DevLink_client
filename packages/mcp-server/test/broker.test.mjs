@@ -24,6 +24,7 @@ test('lazy bootstrap, trusted context, explicit routes and unchanged business da
   for (const operation of Object.keys(operationRoutes)) {
     const result = await client.execute(operation, { sample: operation }, { mcpRequestId: 27 });
     if (operation === 'register_agent') assert.equal(result.data.agentId, 'agent-a');
+    else if (operation === 'get_updates') assert.equal(result.data.coverage, 'local');
     else {
       assert.equal(result.data.taskId, 'task-1');
       assert.equal(result.data.status, 'PENDING');

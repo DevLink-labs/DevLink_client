@@ -76,6 +76,9 @@ pub struct StatusArgs {
     pub failure_reason: Option<String>,
     #[serde(default)]
     pub partially_modified: Option<bool>,
+    /// Required only for REJECTED; central accepts it only from PENDING.
+    #[serde(default)]
+    pub rejection_reason: Option<String>,
     #[serde(default)]
     pub request_key: Option<String>,
 }
@@ -298,20 +301,29 @@ impl Arguments for StatusArgs {
         if !key_valid(self.request_key()) {
             return Err(validation());
         }
+        let text = |value: &Option<String>| value.as_ref().is_some_and(|s| !s.trim().is_empty());
+        // Mirrors central ChangeTaskStatusRequest: each status carries only its own fields.
         let body = match self.status {
             TaskStatus::InProgress
-                if self.failure_reason.is_none() && self.partially_modified.is_none() =>
+                if self.failure_reason.is_none()
+                    && self.partially_modified.is_none()
+                    && self.rejection_reason.is_none() =>
             {
                 json!({"status":self.status,"version":self.version.0})
             }
             TaskStatus::Failed
-                if self
-                    .failure_reason
-                    .as_ref()
-                    .is_some_and(|s| !s.trim().is_empty())
-                    && self.partially_modified.is_some() =>
+                if text(&self.failure_reason)
+                    && self.partially_modified.is_some()
+                    && self.rejection_reason.is_none() =>
             {
                 json!({"status":self.status,"version":self.version.0,"failureReason":self.failure_reason,"partiallyModified":self.partially_modified})
+            }
+            TaskStatus::Rejected
+                if text(&self.rejection_reason)
+                    && self.failure_reason.is_none()
+                    && self.partially_modified.is_none() =>
+            {
+                json!({"status":self.status,"version":self.version.0,"rejectionReason":self.rejection_reason})
             }
             _ => return Err(validation()),
         };

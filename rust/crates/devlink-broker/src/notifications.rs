@@ -295,6 +295,20 @@ impl Notifications {
             MAX_BYTES,
         )
     }
+    /// Update-feed source in persisted append order, including superseded versions. Read-only.
+    pub(crate) fn events_config(
+        config_path: &Path,
+        origin: &str,
+        agent_id: u64,
+    ) -> Result<Vec<TaskNotification>> {
+        let origin = endpoint_url(origin)?.to_string();
+        Ok(read(&Self::path(config_path))?
+            .events
+            .into_iter()
+            .filter(|r| r.origin == origin && r.requester_agent_id == agent_id)
+            .map(|r| r.event)
+            .collect())
+    }
     /// Retained summaries are advisory. Missing/failed notifications require authorized central lookup.
     pub fn list_config(
         config_path: &Path,

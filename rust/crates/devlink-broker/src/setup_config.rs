@@ -15,6 +15,7 @@ const LIMIT: usize = 16_384;
 pub enum FailureKind {
     InvalidPath,
     InvalidConfig,
+    ServerConflict,
     UnsafeFile,
     ConfigBusy,
     BrokerBusy,
@@ -56,6 +57,57 @@ pub struct PreparedConfig {
 
 /// Validate before creating a profile, then serialize with the existing control/broker locks.
 pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
+    prepare_with_server(path, None)
+}
+
+/// Read-only validation before collecting a password or starting mutations.
+pub fn preflight_server(path: &Path, server_url: Option<&str>) -> Result<(), Failure> {
+    validate_path(path)?;
+    select_server(path, read_config(path)?.as_ref(), server_url)?;
+    inspect_snapshots(path)
+}
+
+fn select_server(
+    path: &Path,
+    existing: Option<&Config>,
+    requested: Option<&str>,
+) -> Result<Config, Failure> {
+    let mut config = existing.cloned().unwrap_or_default();
+    if let Some(url) = requested {
+        config.server_url = url.to_owned();
+        validate_config(&config, path)?;
+        if let Some(existing) = existing {
+            if user_auth::origin(existing).ok() != user_auth::origin(&config).ok() {
+                return Err(Failure::new(FailureKind::ServerConflict, path).field("serverUrl"));
+            }
+            // Preserve the existing spelling and other profile settings.
+            return Ok(existing.clone());
+        }
+    }
+    Ok(config)
+}
+
+pub fn prepare_with_server(
+    path: &Path,
+    server_url: Option<&str>,
+) -> Result<PreparedConfig, Failure> {
+    prepare_directory(path)?;
+    prepare_profile(path, server_url)
+}
+
+/// Reserve the profile for one setup run without creating its config file.
+/// Callers take this before reading any input, so a busy profile is reported
+/// immediately. It is always taken before control/broker locks and is used only
+/// by setup orchestration; prepare the profile with `prepare_with_server` after.
+pub fn reserve_run(path: &Path) -> Result<fs::File, Failure> {
+    prepare_directory(path)?;
+    let lock_path = config::state_directory(path).join("setup.lock");
+    config::try_lock(&lock_path)
+        .map_err(|_| Failure::new(FailureKind::UnsafeFile, &lock_path))?
+        .ok_or_else(|| Failure::new(FailureKind::ConfigBusy, &lock_path))
+}
+
+fn prepare_directory(path: &Path) -> Result<(), Failure> {
     validate_path(path)?;
     let parent = config::directory(path);
     let parent_missing = matches!(fs::symlink_metadata(parent), Err(error) if error.kind() == io::ErrorKind::NotFound);
@@ -65,6 +117,10 @@ pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
         credentials::set_private_permissions(parent)
             .map_err(|_| Failure::new(FailureKind::Storage, parent))?;
     }
+    Ok(())
+}
+
+fn prepare_profile(path: &Path, server_url: Option<&str>) -> Result<PreparedConfig, Failure> {
     let state = config::state_directory(path);
     let control_path = state.join("control.lock");
     let _control = config::try_lock(&control_path)
@@ -79,11 +135,12 @@ pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
     // local storage checks, never proof of central identity or membership.
     inspect_snapshots(path)?;
     let existing = read_config(path)?;
+    let selected = select_server(path, existing.as_ref(), server_url)?;
     let created = if existing.is_none() {
         if broker_running {
             return Err(Failure::new(FailureKind::BrokerBusy, path));
         }
-        config::initialize_missing(path, true).map_err(|failure| {
+        config::initialize_config_missing(path, true, &selected).map_err(|failure| {
             let mut error = Failure::new(FailureKind::Storage, path);
             error.created = failure.published;
             error.mutation_uncertain = failure.published;
@@ -94,7 +151,7 @@ pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
     };
     let config = match existing {
         Some(config) => config,
-        None if created => Config::default(),
+        None if created => selected,
         None => read_config(path)
             .map_err(|mut error| {
                 error.created = created;
@@ -104,7 +161,8 @@ pub fn prepare(path: &Path) -> Result<PreparedConfig, Failure> {
                 let mut error = Failure::new(FailureKind::Storage, path);
                 error.created = created;
                 error
-            })?,
+            })
+            .and_then(|config| select_server(path, Some(&config), server_url))?,
     };
     Ok(PreparedConfig {
         config,
@@ -196,6 +254,7 @@ fn inspect_snapshots(path: &Path) -> Result<(), Failure> {
         user_auth::session_path(path),
         teams::selection_path(path),
         agent_profile::path(path),
+        crate::setup_tools::path(path),
     ] {
         private_file::read::<serde_json::Value>(&file, LIMIT)
             .map_err(|_| Failure::new(FailureKind::UnsafeFile, &file))?;

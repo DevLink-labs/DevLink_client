@@ -345,6 +345,7 @@ dependencies = [
  "toml_edit",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -356,6 +357,7 @@ dependencies = [
  "clap",
  "devlink-broker",
  "futures-util",
+ "libc",
  "rpassword",
  "serde",
  "serde_json",
