@@ -444,6 +444,13 @@ pub(crate) fn central_error(status: u16, code: Option<&str>) -> TaskError {
         (409, Some("RECEIVER_OFFLINE")) => TaskError::rejected("RECEIVER_OFFLINE", 409),
         (409, Some("TASK_VERSION_CONFLICT")) => TaskError::rejected("TASK_VERSION_CONFLICT", 409),
         (409, Some("TASK_STATE_CONFLICT")) => TaskError::rejected("TASK_STATE_CONFLICT", 409),
+        // Question/answer rules (S15P31D108-166).
+        (409, Some("TASK_CONVERSATION_UNAVAILABLE")) => {
+            TaskError::rejected("TASK_CONVERSATION_UNAVAILABLE", 409)
+        }
+        (400, Some("INVALID_QUESTION_REFERENCE")) => {
+            TaskError::rejected("INVALID_QUESTION_REFERENCE", 400)
+        }
         // Identical concurrent inserts can also produce this provider code.
         // Preserve the conflict without claiming no transaction committed.
         (409, Some("REQUEST_KEY_CONFLICT")) => TaskError {

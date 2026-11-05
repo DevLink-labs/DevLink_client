@@ -147,6 +147,10 @@ impl TaskRequests {
     }
 
     /// 작업 요청을 검증하고, 멱등키를 할당하거나 기존 키를 재사용하여 준비 상태를 생성
+    ///
+    /// `command.request_key`가 비어 있으면 requestId 기준으로 키를 발급·재사용한다.
+    /// 호출자가 키를 주면 그 키가 논리 요청의 식별자다(S15P31D108-165): 같은 행위자의
+    /// 같은 내용이면 기존 기록을 재사용하고, 다른 내용·다른 행위자면 충돌이다.
     pub async fn prepare(
         &self,
         origin: String,
@@ -164,8 +168,14 @@ impl TaskRequests {
         if agent != command.requester_agent_id || !valid_origin(&origin) {
             return Err(validation().into());
         }
+        let caller_key = !command.request_key.is_empty();
+        if caller_key && Identifier::parse(command.request_key.clone()).is_err() {
+            return Err(validation().into());
+        }
         // Validate before IO without minting another key for an existing request.
-        command.request_key = "pending".into();
+        if !caller_key {
+            command.request_key = "pending".into();
+        }
         if !command.valid() {
             return Err(validation().into());
         }
@@ -186,28 +196,48 @@ impl TaskRequests {
         let log = self.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            log.prepare_sync(record)
+            log.prepare_sync(record, caller_key)
         })
         .await
         .map_err(|_| storage_error())?
     }
 
     /// 동기 방식으로 요청 로그 검사, 중복/재시도 판정 및 파일 영속화 수행
-    fn prepare_sync(&self, mut incoming: Record) -> Result<PreparedTask, PrepareError> {
+    fn prepare_sync(
+        &self,
+        mut incoming: Record,
+        caller_key: bool,
+    ) -> Result<PreparedTask, PrepareError> {
         let mut store = self.store.lock().map_err(|_| storage_error())?;
-        let known_key = store
-            .records
-            .iter()
-            .find(|record| {
-                record.origin == incoming.origin
-                    && record.user_id == incoming.user_id
-                    && record.team_id == incoming.team_id
-                    && record.request_id == incoming.request_id
-                    && record.command.requester_agent_id == incoming.command.requester_agent_id
+        let by_request = store.records.iter().position(|record| {
+            record.origin == incoming.origin
+                && record.user_id == incoming.user_id
+                && record.request_id == incoming.request_id
+        });
+        let by_key = caller_key
+            .then(|| {
+                store
+                    .records
+                    .iter()
+                    .position(|record| record.command.request_key == incoming.command.request_key)
             })
-            .map(|record| record.command.request_key.clone());
+            .flatten();
+        let known_key = if caller_key {
+            // The caller supplied this key, so echo it unless another actor owns it.
+            by_key
+                .is_none_or(|index| same_actor(&store.records[index], &incoming))
+                .then(|| incoming.command.request_key.clone())
+        } else {
+            by_request
+                .filter(|index| same_actor(&store.records[*index], &incoming))
+                .map(|index| store.records[index].command.request_key.clone())
+        };
         let storage_failure = || PrepareError {
             error: storage_error(),
+            request_key: known_key.clone(),
+        };
+        let conflict = || PrepareError {
+            error: TaskError::rejected("REQUEST_KEY_CONFLICT", 409),
             request_key: known_key.clone(),
         };
         if store.failed {
@@ -220,27 +250,32 @@ impl TaskRequests {
         if !exists && !store.records.is_empty() {
             return Err(storage_failure());
         }
-        // 기존 동일 요청(origin, user_id, request_id 일치)이 있는지 검색
-        if let Some(previous) = store.records.iter().find(|record| {
-            record.origin == incoming.origin
-                && record.user_id == incoming.user_id
-                && record.request_id == incoming.request_id
-        }) {
+        // 기존 기록 선택: 호출자 키는 키로, 그 외에는 (origin, user_id, request_id)로 찾는다.
+        let previous = if caller_key {
+            // A requestId already bound to another logical request cannot be renamed.
+            if by_request.is_some_and(|index| Some(index) != by_key) {
+                return Err(conflict());
+            }
+            by_key
+        } else {
+            by_request
+        };
+        if let Some(index) = previous {
+            let previous = &store.records[index];
             // 동일 요청이 존재하면 기발급된 request_key를 그대로 재사용
             incoming.command.request_key = previous.command.request_key.clone();
-            // 단, 요청 내용(팀 ID 또는 페이로드)이 변경되었으면 충돌(409) 에러 반환
-            if previous.team_id != incoming.team_id || previous.command != incoming.command {
-                return Err(PrepareError {
-                    error: TaskError::rejected("REQUEST_KEY_CONFLICT", 409),
-                    request_key: known_key.clone(),
-                });
+            // 단, 행위자·팀·요청 내용이 다르면 충돌(409) 에러 반환
+            if !same_actor(previous, &incoming) || previous.command != incoming.command {
+                return Err(conflict());
             }
         } else {
             // 신규 요청인 경우 최대 보관 건수 검사 후 파일에 스냅샷 저장
             if store.records.len() >= MAX_RECORDS {
                 return Err(storage_failure());
             }
-            incoming.command.request_key = uuid::Uuid::new_v4().to_string();
+            if !caller_key {
+                incoming.command.request_key = uuid::Uuid::new_v4().to_string();
+            }
             let mut records = store.records.clone();
             records.push(incoming.clone());
             if persist(
@@ -268,6 +303,14 @@ impl TaskRequests {
             gate,
         })
     }
+}
+
+/// The same actor in the same team may learn a key; another actor never does.
+fn same_actor(record: &Record, incoming: &Record) -> bool {
+    record.origin == incoming.origin
+        && record.user_id == incoming.user_id
+        && record.team_id == incoming.team_id
+        && record.command.requester_agent_id == incoming.command.requester_agent_id
 }
 
 fn valid_origin(value: &str) -> bool {
@@ -448,5 +491,100 @@ mod tests {
             std::fs::read(TaskRequests::path(&path)).unwrap(),
             b"partial-json"
         );
+    }
+
+    #[tokio::test]
+    async fn caller_keys_identify_requests_and_never_leak_to_other_actors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let origin = || "http://localhost:8080/".to_string();
+        let keyed = |key: &str| CreateTaskCommand {
+            request_key: key.into(),
+            ..command()
+        };
+        let id = |value: &str| Identifier::parse(value).unwrap();
+        let log = TaskRequests::open(&path).unwrap();
+        let first = log
+            .prepare(origin(), actor(), id("call-1"), keyed("agent-key"))
+            .await
+            .unwrap();
+        assert_eq!(first.command.request_key, "agent-key");
+        // A new requestId with the same key and content is the same logical request.
+        let retry = log
+            .prepare(origin(), actor(), id("call-2"), keyed("agent-key"))
+            .await
+            .unwrap();
+        assert_eq!(retry.command, first.command);
+        assert!(Arc::ptr_eq(&retry.gate, &first.gate));
+        let mut changed = keyed("agent-key");
+        changed.prompt = "changed".into();
+        let conflict = log
+            .prepare(origin(), actor(), id("call-3"), changed)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(conflict.error.code, "REQUEST_KEY_CONFLICT");
+        assert_eq!(conflict.request_key.as_deref(), Some("agent-key"));
+        // A requestId already bound to one key cannot be reused under another key.
+        let renamed = log
+            .prepare(origin(), actor(), id("call-1"), keyed("other-key"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(renamed.error.code, "REQUEST_KEY_CONFLICT");
+        let mut other_team = actor();
+        other_team.team_id = Identifier::parse("99").unwrap();
+        let mut other_agent = actor();
+        other_agent.agent_id = Some(Identifier::parse("99").unwrap());
+        let other_command = CreateTaskCommand {
+            requester_agent_id: 99,
+            ..keyed("agent-key")
+        };
+        for (principal, command) in [
+            (other_team, keyed("agent-key")),
+            (other_agent, other_command),
+        ] {
+            let conflict = log
+                .prepare(origin(), principal, id("foreign"), command)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(conflict.error.code, "REQUEST_KEY_CONFLICT");
+            assert!(conflict.request_key.is_none(), "another actor's key leaked");
+        }
+        let long = "x".repeat(65);
+        for invalid in ["a b", " key", long.as_str(), "\u{3000}"] {
+            let error = log
+                .prepare(origin(), actor(), id("invalid"), keyed(invalid))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.error.code, "VALIDATION_FAILED", "{invalid:?}");
+        }
+        // A broker-issued key can be passed back as the caller key.
+        let minted = log
+            .prepare(origin(), actor(), id("plain"), command())
+            .await
+            .unwrap();
+        let reused = log
+            .prepare(
+                origin(),
+                actor(),
+                id("plain-retry"),
+                keyed(&minted.command.request_key),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reused.command, minted.command);
+        drop(log);
+        let log = TaskRequests::open(&path).unwrap();
+        let restarted = log
+            .prepare(origin(), actor(), id("call-4"), keyed("agent-key"))
+            .await
+            .unwrap();
+        assert_eq!(restarted.command, first.command);
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(TaskRequests::path(&path)).unwrap()).unwrap();
+        assert_eq!(snapshot["records"].as_array().unwrap().len(), 2);
     }
 }

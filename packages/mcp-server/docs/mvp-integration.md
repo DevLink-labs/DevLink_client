@@ -70,7 +70,7 @@ node packages/mcp-server/scripts/verify-rust-readiness.mjs --cli $integrationCli
 4. 각 Host에 [수락·결과 등록 지침](agent-workflow.md)과 실제 개인 프로필을 적용한다. 사용자가 선택한 수신자를 `list_agents`로 확인하고, 업무 요청에 실제 프로젝트의 작은 변경(예: 함수 추가와 해당 테스트)을 명시한다. MCP는 직접 파일을 고치지 않으며 수신 Host가 명시적 사용자 수락 후 수행한다.
 5. A→B에서 `create_task` 응답의 requestId/requestKey/taskId와 저장·전달 결과를 기록한다. B의 수신 목록/detail에 PENDING이 보이며 수락 전 파일 diff가 없는지 확인한다. B 사용자가 수락한 뒤 `update_task_status(IN_PROGRESS)`를 호출하고 실제 프로젝트에서 편집·테스트한 후 `complete_task`에 실제 변경 파일·요약·검증 결과를 등록한다. A에서 `get_tasks`, `get_task_result`로 동일 taskId의 COMPLETED와 실제 diff/테스트 결과가 일치하는지 확인한다.
 6. B→A도 별도 taskId로 수행한다. 각 프로젝트의 변경 전후 커밋 또는 diff, 실행 명령·종료 코드·관측값을 보존한다. 미실행 테스트를 통과로 기록하지 않는다. 실패·부분 수정 시 FAILED 전이에 failureReason/partiallyModified를 기록하고 발신자 조회까지 확인한다.
-7. 아래 부정 시나리오는 전용 테스트 데이터·제어 가능한 지연/전달 장애로 실행한다. MCP `create_task`는 caller 지정 requestKey를 노출하지 않고 `get_tasks`도 requestId/requestKey 검색을 지원하지 않는다. 중복 재현은 중앙/브로커 담당자가 같은 키를 재사용할 수 있는 통합 시험 계층과 DB 확인 수단을 제공해야 한다. 재시도에 새 키가 생성되는 Host 호출을 중복 검증으로 세지 않는다.
+7. 아래 부정 시나리오는 전용 테스트 데이터·제어 가능한 지연/전달 장애로 실행한다. MCP `create_task`는 선택 requestKey를 받는다(S15P31D108-165). 같은 키·같은 인자 재호출은 같은 taskId와 `replayed: true`를, 같은 키·다른 인자는 REQUEST_KEY_CONFLICT를 확인한다. `get_tasks`는 requestId/requestKey 검색을 지원하지 않으므로 중앙 저장 건수는 DB 확인 수단으로 대조한다. requestKey 없이 재시도한 Host 호출은 새 요청이므로 중복 검증으로 세지 않는다.
 
 ## 수용 기준과 증거 양식
 
