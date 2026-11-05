@@ -22,7 +22,6 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -738,6 +737,8 @@ async fn unsupported_host_reaches_manual_guidance_despite_a_conflicting_existing
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
+    use std::process::{Command, Stdio};
+
     let app = Fixture::new().await;
     credentials::set_private_permissions(app._root.path()).unwrap();
     assert!(app.login().status.success());
