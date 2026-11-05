@@ -256,6 +256,28 @@ test('a mutation aborted before any response preserves the caller-known task and
   assert.equal(broker.calls.filter(call => call.body.operation === 'update_task_status').length, 1);
 });
 
+test('a caller create_task key survives a lost response so the retry can reuse it', async (t) => {
+  const { broker, client } = await fixture(t);
+  await client.execute('get_tasks', {});
+  const entered = gate();
+  broker.setHook(({ body }) => {
+    if (body.operation !== 'create_task') return false;
+    entered.resolve();
+    return true;
+  });
+  const controller = new AbortController();
+  const args = { recipientAgentId: 'agent-b', title: 'x', description: 'y', requestKey: 'agent-chosen-key' };
+  const pending = faultOf(client.execute('create_task', args, { signal: controller.signal, mcpRequestId: 'lost-create' }));
+  await entered.promise;
+  controller.abort();
+  const error = await pending;
+  assert.equal(error.code, 'REQUEST_ABORTED');
+  assert.equal(error.outcome, 'unknown');
+  assert.equal(error.requestKey, 'agent-chosen-key');
+  assert.equal(error.taskId, undefined);
+  assert.deepEqual(broker.calls.find(call => call.body.operation === 'create_task').body.arguments, args);
+});
+
 test('one timed-out caller cannot abort a shared session claim or send its late business call', { timeout: 5000 }, async (t) => {
   const { broker, client } = await fixture(t, { requestTimeoutMs: 500, callTimeoutMs: 60 });
   const entered = gate(); const release = gate();

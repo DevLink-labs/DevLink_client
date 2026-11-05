@@ -65,6 +65,9 @@ test('all eight business tools use the common invocation/result path and trusted
   assert.equal(rejected.isError, undefined);
   const forwarded = broker.calls.findLast((c) => c.path === operationRoutes.update_task_status);
   assert.deepEqual(forwarded.body.arguments, reject);
+  const retry = { ...samples.create_task, requestKey: 'agent-chosen-key' };
+  assert.equal((await client.callTool({ name: 'create_task', arguments: retry })).isError, undefined);
+  assert.deepEqual(broker.calls.findLast((c) => c.path === operationRoutes.create_task).body.arguments, retry);
 });
 
 test('invalid inputs and actor overrides are rejected before any session or broker request', async (t) => {
@@ -76,6 +79,7 @@ test('invalid inputs and actor overrides are rejected before any session or brok
   }
   for (const [name, args] of [
     ['create_task', { recipientAgentId: '', title: 'x', description: 'x' }],
+    ...['', ' key', 'a b', 'k'.repeat(65), 7].map(requestKey => ['create_task', { ...samples.create_task, requestKey }]),
     ['register_agent', { name: 'x', toolType: 'unknown' }],
     ['update_task_status', { taskId: 'task', status: 'COMPLETED' }],
     ['update_task_status', { taskId: 'task', status: 'FAILED' }],

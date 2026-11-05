@@ -27,7 +27,7 @@ SDK 2.4.0이 처리하는 프로토콜 오류와 Tool 실행 오류를 구분한
 | --- | --- |
 | mcpRequestId | SDK가 받은 원본 JSON-RPC id. 숫자 0과 문자열도 그대로 유지하며 로그에는 기록하지 않음 |
 | requestId | MCP 호출의 로컬 추적 UUID. 업무 HTTP를 전송하면 그 요청의 requestId와 같음. 사전 실패에서는 전송을 했다는 뜻이 아님 |
-| requestKey | 현재 호출의 envelope/error에 있는 브로커 키. 두 메타데이터 위치의 키는 일치해야 함. create_task/register_agent에서만 메타데이터가 없을 때 data의 키를 사용 |
+| requestKey | 현재 호출의 envelope/error에 있는 브로커 키. 두 메타데이터 위치의 키는 일치해야 함. create_task/register_agent에서만 메타데이터가 없을 때 data의 키를 사용. create_task에 호출자가 넘긴 requestKey는 응답 전 timeout·취소·연결 종료에도 오류에 남는다 |
 | taskId | 서버에서 받은 작업 ID 또는 조회·변경 입력에 이미 있던 대상 ID. 후자는 새 작업이 저장됐다는 증거가 아님 |
 
 세션·bind의 내부 requestId와 requestKey를 업무 호출의 키로 바꾸지 않는다. 중앙 등록 성공 이후 bind만 실패하면 확인된 등록 requestKey를 유지한다. 응답 자체가 오지 않아 모르는 키/작업 ID는 만들지 않는다. 성공 data와 브로커가 돌려준 기존 중앙 결과도 그대로 보존한다.
@@ -76,9 +76,9 @@ scope 없는 기존 세션 코드도 지원한다. 업무 경로의 분류되지
 
 `taskId`, `status: PENDING`, `recipientAgentId`, `requestKey`, `delivery.status: FAILED/UNKNOWN`을 담은 성공 data는 성공으로 유지한다. 전달 실패를 저장 실패나 업무 FAILED로 바꾸지 않는다. HTTP timeout·취소·연결 종료·세션 만료 때문에 update_task_status/complete_task를 호출하지 않는다.
 
-업무·등록·전달 자동 재전송은 없다. 같은 requestKey에 대한 중앙의 기존 결과는 수정하지 않지만, MCP가 키를 발급하거나 중앙 중복 판정/저장을 구현하지 않는다. 서로 다른 LLM 호출을 같은 업무로 자동 추정하지 않는다. 명시적 재호출도 중앙 멱등성이 없으면 중복 생성 가능성이 있다.
+업무·등록·전달 자동 재전송은 없다. 같은 requestKey에 대한 중앙의 기존 결과는 수정하지 않지만, MCP가 키를 발급하거나 중앙 중복 판정/저장을 구현하지 않는다. 서로 다른 LLM 호출을 같은 업무로 자동 추정하지 않는다. requestKey 없이 다시 호출하면 새 요청이므로 중복 생성 가능성이 있다. create_task의 명시적 requestKey 재호출만 브로커 로컬 기록과 중앙의 요청 Agent별 키로 같은 작업을 돌려받는다.
 
-taskId 없는 결과 불명을 requestId/requestKey로 조회하는 get_tasks 필터는 공동 계약 미확정이므로 추가하지 않았다. 키가 반환됐다고 그 필터를 사용할 수 있다는 뜻은 아니다. 실제 복구 조회 절차와 키 재접수 방식은 Rust·중앙 담당자와 확정해야 한다.
+taskId 없는 결과 불명을 requestId/requestKey로 조회하는 get_tasks 필터는 공동 계약 미확정이므로 추가하지 않았다. 키가 반환됐다고 그 필터를 사용할 수 있다는 뜻은 아니다. 키 재접수는 create_task에 같은 requestKey와 같은 인자를 넘기는 방식이다(S15P31D108-165). 이 재호출은 중앙에 다시 생성 요청을 보내 기존 작업을 replay하며, 처음 저장에 실패했던 요청이면 이때 새로 저장될 수 있다.
 
 ## 시간 예산과 취소
 

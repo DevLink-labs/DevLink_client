@@ -39,7 +39,7 @@
 
 prompt의 공백·개행을 보존하고 중앙 WebSocket 64 KiB 전송 한도 안에 들어가는지도 검증한다. 중앙 POST 본문은 `requestKey`, 숫자 `receiverAgentId`, `prompt` 세 필드만 포함한다. 본문에는 requesterAgentId/teamId를 넣지 않으며, teamId는 검증된 세션 값으로 경로에만 사용한다.
 
-현재 MCP의 `recipientAgentId/title/description/taskContext?` 입력도 호환한다. 이 기존 입력은 이전 구현과 같은 JSON 문자열 prompt로 직렬화한다. 두 입력을 섞거나 actor·requestKey를 인자에 추가하면 거부한다. MCP schema/문구의 최종 수렴은 -97이며 이 스토리에서 MCP 소스를 변경하지 않는다. 같은 키로 기존 작업을 확인할 때 중앙의 `REJECTED`도 결과 상태로 보존한다. 이는 새 작업 생성·자동 수락·상태 변경이 아니다.
+현재 MCP의 `recipientAgentId/title/description/taskContext?` 입력도 호환한다. 이 기존 입력은 이전 구현과 같은 JSON 문자열 prompt로 직렬화한다. 두 입력을 섞거나 actor 필드를 인자에 추가하면 거부한다. 두 입력 모두 선택 `requestKey`를 받는다(아래 절). MCP schema/문구의 최종 수렴은 -97이며 이 스토리에서 MCP 소스를 변경하지 않는다. 같은 키로 기존 작업을 확인할 때 중앙의 `REJECTED`도 결과 상태로 보존한다. 이는 새 작업 생성·자동 수락·상태 변경이 아니다.
 
 중앙 숫자 ID를 Rust 정수로 검증하고 로컬에는 정규 10진 문자열로 반환한다. 범위는 1..9223372036854775807이다. 부호·공백·leading zero·범위 초과·opaque ID를 거부하며 JS Number 변환을 거치지 않는다. Agent 공개 DTO의 ID·이름·역할·도구·프로젝트·상태·시각을 매핑하고 알려지지 않은 필드나 서버 메시지/비밀 원문은 복사하지 않는다. 목록은 `data.agents`다.
 
@@ -47,7 +47,9 @@ prompt의 공백·개행을 보존하고 중앙 WebSocket 64 KiB 전송 한도 �
 
 `.devlink-runtime/task-requests.json`의 기존 private schema 1을 유지한다. origin/user/requestId를 기준으로 팀·requester·receiver·prompt를 대조한다. **새 논리 요청에만 UUID를 한 번 발급**하고 중앙 호출 전에 비공개 권한·sync·원자 교체로 저장한다. 같은 입력의 같은 requestId는 재시작 뒤에도 같은 키를 사용한다. 다른 내용은 `REQUEST_KEY_CONFLICT`이며 동일 actor가 이미 알고 있는 키도 응답에 보존한다. 다른 팀/Agent의 키는 노출하지 않는다. 보관 상한은 기존 1,024건/64 MiB이며 자동 삭제하지 않는다.
 
-HTTP 라이브러리/업무 adapter는 업무 요청을 자동 재시도하지 않는다. 호출자가 **명시적으로 같은 requestId·같은 입력을 다시 제출한 경우에만** 같은 키의 중앙 POST가 발생할 수 있다. 이때 중앙의 replayed와 기존 taskId를 그대로 반환한다. 새 requestId는 새 논리 요청이므로 응답 유실 후 새 requestId로 재호출하면 중복될 수 있다. MCP가 새 requestId로 자동 복구할 수 있다는 보장은 없으며 최종 UX/DTO는 -97 범위다. requestKey 조회 API를 추측해서 호출하지 않는다.
+**호출자 requestKey(S15P31D108-165):** arguments의 선택 `requestKey`(공백·제어 문자 없는 식별자, 최대 64 UTF-16 코드 단위)가 있으면 그 키가 논리 요청의 식별자다. requestId 대신 키로 기존 기록을 찾는다. 같은 행위자(origin·user·team·요청 Agent)의 같은 내용이면 기존 기록을 재사용하고 같은 키로 중앙에 다시 POST해 replay를 받는다. 같은 행위자의 다른 내용은 로컬 `REQUEST_KEY_CONFLICT`(409, rejected)이며 중앙을 호출하지 않는다. 다른 행위자의 기록이 쓰는 키도 충돌이며 키를 돌려주지 않는다. 처음 보는 키는 UUID를 발급하지 않고 그 키 그대로 중앙 호출 전에 저장한다. 이미 다른 키에 묶인 requestId도 충돌이다. 브로커가 발급한 키를 다시 넘기는 재호출도 같은 규칙을 따른다. 저장 형식(schema 1)은 바뀌지 않는다. 빈 문자열·null은 400이다.
+
+HTTP 라이브러리/업무 adapter는 업무 요청을 자동 재시도하지 않는다. 호출자가 **명시적으로 같은 requestId 또는 같은 requestKey로 같은 입력을 다시 제출한 경우에만** 같은 키의 중앙 POST가 발생할 수 있다. 이때 중앙의 replayed와 기존 taskId를 그대로 반환한다. requestKey 없는 새 requestId는 새 논리 요청이므로 응답 유실 후 재호출하면 중복될 수 있다. 응답 유실 뒤에는 알려진 requestKey를 넘겨 재호출해야 같은 작업으로 복구된다. requestKey 조회 API를 추측해서 호출하지 않는다.
 
 타임아웃·취소·프로토콜 오류·5xx·동시 insert의 `409 DUPLICATE_REQUEST`는 `outcome=unknown`이다. 실제 중앙이 같은 키·같은 내용 동시 생성에도 `409 REQUEST_KEY_CONFLICT`를 반환하므로 중앙에서 받은 해당 conflict도 code/409를 보존하면서 outcome은 unknown으로 둔다. 로컬 로그에서 확정한 내용 불일치만 rejected다. 자동 재조회·새 키 생성·업무 FAILED 전이·재할당은 하지 않는다. 유효하게 읽은 알려진 taskId와 requestKey는 오류에도 보존한다. 응답을 읽기 전에 끊기면 taskId를 알 수 없으므로 키만 보존한다. 거부된 응답의 HTTP/code 조합이 provider와 일치하지 않으면 거부로 추측하지 않고 프로토콜 오류/unknown으로 반환한다.
 

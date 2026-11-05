@@ -1238,3 +1238,128 @@ async fn actual_mcp_tools_use_rust_sessions_and_mock_central() {
     }
     broker.stop().await;
 }
+
+fn keyed_request(session: &Value, id: &str, key: Value) -> Value {
+    let mut body = request(session, id);
+    body["arguments"]["requestKey"] = key;
+    body
+}
+
+#[tokio::test]
+async fn caller_request_key_replays_across_calls_and_restarts_and_rejects_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let remote = Central::start(&path).await;
+    let broker = Broker::start(&path, &remote, Duration::from_secs(1)).await;
+    let session = broker.claim("host", true).await;
+    let key = json!("agent-chosen-key");
+    let (status, first) = broker
+        .post(
+            "/v1/tasks/create",
+            &keyed_request(&session, "call-1", key.clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["requestKey"], key);
+    assert_eq!(remote.state.calls.lock().await[0]["requestKey"], key);
+    // A separate tool call has a new requestId; the key still names the same request.
+    let (status, second) = broker
+        .post(
+            "/v1/tasks/create",
+            &keyed_request(&session, "call-2", key.clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["data"]["taskId"], first["data"]["taskId"]);
+    assert_eq!(second["data"]["replayed"], true);
+    assert_eq!(second["requestKey"], key);
+    let mut changed = keyed_request(&session, "call-3", key.clone());
+    changed["arguments"]["description"] = json!("different");
+    let (status, conflict) = broker.post("/v1/tasks/create", &changed).await;
+    assert_eq!(status, 409, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "REQUEST_KEY_CONFLICT");
+    assert_eq!(conflict["error"]["outcome"], "rejected");
+    assert_eq!(conflict["requestKey"], key);
+    assert_eq!(
+        remote.state.calls.lock().await.len(),
+        2,
+        "conflict reached central"
+    );
+    // A broker-issued key can be passed back to retry the same request.
+    let (_, plain) = broker
+        .post("/v1/tasks/create", &request(&session, "plain"))
+        .await;
+    let (status, reused) = broker
+        .post(
+            "/v1/tasks/create",
+            &keyed_request(&session, "plain-retry", plain["requestKey"].clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{reused}");
+    assert_eq!(reused["data"]["taskId"], plain["data"]["taskId"]);
+    assert_eq!(reused["data"]["replayed"], true);
+    let long = json!("k".repeat(65));
+    for invalid in [
+        json!(""),
+        json!(" key"),
+        json!("a b"),
+        long,
+        json!(null),
+        json!(7),
+    ] {
+        let body = keyed_request(&session, "invalid", invalid.clone());
+        let (status, error) = broker.post("/v1/tasks/create", &body).await;
+        assert_eq!(status, 400, "{invalid}: {error}");
+    }
+    let mut canonical = keyed_request(&session, "canonical", json!("canonical-key"));
+    canonical["arguments"] =
+        json!({"receiverAgentId":"13","prompt":"opaque","requestKey":"canonical-key"});
+    let (status, created) = broker.post("/v1/tasks/create", &canonical).await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["requestKey"], "canonical-key");
+    assert_eq!(remote.state.calls.lock().await.len(), 5);
+    broker.stop().await;
+    let broker = Broker::start(&path, &remote, Duration::from_secs(1)).await;
+    let session = broker.claim("restarted-host", true).await;
+    let (status, third) = broker
+        .post(
+            "/v1/tasks/create",
+            &keyed_request(&session, "call-4", key.clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{third}");
+    assert_eq!(third["data"]["taskId"], first["data"]["taskId"]);
+    assert_eq!(remote.state.saved.lock().await.len(), 3);
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn unknown_outcome_with_caller_key_recovers_through_a_new_tool_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let remote = Central::start(&path).await;
+    remote.state.mode.store(1, Ordering::SeqCst);
+    let broker = Broker::start(&path, &remote, Duration::from_millis(100)).await;
+    let session = broker.claim("host", true).await;
+    let (status, error) = broker
+        .post("/v1/tasks/create", &request(&session, "lost-response"))
+        .await;
+    assert_eq!(status, 502);
+    assert_eq!(error["error"]["outcome"], "unknown");
+    let known = error["requestKey"].clone();
+    assert!(known.is_string());
+    sleep(Duration::from_millis(500)).await;
+    remote.state.mode.store(0, Ordering::SeqCst);
+    // The Agent retries with a new tool call (new requestId) and the known key.
+    let (status, recovered) = broker
+        .post(
+            "/v1/tasks/create",
+            &keyed_request(&session, "retry-call", known.clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{recovered}");
+    assert_eq!(recovered["requestKey"], known);
+    assert_eq!(recovered["data"]["replayed"], true);
+    assert_eq!(remote.state.saved.lock().await.len(), 1);
+    broker.stop().await;
+}
