@@ -67,13 +67,52 @@ pub fn write<T: Serialize>(path: &Path, value: &T, limit: usize) -> Result<()> {
         .sync_all()
         .context("Cannot flush private snapshot")?;
     credentials::verify_private_permissions(temp.path())?;
-    temp.persist(path)
-        .map_err(|_| anyhow::anyhow!("Cannot replace private snapshot"))?;
+    persist_private(temp, path, limit)?;
     verify_snapshot_path(path, limit)?;
     credentials::verify_private_permissions(path)?;
     #[cfg(unix)]
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+std::thread_local! {
+    static PERSIST_RETRY_SIGNAL: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn persist_private(mut temp: tempfile::NamedTempFile, path: &Path, limit: usize) -> Result<()> {
+    for attempt in 0..10 {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                // Match the inbox's bounded Windows replacement retry policy.
+                let transient = cfg!(windows)
+                    && (error.error.kind() == std::io::ErrorKind::PermissionDenied
+                        || matches!(error.error.raw_os_error(), Some(32 | 33)));
+                if !transient || attempt == 9 {
+                    return Err(error.error).context("Cannot replace private snapshot");
+                }
+                temp = error.file;
+                #[cfg(all(test, windows))]
+                PERSIST_RETRY_SIGNAL.with(|signal| {
+                    if let Some(sender) = signal.borrow_mut().take() {
+                        let _ = sender.send(());
+                    }
+                });
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                // A delayed replacement must not bypass the original path/ACL checks.
+                credentials::verify_parent_safety(
+                    path.parent().context("Private snapshot has no parent")?,
+                )?;
+                credentials::verify_private_permissions(temp.path())?;
+                if credentials::ensure_safe_target_if_exists(path)? {
+                    verify_snapshot_path(path, limit)?;
+                    credentials::verify_private_permissions(path)?;
+                }
+            }
+        }
+    }
+    unreachable!("bounded persistence loop always returns")
 }
 
 // Private data snapshots use their caller's bound. MCP credential files keep
@@ -94,6 +133,65 @@ fn verify_snapshot_path(path: &Path, limit: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn temporary_reader_does_not_abort_private_snapshot_replacement() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-profile.json");
+        write(&path, &"before", 1024).unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let (signal, waiting) = std::sync::mpsc::channel();
+        PERSIST_RETRY_SIGNAL.with(|slot| *slot.borrow_mut() = Some(signal));
+        let holder = std::thread::spawn(move || {
+            waiting
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            drop(reader);
+        });
+        let result = write(&path, &"after", 1024);
+        PERSIST_RETRY_SIGNAL.with(|slot| slot.borrow_mut().take());
+        holder.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            read::<String>(&path, 1024).unwrap().as_deref(),
+            Some("after")
+        );
+        credentials::verify_private_permissions(&path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistent_reader_preserves_the_original_snapshot_and_returns_an_io_cause() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-profile.json");
+        write(&path, &"before", 1024).unwrap();
+        let original = fs::read(&path).unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = write(&path, &"after", 1024).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        drop(reader);
+        write(&path, &"after", 1024).unwrap();
+        assert_eq!(
+            read::<String>(&path, 1024).unwrap().as_deref(),
+            Some("after")
+        );
+    }
+
     #[test]
     fn data_snapshot_bound_does_not_change_the_credentials_bound() {
         let dir = tempfile::tempdir().unwrap();

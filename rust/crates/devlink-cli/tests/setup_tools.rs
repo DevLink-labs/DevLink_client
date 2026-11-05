@@ -119,7 +119,12 @@ async fn probe_deadline_terminates_a_stalled_host() {
     let mut deadline = search(root.path());
     // Only this deliberately stalled process uses a short deadline.
     deadline.timeout = Duration::from_millis(800);
-    let reports = deadline.detect(None, Some((ToolType::Codex, &exe))).await;
+    let reports = tokio::time::timeout(
+        Duration::from_secs(3),
+        deadline.detect(None, Some((ToolType::Codex, &exe))),
+    )
+    .await
+    .expect("A stalled version probe must return after bounded cleanup");
     assert_eq!(reports[0].status, DetectionStatus::TimedOut);
 }
 

@@ -381,8 +381,10 @@ async fn probe(
             parse_version(tool, &stdout).ok_or(DetectionStatus::InvalidVersion)
         }
         failure => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            // Termination may be delayed by the OS or security software. Keep
+            // cleanup bounded as well as the version probe itself.
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
             Err(if failure.is_err() {
                 DetectionStatus::TimedOut
             } else {
