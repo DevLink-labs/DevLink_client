@@ -756,6 +756,12 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
             .filter(|p| !p.join("node.exe").is_file()),
     )
     .unwrap();
+    let unrelated = root.join("unrelated-runtime");
+    let (path_node, _) = account_server::tool_fixture::mcp_runtime(&unrelated);
+    fs::write(path_node.with_extension("mcp-mode"), "invalid").unwrap();
+    let competing_path =
+        std::env::join_paths(std::iter::once(unrelated).chain(std::env::split_paths(&path)))
+            .unwrap();
     let run = |first_setup: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_devlink"));
         command
@@ -765,7 +771,7 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
             .arg(root)
             .args(["--tool", "claude-code", "--mcp-entry"])
             .arg(&entry)
-            .env("PATH", &path)
+            .env("PATH", if first_setup { &path } else { &competing_path })
             .env_remove("DEVLINK_TOKEN")
             .env_remove("DEVLINK_BROKER_FILE")
             .env_remove("NODE_OPTIONS")
@@ -781,6 +787,35 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
     };
     let first_setup = run(true);
     let reuse = run(false);
+    let requests_before = app.state.calls.lock().unwrap().len();
+    let foreign = root.join("foreign-project");
+    fs::create_dir(&foreign).unwrap();
+    let input = root.join("outside-project-batch.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1, "user": {"mode": "session"},
+            "team": {"id": "71"}, "project": {"path": root},
+            "tool": {"type": "claude-code"}, "agent": {"action": "use", "id": "201"},
+            "mcp": {"mode": "apply", "targetPath": foreign.join(".mcp.json")}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let outside = Command::new(env!("CARGO_BIN_EXE_devlink"))
+        .arg("--config")
+        .arg(&app.path)
+        .args(["setup", "--non-interactive", "--input"])
+        .arg(&input)
+        .args(["--output", "json", "--mcp-entry"])
+        .arg(&entry)
+        .env("PATH", &path)
+        .env_remove("DEVLINK_TOKEN")
+        .env_remove("DEVLINK_BROKER_FILE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let requests_after = app.state.calls.lock().unwrap().len();
     let _ = app.run(&["stop"], None);
     for (output, status) in [(&first_setup, "applied"), (&reuse, "unchanged")] {
         assert_eq!(output.status.code(), Some(0), "{}", text(output));
@@ -797,6 +832,12 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
     let written = fs::read_to_string(root.join(".mcp.json")).unwrap();
     assert!(written.contains(node.file_name().unwrap().to_str().unwrap()));
     assert!(!shim.with_extension("calls").exists());
+    assert!(!path_node.with_extension("mcp-calls").exists());
+    assert_eq!(outside.status.code(), Some(2), "{}", text(&outside));
+    let result: Value = serde_json::from_slice(&outside.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "SETUP_INPUT_INVALID");
+    assert_eq!(result["error"]["step"], "validate");
+    assert_eq!(requests_after, requests_before);
     assert_eq!(app.state.create_calls.load(Ordering::SeqCst), 1);
     assert_eq!(app.state.token_calls.load(Ordering::SeqCst), 1);
 }

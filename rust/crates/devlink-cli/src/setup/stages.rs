@@ -1629,6 +1629,14 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             {
                 return StepResult::Failed(*error);
             }
+        } else if let Some(tool) = self.tools.requested
+            && let Err(error) = self
+                .preflight_mcp_runtime(context, Step::Validate, tool)
+                .await
+        {
+            // A saved Host is scoped only after sign-in; reject what is already
+            // known locally before any login request is sent.
+            return StepResult::Failed(*error);
         }
         // Reserve the profile before waiting on any input: a concurrent run must
         // see SETUP_CONFIG_BUSY at once, not after a password has been supplied.
@@ -1720,6 +1728,11 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             self.preflight_mcp(context, Step::Validate, tool, Some(host.clone()))
                 .await?;
             self.tools.batch_candidate = Some(host);
+        } else {
+            // The saved Host is fully checked in SelectTool. Reject what is
+            // already known locally before the login request is sent.
+            self.preflight_mcp_runtime(context, Step::Validate, tool)
+                .await?;
         }
         Ok(())
     }
@@ -1751,6 +1764,40 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
         tool_type: ToolType,
         host: Option<SelectedTool>,
     ) -> Result<(), Box<SetupError>> {
+        let (preflight, executable) =
+            self.preflight_inputs(context, step, tool_type, host.as_ref())?;
+        setup_mcp::preflight(preflight, self.mcp.options.clone(), executable)
+            .await
+            .map_err(|error| self.preflight_error(step, error))
+    }
+
+    /// Before authentication, check what does not depend on the saved Host.
+    /// The full preflight still runs once the saved Host is scoped.
+    async fn preflight_mcp_runtime(
+        &mut self,
+        context: &SetupContext,
+        step: Step,
+        tool_type: ToolType,
+    ) -> Result<(), Box<SetupError>> {
+        let (preflight, executable) = self.preflight_inputs(context, step, tool_type, None)?;
+        setup_mcp::preflight_runtime(preflight, self.mcp.options.clone(), executable)
+            .await
+            .map_err(|error| self.preflight_error(step, error))
+    }
+
+    fn preflight_error(&self, step: Step, error: mcp_config::ConfigError) -> Box<SetupError> {
+        let mut safe = mcp_error(step, error);
+        self.mcp_identity(&mut safe);
+        Box::new(safe)
+    }
+
+    fn preflight_inputs(
+        &self,
+        context: &SetupContext,
+        step: Step,
+        tool_type: ToolType,
+        host: Option<&SelectedTool>,
+    ) -> Result<(setup_mcp::PreflightContext, std::path::PathBuf), Box<SetupError>> {
         let project = self
             .project
             .prepared
@@ -1777,23 +1824,16 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                     Outcome::NotApplied,
                 ))
             })?;
-        setup_mcp::preflight(
+        Ok((
             setup_mcp::PreflightContext {
                 config_path: context.config_path.clone(),
                 project,
                 tool_type,
-                host_launcher: host.as_ref().map(|h| h.executable.command.clone()),
-                mcp_automatic_supported: host.as_ref().is_some_and(|h| h.verified_host().is_ok()),
+                host_launcher: host.map(|h| h.executable.command.clone()),
+                mcp_automatic_supported: host.is_some_and(|h| h.verified_host().is_ok()),
             },
-            self.mcp.options.clone(),
             executable,
-        )
-        .await
-        .map_err(|error| {
-            let mut safe = mcp_error(step, error);
-            self.mcp_identity(&mut safe);
-            Box::new(safe)
-        })
+        ))
     }
 
     async fn configure_mcp(&mut self, context: &SetupContext) -> StepResult {

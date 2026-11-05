@@ -173,6 +173,19 @@ pub fn project_target(tool: ToolType, project: &std::path::Path) -> PathBuf {
     })
 }
 
+/// Check the setup paths that do not depend on the selected Node executable.
+pub(crate) fn preflight_paths(
+    tool: ToolType,
+    project: &std::path::Path,
+    target: &std::path::Path,
+    broker_file: &std::path::Path,
+    entry: &std::path::Path,
+) -> Result<()> {
+    storage::normalize_locations(tool, project, target, broker_file)?;
+    storage::normalize_entry(entry)?;
+    Ok(())
+}
+
 /// Read-only validation before Agent/token creation. The future credential path
 /// is checked without requiring or creating a descriptor. Host formats stay here.
 pub fn preflight(input: PlanInput, inspect_target: bool) -> Result<()> {
