@@ -26,6 +26,7 @@ pub mod setup_project;
 pub mod setup_tools;
 pub mod task_api;
 pub mod task_client;
+pub mod task_messages;
 pub mod task_operations;
 pub mod task_requests;
 pub mod task_routes;
