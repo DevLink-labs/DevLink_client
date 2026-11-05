@@ -278,39 +278,22 @@ fn fingerprints(context: &Context, input: &PlanInput) -> Result<Fingerprint> {
         entry: file_hash(Path::new(&input.executable.args[0]))?,
     })
 }
-pub(crate) fn runtime_input(
-    context: &PreflightContext,
-    options: &Options,
-    executable: &Path,
-) -> Result<PlanInput> {
-    options.validate()?;
-    let node = options
-        .node
-        .clone()
-        .or_else(|| {
-            let launcher = context.host_launcher.as_ref()?;
-            let name = launcher.file_name()?.to_str()?;
-            ["node", "nodejs", "node.exe"]
-                .iter()
-                .any(|n| name.eq_ignore_ascii_case(n))
-                .then(|| launcher.clone())
-        })
-        .or_else(|| {
-            std::env::var_os("PATH").and_then(|path| {
-                std::env::split_paths(&path)
-                    .filter(|p| p.is_absolute())
-                    .flat_map(|p| {
-                        if cfg!(windows) {
-                            vec![p.join("node.exe")]
-                        } else {
-                            vec![p.join("node"), p.join("nodejs")]
-                        }
-                    })
-                    .find(|p| p.is_file())
+fn path_node() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .filter(|p| p.is_absolute())
+            .flat_map(|p| {
+                if cfg!(windows) {
+                    vec![p.join("node.exe")]
+                } else {
+                    vec![p.join("node"), p.join("nodejs")]
+                }
             })
-        })
-        .ok_or_else(|| error("SETUP_TOOL_UNAVAILABLE"))?;
-    let entry = options
+            .find(|p| p.is_file())
+    })
+}
+fn runtime_entry(options: &Options, executable: &Path) -> Result<PathBuf> {
+    options
         .entry
         .clone()
         .or_else(|| {
@@ -329,14 +312,40 @@ pub(crate) fn runtime_input(
                 })
             })
         })
+        .ok_or_else(|| error("SETUP_TOOL_UNAVAILABLE"))
+}
+
+fn runtime_target(context: &PreflightContext, options: &Options) -> PathBuf {
+    options
+        .target
+        .clone()
+        .unwrap_or_else(|| mcp_config::project_target(context.tool_type, &context.project))
+}
+
+pub(crate) fn runtime_input(
+    context: &PreflightContext,
+    options: &Options,
+    executable: &Path,
+) -> Result<PlanInput> {
+    options.validate()?;
+    let node = options
+        .node
+        .clone()
+        .or_else(|| {
+            let launcher = context.host_launcher.as_ref()?;
+            let name = launcher.file_name()?.to_str()?;
+            ["node", "nodejs", "node.exe"]
+                .iter()
+                .any(|n| name.eq_ignore_ascii_case(n))
+                .then(|| launcher.clone())
+        })
+        .or_else(path_node)
         .ok_or_else(|| error("SETUP_TOOL_UNAVAILABLE"))?;
+    let entry = runtime_entry(options, executable)?;
     Ok(PlanInput {
         tool_type: context.tool_type,
         project_path: context.project.clone(),
-        target_path: options
-            .target
-            .clone()
-            .unwrap_or_else(|| mcp_config::project_target(context.tool_type, &context.project)),
+        target_path: runtime_target(context, options),
         broker_file: credentials::path(&context.config_path),
         executable: Executable {
             command: node,
@@ -372,6 +381,32 @@ pub async fn preflight(
     tokio::task::spawn_blocking(move || mcp_config::preflight(input, inspect_target))
         .await
         .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
+}
+
+/// Check paths before authentication, when the saved Host is not yet scoped.
+/// Only an explicit Node can be probed now. A saved Host may supply a different
+/// Node than PATH, so probe the selected runtime after scoping the saved Host.
+pub async fn preflight_runtime(
+    mut context: PreflightContext,
+    options: Options,
+    executable: PathBuf,
+) -> Result<()> {
+    if options.node.is_some() {
+        context.mcp_automatic_supported = false;
+        return preflight(context, options, executable).await;
+    }
+    tokio::task::spawn_blocking(move || {
+        options.validate()?;
+        mcp_config::preflight_paths(
+            context.tool_type,
+            &context.project,
+            &runtime_target(&context, &options),
+            &credentials::path(&context.config_path),
+            &runtime_entry(&options, &executable)?,
+        )
+    })
+    .await
+    .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
 }
 
 /// ACL/path validation precedes subprocess execution. Runtime discovery only initializes

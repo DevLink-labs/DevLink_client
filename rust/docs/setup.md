@@ -617,7 +617,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 도구가 기존 선택/대화형 선택으로 나중에 결정되면 `register_agent` 진입 시 같은 검사를 수행한다. 명시한 도구도 등록 직전에 다시 검사해 validate 이후의 파일 변경을 거절한다. Host 형식 검사는 기존 제공자의 normalize/merge를 사용한다. manual 모드는 실행 경로를 검사하되 직접 적용하지 않는 기존 항목의 병합 충돌은 차단 조건으로 삼지 않는다.
 
-`--tool`만 지정하고 저장된 도구 선택이 있으면, 인증 후 `select_tool`에서 바인딩과 실행 경로를 확인하고 `register_agent` 진입 시 MCP 사전 검사를 수행한다. `--tool-path`로 설치를 지정하면 `validate`에서 해당 경로를 먼저 검사한다.
+`--tool`만 지정하고 저장된 도구 선택이 있으면, `validate`에서 Host와 무관한 MCP 경로를 검사한다. 인증 후 `select_tool`에서 바인딩과 실행 경로를 확인하고 `register_agent` 진입 시 선택한 런타임으로 사전 검사를 수행한다. `--tool-path`로 설치를 지정하면 `validate`에서 해당 경로를 먼저 검사한다.
 
 사전 검사는 적용 허용이나 최종 계획을 저장하지 않는다. 기존 configure_mcp의 계획·동일 digest 확인, Agent/브로커/실행 파일 재검증, 백업·적용 후 검사·롤백은 그대로 수행한다. 사전 검사 이후에 발생한 변경과 쓰기 실패도 기존 오류·부분 적용 규칙에 따라 처리한다.
 
@@ -709,13 +709,13 @@ devlink setup --non-interactive --input .\setup-v1.json --output jsonl
 
 `user.mode=session`은 저장된 세션을 확인한다. `user.mode=login`은 `--password-stdin`으로 비밀번호 한 줄을 받아 새로 로그인한다. `serverUrl`은 새 프로필의 서버 주소로 사용하며, 이미 설정된 프로필에서는 같은 origin인지 확인한다. 다른 서버를 대상으로 할 때는 해당 서버용 `--config`를 선택한다.
 
-인증과 팀 확인 후 같은 서버·사용자·팀·프로젝트에 저장된 `tool.type`의 Host를 재검사한다. PATH 밖의 경로도 유효하면 재사용한다. 해당 선택이 없을 때만 PATH와 기본 설치 디렉터리를 탐색한다. 저장된 Host를 사용할 수 없으면 `SETUP_TOOL_UNAVAILABLE`과 복구 안내를 반환한다. 설치를 복구하거나 대화형 `setup --tool <TYPE> --tool-path <FILE>`로 교체 경로를 명시한다. Agent 생성·토큰 발급 전에 선택한 Host와 MCP 설정을 확인한다.
+인증과 팀 확인 후 같은 서버·사용자·팀·프로젝트에 저장된 `tool.type`의 Host를 재검사한다. PATH 밖의 경로도 유효하면 재사용한다. 해당 선택이 없을 때만 PATH와 기본 설치 디렉터리를 탐색한다. 저장된 Host를 사용할 수 없으면 `SETUP_TOOL_UNAVAILABLE`과 복구 안내를 반환한다. 설치를 복구하거나 대화형 `setup --tool <TYPE> --tool-path <FILE>`로 교체 경로를 명시한다. 저장된 Host가 있어도 MCP 진입점과 프로젝트 설정 대상 경로는 PATH의 Node 유무와 관계없이 로그인 전에 검사한다. `--node-path`를 명시하면 해당 Node로 진입점 초기화도 검사한다. Node를 생략하면 저장된 Host를 확인한 뒤 실제 사용할 Node를 선택하고, Agent 생성·토큰 발급 전에 초기화를 검증한다.
 
 `timeoutMs`는 입력 읽기와 검증부터 최종 결과까지 적용된다. 기본값은 60초다. 제한시간이 지나면 이후 단계는 건너뛰고 이미 완료한 단계와 확인한 Agent ID를 결과에 남긴다. 이미 시작한 로컬 설정 쓰기는 제한시간이 지나도 저장 또는 롤백을 마친다. 등록이나 발급 요청이 진행 중이었다면 `register_agent`를 `outcome:unknown`으로 표시한다.
 
 ## 작업 14 (S15P31D108-116) 중단 후 재실행
 
-대화형과 비대화형 `setup` 모두 Ctrl+C를 받으면 `SETUP_CANCELLED`와 종료 코드 130을 반환한다. JSON과 JSONL은 최종 결과 한 건에 취소된 단계, 완료한 단계, 확인한 ID를 남긴다. 이미 시작한 설정 파일 쓰기는 저장 또는 롤백 결과를 확인한 후 종료한다. 강제 종료 시에는 최종 결과가 누락될 수 있으므로 재실행 전에 `devlink setup status`로 로컬 상태를 확인한다.
+대화형과 비대화형 `setup` 모두 Ctrl+C를 받으면 `SETUP_CANCELLED`와 종료 코드 130을 반환한다. JSON과 JSONL은 최종 결과 한 건에 취소된 단계, 완료한 단계, 확인한 ID를 남긴다. 이미 시작한 설정 파일 쓰기는 저장 또는 롤백 결과를 확인한 후 종료한다. 기다리는 범위는 그 쓰기까지이며, 잠금 획득 직후 이어지는 비밀번호 입력이나 네트워크 응답은 기다리지 않는다. 강제 종료 시에는 최종 결과가 누락될 수 있으므로 재실행 전에 `devlink setup status`로 로컬 상태를 확인한다.
 
 - Agent 생성 응답을 확인하지 못했다면 `devlink agent list`에서 생성 여부와 본인 Agent ID를 확인한 뒤 `devlink setup --agent-id <ID>`로 복구한다. 기존 생성 대기 상태가 남아 있으면 `--create-agent`를 다시 주어도 생성 요청은 반복되지 않는다.
 - 토큰 발급 응답을 확인하지 못했다면 저장된 Agent ID를 확인한 뒤 새 발급이 필요할 때 `devlink setup --issue-token`을 명시한다. 일반 재실행은 같은 Agent를 유지하며 토큰 발급을 반복하지 않는다.

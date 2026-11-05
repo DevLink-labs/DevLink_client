@@ -82,13 +82,14 @@ pub(super) fn project_from_target(tool: ToolType, target: &Path) -> Result<PathB
         _ => Err(invalid()),
     }
 }
-pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> {
-    if host != input.tool_type {
-        return Err(invalid());
-    }
-    absolute(&input.project_path)?;
-    let root = input
-        .project_path
+pub(super) fn normalize_locations(
+    host: ToolType,
+    project: &Path,
+    target_path: &Path,
+    broker_file: &Path,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    absolute(project)?;
+    let root = project
         .canonicalize()
         .map_err(|_| ConfigError::new("SETUP_PROJECT_INVALID"))?;
     absolute(&root)?;
@@ -103,7 +104,7 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(invalid());
     }
-    if project_from_target(host, &input.target_path)?
+    if project_from_target(host, target_path)?
         .canonicalize()
         .map_err(|_| invalid())?
         != root
@@ -123,10 +124,23 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
         Err(_) => return Err(unsafe_file()),
     }
     credentials::ensure_safe_target_if_exists(&target).map_err(|_| unsafe_file())?;
-    let broker = credential_path(&input.broker_file)?;
+    let broker = credential_path(broker_file)?;
     if host_path(&broker).eq_ignore_ascii_case(&host_path(&target)) {
         return Err(invalid());
     }
+    Ok((root, target, broker))
+}
+
+pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> {
+    if host != input.tool_type {
+        return Err(invalid());
+    }
+    let (root, target, broker) = normalize_locations(
+        host,
+        &input.project_path,
+        &input.target_path,
+        &input.broker_file,
+    )?;
     // v1 adapter is the tested Node stdio runtime only, never a shell command or token argv.
     absolute(&input.executable.command)?;
     let command = input
@@ -148,10 +162,23 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
     }
-    let supplied_script = PathBuf::from(&input.executable.args[0]);
-    let script = supplied_script.clone();
-    absolute(&script)?;
-    let script = script
+    let canonical_script = normalize_entry(Path::new(&input.executable.args[0]))?;
+    credentials::verify_public_file_permissions(&command, true).map_err(|_| unsafe_file())?;
+    super::permissions::source_alias(&input.executable.command)?;
+    Ok(Normalized {
+        tool: host,
+        root,
+        target,
+        broker,
+        canonical_command: command,
+        canonical_script,
+        executable: input.executable,
+    })
+}
+
+pub(super) fn normalize_entry(entry: &Path) -> Result<PathBuf> {
+    absolute(entry)?;
+    let script = entry
         .canonicalize()
         .map_err(|_| ConfigError::new("SETUP_TOOL_UNAVAILABLE"))?;
     absolute(&script)?;
@@ -163,25 +190,9 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
     }
-    credentials::verify_public_file_permissions(&command, true).map_err(|_| unsafe_file())?;
     credentials::verify_public_file_permissions(&script, true).map_err(|_| unsafe_file())?;
-    super::permissions::source_alias(&input.executable.command)?;
-    super::permissions::source_alias(&supplied_script)?;
-    let canonical_command = command;
-    let canonical_script = script;
-    let script = supplied_script.to_str().ok_or_else(invalid)?.to_owned();
-    Ok(Normalized {
-        tool: host,
-        root,
-        target,
-        broker,
-        canonical_command,
-        canonical_script,
-        executable: Executable {
-            command: input.executable.command,
-            args: vec![script, "--transport".into(), "stdio".into()],
-        },
-    })
+    super::permissions::source_alias(entry)?;
+    Ok(script)
 }
 fn credential_path(path: &Path) -> Result<PathBuf> {
     absolute(path)?;
