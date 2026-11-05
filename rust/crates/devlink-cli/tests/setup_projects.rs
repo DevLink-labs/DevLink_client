@@ -313,7 +313,9 @@ async fn a_filesystem_root_passes_validate_and_bind_project_uses_saved_names() {
 #[tokio::test]
 async fn long_folder_defaults_fit_central_limits_and_do_not_include_parent_paths() {
     let f = Fixture::new().await;
-    let project = directory(&f, &format!("{}😀{}", "가".repeat(99), "나".repeat(25)));
+    // Keep the emoji at the UTF-16 boundary within the filesystem's byte limit.
+    let folder = format!("가{}😀{}", "a".repeat(98), "나".repeat(25));
+    let project = directory(&f, &folder);
     let prepared = setup_project::resolve(&ProjectOptions {
         path: Some(project),
         ..Default::default()
