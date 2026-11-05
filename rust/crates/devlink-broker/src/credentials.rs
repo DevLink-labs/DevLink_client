@@ -19,8 +19,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const CREDENTIALS_FILE_NAME: &str = "broker.json";
 pub const MAX_CREDENTIALS_SIZE: u64 = 16_384;
 
-/// Each Windows ACL verifier is bounded independently. Publishing changed credentials
-/// may verify the existing snapshot, the temporary file, and the persisted file.
+/// Per-check readiness budget kept from the former child-process verifier; native
+/// Windows ACL checks finish far sooner. Publishing changed credentials may verify
+/// the existing snapshot, the temporary file, and the persisted file.
 pub const ACL_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const MAX_PUBLISH_ACL_CHECKS: u32 = 3;
 
@@ -252,58 +253,20 @@ pub fn ensure_safe_parent_directory(parent: &Path) -> Result<()> {
 
 #[cfg(windows)]
 pub fn current_user_sid() -> Result<String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Stdio;
-
-    static CACHED_SID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    if let Some(sid) = CACHED_SID.get() {
-        return Ok(sid.clone());
-    }
-    let mut cmd = std::process::Command::new("whoami");
-    cmd.args(["/user", "/fo", "csv", "/nh"])
-        .stdin(Stdio::null())
-        .creation_flags(0x08000000);
-    let output = cmd
-        .output()
-        .context("Failed to execute whoami to get user SID")?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for part in text.split(',') {
-        let trimmed = part.trim().trim_matches('"');
-        if trimmed.starts_with("S-1-") {
-            let sid = trimmed.to_string();
-            let _ = CACHED_SID.set(sid.clone());
-            return Ok(sid);
-        }
-    }
-    bail!("Could not parse current user SID from whoami output");
+    Ok(crate::win_acl::current_user()?.text.clone())
 }
 
+/// Replaces the DACL with a protected one that grants only the current user full
+/// control (inheritable for directories). Unlike the former `icacls /grant:r`, other
+/// explicit ACEs are removed too.
 #[cfg(windows)]
 pub fn set_private_permissions(path: &Path) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Stdio;
-
-    let sid = current_user_sid()?;
-    let is_dir = path.is_dir();
-    let perm = if is_dir { "(OI)(CI)(F)" } else { "(F)" };
-    let grant = format!("*{sid}:{perm}");
-    let mut cmd = std::process::Command::new("icacls.exe");
-    cmd.arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(&grant)
-        .stdin(Stdio::null())
-        .creation_flags(0x08000000);
-    let output = cmd
-        .output()
-        .context("Failed to execute icacls to set private permissions")?;
-    if !output.status.success() {
-        bail!(
+    crate::win_acl::set_private(path, path.is_dir()).with_context(|| {
+        format!(
             "Failed to set private Windows ACL on path: {}",
             path.display()
-        );
-    }
-    Ok(())
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -325,9 +288,9 @@ pub fn verify_trusted_writer_permissions(path: &Path) -> Result<()> {
     }
 }
 
-// Shared with the Windows regression tests so owner cases can be exercised with
-// real .NET ACL objects without requiring an elevated token to chown files.
-#[cfg(windows)]
+// Former PowerShell verifier, kept as the reference the native policy below must
+// match. Tests evaluate it on .NET ACL objects so owner cases need no elevation.
+#[cfg(all(windows, test))]
 const WINDOWS_ACL_POLICY: &str = r#"
 function Get-DevLinkAclFailure($acl, [string]$sid, [bool]$isFile, [bool]$othersMayRead, [bool]$source = $false, [bool]$checkOwner = $isFile, [bool]$configFile = $false) {
   $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544')
@@ -352,10 +315,92 @@ function Get-DevLinkAclFailure($acl, [string]$sid, [bool]$isFile, [bool]$othersM
 "#;
 
 #[cfg(windows)]
+const SYSTEM_SID: &str = "S-1-5-18";
+#[cfg(windows)]
+const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+/// Service SIDs are derived from the service name, so this value is fixed.
+#[cfg(windows)]
+const TRUSTED_INSTALLER_SID: &str =
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+/// WriteData, AppendData, WriteEA, DeleteChild, WriteAttributes, Delete, WriteDac, WriteOwner.
+#[cfg(windows)]
+const FORBIDDEN_WRITE_MASK: u32 = 852_310;
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+struct AclMode {
+    is_file: bool,
+    others_may_read: bool,
+    source: bool,
+    check_owner: bool,
+    config_file: bool,
+}
+
+/// Native port of `Get-DevLinkAclFailure`: 0 allowed, 2 untrusted owner, 3 untrusted
+/// access. ACE filtering mirrors .NET `CommonAcl`, which drops zero-mask ACEs,
+/// inherit-only ACEs on files, and inherit-only ACEs that propagate nowhere.
+#[cfg(windows)]
+fn acl_failure(descriptor: &crate::win_acl::Descriptor, sid: &str, mode: AclMode) -> u8 {
+    const OBJECT_INHERIT: u8 = 0x1;
+    const CONTAINER_INHERIT: u8 = 0x2;
+    const INHERIT_ONLY: u8 = 0x8;
+    let mut trusted = vec![sid, SYSTEM_SID, ADMINISTRATORS_SID];
+    let mut owners = vec![sid];
+    if mode.source {
+        trusted.push(TRUSTED_INSTALLER_SID);
+        owners = trusted.clone();
+    } else if mode.config_file && mode.others_may_read {
+        owners.push(ADMINISTRATORS_SID);
+    }
+    let listed =
+        |list: &[&str], value: &str| list.iter().any(|item| item.eq_ignore_ascii_case(value));
+    if mode.check_owner
+        && !descriptor
+            .owner
+            .as_deref()
+            .is_some_and(|owner| listed(&owners, owner))
+    {
+        return 2;
+    }
+    // .NET reads a null DACL as Everyone: FullControl.
+    let Some(allows) = &descriptor.allows else {
+        return 3;
+    };
+    for allow in allows {
+        let inherit_only = allow.flags & INHERIT_ONLY != 0;
+        let propagates = allow.flags & (OBJECT_INHERIT | CONTAINER_INHERIT) != 0;
+        if allow.mask == 0 || (inherit_only && (mode.is_file || !propagates)) {
+            continue;
+        }
+        let sid = allow.sid.as_deref();
+        if mode.others_may_read
+            && inherit_only
+            && sid.is_some_and(|sid| listed(&["S-1-3-0", "S-1-3-1"], sid))
+        {
+            continue;
+        }
+        if sid.is_some_and(|sid| listed(&trusted, sid)) {
+            continue;
+        }
+        if (mode.is_file && !mode.others_may_read) || allow.mask & FORBIDDEN_WRITE_MASK != 0 {
+            return 3;
+        }
+    }
+    0
+}
+
+#[cfg(windows)]
 pub fn verify_directory_permissions(path: &Path) -> Result<()> {
     verify_parent_safety(path)?;
     verify_permissions(path, true, true, false, false)
 }
+
+/// 비공개 파일은 packages/mcp-server/src/broker/settings.ts와 동일한 기준 적용:
+/// - 비공개 파일 소유자는 현재 사용자 SID; config는 Administrators도 허용
+/// - 파일은 현재 사용자, SYSTEM(S-1-5-18), BUILTIN\Administrators(S-1-5-32-544) 외 Allow 거부
+/// - 직계 부모 디렉터리는 위 신뢰 주체 외 금지된 쓰기·삭제·권한 변경(852310 마스크) Allow 거부
+/// - others_may_read이면 파일에도 부모와 같은 852310 마스크만 적용해 읽기 Allow는 허용
+/// - source/state 모드만 SYSTEM/TrustedInstaller 소유를 허용하며 config 예외와 분리
 #[cfg(windows)]
 fn verify_permissions(
     path: &Path,
@@ -364,93 +409,33 @@ fn verify_permissions(
     source: bool,
     config_file: bool,
 ) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-
-    let abs_path = std::path::absolute(path)
-        .with_context(|| format!("Cannot determine absolute path for {}", path.display()))?;
-
-    // 비공개 파일은 packages/mcp-server/src/broker/settings.ts와 동일한 기준 적용:
-    // - 비공개 파일 소유자는 현재 사용자 SID; config는 Administrators도 허용
-    // - 파일은 현재 사용자, SYSTEM(S-1-5-18), BUILTIN\Administrators(S-1-5-32-544) 외 Allow 거부
-    // - 직계 부모 디렉터리는 위 신뢰 주체 외 금지된 쓰기·삭제·권한 변경(852310 마스크) Allow 거부
-    // - others_may_read이면 파일에도 부모와 같은 852310 마스크만 적용해 읽기 Allow는 허용
-    // - source/state 모드만 SYSTEM/TrustedInstaller 소유를 허용하며 config 예외와 분리
-    // - 검증 성공 시 'private' 출력, 검사 실패 시 exit 2 또는 exit 3
-    const SCRIPT: &str = r#"
-$ErrorActionPreference = 'Stop'
-$p = $env:DEVLINK_ACL_CHECK_PATH
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$directory = $env:DEVLINK_ACL_DIRECTORY -eq '1'
-$public = $env:DEVLINK_ACL_PUBLIC -eq '1'
-$source = $env:DEVLINK_ACL_SOURCE -eq '1'
-$config = $env:DEVLINK_ACL_CONFIG -eq '1'
-$targets = if ($directory) { @($p) } else { @($p, [System.IO.Path]::GetDirectoryName($p)) }
-foreach ($target in $targets) {
-  $acl = if ($target -eq $p -and -not $directory) { [System.IO.File]::GetAccessControl($target) } else { [System.IO.Directory]::GetAccessControl($target) }
-  $failure = Get-DevLinkAclFailure $acl $sid (($target -eq $p) -and -not $directory) $public $source ($target -eq $p) $config
-  if ($failure -ne 0) { exit $failure }
-}
-[Console]::Write('private')
-"#;
-
-    let script = format!("{WINDOWS_ACL_POLICY}\n{SCRIPT}");
-    let mut cmd = Command::new("powershell.exe");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env("DEVLINK_ACL_CHECK_PATH", &abs_path)
-        .env("DEVLINK_ACL_DIRECTORY", if directory { "1" } else { "0" })
-        .env("DEVLINK_ACL_PUBLIC", if public_read { "1" } else { "0" })
-        .env("DEVLINK_ACL_SOURCE", if source { "1" } else { "0" })
-        .env("DEVLINK_ACL_CONFIG", if config_file { "1" } else { "0" })
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(0x08000000); // CREATE_NO_WINDOW: 콘솔 창 없이 실행
-
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "Failed to spawn powershell for ACL verification on {}",
+    let insecure = || {
+        anyhow::anyhow!(
+            "Insecure or inaccessible Windows permissions on {}",
             path.display()
         )
-    })?;
-
-    let deadline = Instant::now() + ACL_CHECK_TIMEOUT;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("Failed to wait for ACL verification on {}", path.display()))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Windows ACL verification timed out on {}", path.display());
-        }
-        std::thread::sleep(Duration::from_millis(20));
     };
-
-    if !status.success() {
-        bail!(
-            "Insecure or inaccessible Windows permissions on {}",
-            path.display()
-        );
+    let abs_path = std::path::absolute(path)
+        .with_context(|| format!("Cannot determine absolute path for {}", path.display()))?;
+    let sid = current_user_sid()?;
+    let mut targets = vec![abs_path.as_path()];
+    if !directory {
+        targets.push(abs_path.parent().ok_or_else(insecure)?);
     }
-
-    let mut stdout = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        use std::io::Read;
-        let _ = out.read_to_end(&mut stdout);
+    for (index, target) in targets.into_iter().enumerate() {
+        let primary = index == 0;
+        let descriptor = crate::win_acl::read(target).map_err(|_| insecure())?;
+        let mode = AclMode {
+            is_file: primary && !directory,
+            others_may_read: public_read,
+            source,
+            check_owner: primary,
+            config_file,
+        };
+        if acl_failure(&descriptor, &sid, mode) != 0 {
+            return Err(insecure());
+        }
     }
-
-    if std::str::from_utf8(&stdout).map(|s| s.trim()) != Ok("private") {
-        bail!(
-            "Insecure or inaccessible Windows permissions on {}",
-            path.display()
-        );
-    }
-
     Ok(())
 }
 
@@ -854,6 +839,156 @@ mod tests {
             before_bytes == after_bytes,
             "credential file content must remain unchanged after rejected load"
         );
+    }
+
+    /// The native verifier must return the same code as the former PowerShell policy
+    /// for every owner, ACE shape and verifier mode, including .NET ACL canonicalization.
+    #[cfg(windows)]
+    #[test]
+    fn native_acl_policy_matches_powershell_reference() {
+        use std::os::windows::process::CommandExt;
+        let sid = current_user_sid().unwrap();
+        let owners = [
+            sid.as_str(),
+            ADMINISTRATORS_SID,
+            SYSTEM_SID,
+            "S-1-1-0",
+            TRUSTED_INSTALLER_SID,
+        ];
+        let extras = [
+            String::new(),
+            "(A;;FA;;;SY)(A;ID;FA;;;BA)".into(),
+            "(A;;FR;;;WD)".into(),
+            "(A;;0x100000;;;WD)".into(),
+            "(A;;0x2;;;WD)".into(),
+            "(A;;0x40000;;;BU)".into(),
+            "(A;OICI;FA;;;WD)".into(),
+            "(A;OICIIO;FA;;;WD)".into(),
+            "(A;OICIIO;FR;;;WD)".into(),
+            "(A;IO;FA;;;WD)".into(),
+            "(A;OIIONP;0x2;;;WD)".into(),
+            "(A;OICIIO;FA;;;CO)".into(),
+            "(A;CIIO;0x2;;;CG)".into(),
+            "(A;IO;FA;;;CO)".into(),
+            "(A;OICI;FA;;;CO)".into(),
+            "(A;OICIIO;GA;;;WD)".into(),
+            "(A;;GW;;;WD)".into(),
+            "(A;;0x0;;;WD)".into(),
+            "(A;ID;0x1301bf;;;BU)".into(),
+            "(D;;FA;;;WD)".into(),
+            format!("(A;;FA;;;{TRUSTED_INSTALLER_SID})"),
+        ];
+        let user = format!("(A;;FA;;;{sid})");
+        let mut dacls: Vec<String> = extras.iter().map(|e| format!("D:P{user}{e}")).collect();
+        dacls.extend(["D:NO_ACCESS_CONTROL".into(), "D:P".into()]);
+        let mut cases = Vec::new();
+        for owner in owners {
+            for dacl in &dacls {
+                for bits in 0..32u8 {
+                    let flag = |bit: u8| bits & (1 << bit) != 0;
+                    let mode = AclMode {
+                        is_file: flag(0),
+                        others_may_read: flag(1),
+                        source: flag(2),
+                        check_owner: flag(3),
+                        config_file: flag(4),
+                    };
+                    cases.push((format!("O:{owner}G:SY{dacl}"), mode));
+                }
+            }
+        }
+        let input: String = cases
+            .iter()
+            .map(|(sddl, m)| {
+                let b = |v: bool| if v { '1' } else { '0' };
+                format!(
+                    "{sddl}\t{}\t{}\t{}\t{}\t{}\n",
+                    b(m.is_file),
+                    b(m.others_may_read),
+                    b(m.source),
+                    b(m.check_owner),
+                    b(m.config_file)
+                )
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let cases_path = dir.path().join("cases.tsv");
+        fs::write(&cases_path, input).unwrap();
+        const HARNESS: &str = r#"
+$ErrorActionPreference = 'Stop'
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$out = [System.Collections.Generic.List[string]]::new()
+$out.Add($sid)
+foreach ($line in [System.IO.File]::ReadAllLines($env:DEVLINK_ACL_CASES)) {
+  $f = $line.Split("`t")
+  $isFile = $f[1] -eq '1'
+  $acl = if ($isFile) { [System.Security.AccessControl.FileSecurity]::new() } else { [System.Security.AccessControl.DirectorySecurity]::new() }
+  $acl.SetSecurityDescriptorSddlForm($f[0])
+  $out.Add([string](Get-DevLinkAclFailure $acl $sid $isFile ($f[2] -eq '1') ($f[3] -eq '1') ($f[4] -eq '1') ($f[5] -eq '1')))
+}
+[Console]::Out.Write(($out -join "`n"))
+"#;
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("{WINDOWS_ACL_POLICY}\n{HARNESS}"),
+            ])
+            .env("DEVLINK_ACL_CASES", &cases_path)
+            .stdin(std::process::Stdio::null())
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(
+            lines.next(),
+            Some(sid.as_str()),
+            "token SID differs from .NET"
+        );
+        let expected: Vec<&str> = lines.collect();
+        assert_eq!(expected.len(), cases.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for ((sddl, mode), expected) in cases.iter().zip(expected) {
+            let descriptor = crate::win_acl::parse_sddl(sddl).unwrap();
+            let actual = acl_failure(&descriptor, &sid, *mode).to_string();
+            assert_eq!(actual, expected, "{sddl} {mode:?}");
+            seen.insert(actual);
+        }
+        // Every verdict must be exercised so the comparison cannot pass vacuously.
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), ["0", "2", "3"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_private_permissions_leave_only_a_protected_user_ace() {
+        let sid = current_user_sid().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("broker.json");
+        fs::write(&file, b"{}").unwrap();
+        set_private_permissions(dir.path()).unwrap();
+        set_private_permissions(&file).unwrap();
+        // Same descriptor `icacls /inheritance:r /grant:r *SID:(OI)(CI)(F)` produced.
+        assert!(get_sddl(dir.path()).ends_with(&format!("D:PAI(A;OICI;FA;;;{sid})")));
+        assert!(get_sddl(&file).ends_with(&format!("D:PAI(A;;FA;;;{sid})")));
+        verify_private_permissions(&file).unwrap();
+        verify_directory_permissions(dir.path()).unwrap();
+        // A later explicit grant is replaced, not kept beside the user ACE.
+        let grant = std::process::Command::new("icacls.exe")
+            .arg(&file)
+            .args(["/grant", "*S-1-1-0:(R)"])
+            .output()
+            .unwrap();
+        assert!(grant.status.success());
+        assert!(verify_private_permissions(&file).is_err());
+        set_private_permissions(&file).unwrap();
+        assert!(get_sddl(&file).ends_with(&format!("D:PAI(A;;FA;;;{sid})")));
     }
 
     #[cfg(windows)]
