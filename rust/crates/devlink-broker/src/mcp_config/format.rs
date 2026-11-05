@@ -95,6 +95,37 @@ pub(super) fn merge(
         }
     }
 }
+pub(super) fn configured_entry(tool: ToolType, bytes: &[u8]) -> Result<Option<Value>> {
+    let conflict = || ConfigError::new("SETUP_MCP_CONFIG_CONFLICT");
+    match tool {
+        ToolType::ClaudeCode => {
+            let Unique(root) = serde_json::from_slice(bytes).map_err(|_| conflict())?;
+            let root = root.as_object().ok_or_else(conflict)?;
+            root.get("mcpServers")
+                .map(|servers| {
+                    let servers = servers.as_object().ok_or_else(conflict)?;
+                    Ok(servers.get("devlink").cloned())
+                })
+                .unwrap_or(Ok(None))
+        }
+        ToolType::Codex => {
+            let doc = std::str::from_utf8(bytes)
+                .map_err(|_| conflict())?
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| conflict())?;
+            doc.get("mcp_servers")
+                .map(|servers| {
+                    let servers = servers.as_table_like().ok_or_else(conflict)?;
+                    servers
+                        .get("devlink")
+                        .map(|entry| toml_json(entry).ok_or_else(conflict))
+                        .transpose()
+                })
+                .unwrap_or(Ok(None))
+        }
+    }
+}
+
 fn to_toml(value: &Value) -> Result<toml_edit::Value> {
     Ok(match value {
         Value::String(s) => toml_edit::Value::from(s.as_str()),

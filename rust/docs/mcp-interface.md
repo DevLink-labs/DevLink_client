@@ -32,13 +32,13 @@ Agent ID의 영속 저장·기존 ID 재사용·토큰 관리는 [Agent bootstra
 
 ## 로컬 연결과 제어 API
 
-- 전송: HTTP/1.1 JSON, IPv4 `127.0.0.1`에만 바인딩. 기본 포트 43127, `localPort: 0`이면 자동 할당. MCP URL 검증과 맞추기 위해 포트 80은 거부합니다.
+- 전송은 HTTP/1.1 JSON이며 IPv4 `127.0.0.1`에만 바인딩합니다. `setup`으로 새로 만든 프로필은 첫 기동에서 바인딩한 포트를 저장하고 이후 같은 포트를 사용합니다. Windows에서는 첫 포트 선택 시 현재 동적 TCP 범위를 피합니다. `init`과 `localPort`를 생략한 기존 프로필의 기본값은 43127입니다. MCP URL 검증과 맞추기 위해 포트 80은 거부합니다.
 - 발견: Rust CLI는 설정 디렉터리 아래의 `.devlink-runtime/runtime.json`을 읽고 MCP는 같은 디렉터리의 `broker.json`을 읽습니다. `devlink [--config <FILE>] mcp path`는 자격 파일 경로만 출력하며 파일을 생성하지 않습니다. 브로커 기동 시 스냅샷을 발행합니다. `broker.lock`과 `control.lock`도 `.devlink-runtime/`에 저장하며, 설정 디렉터리당 한 인스턴스입니다. 구버전 브로커는 업그레이드 전에 구버전 CLI로 종료해야 합니다.
 - 런타임 필드: `apiVersion`, `pid`, `port`, `instanceId`, `controlToken`. 토큰과 전체 런타임 JSON은 로그·Tool 응답에 포함하지 않습니다.
 - 인증: `Authorization: Bearer <토큰>`을 사용합니다. CLI의 `controlToken`과 MCP의 `localToken` 모두 health를 조회할 수 있지만 `/shutdown`은 CLI 제어 토큰만 허용합니다. `Origin`이 있는 브라우저 요청은 거절하며 CORS 허용 헤더를 제공하지 않습니다.
 - 클라이언트는 프록시를 끄고 loopback으로만 요청해야 합니다. `GET /health`의 서비스·API 버전·PID·instanceId를 확인합니다.
 - 새 브로커마다 instanceId와 CLI 제어 토큰은 바뀌지만 MCP localToken은 정상·강제 종료 후 재시작에 유지합니다. `devlink mcp rotate`는 브로커 중지 중에만 새 MCP 토큰을 발행하며 start/stop과 잠금으로 조정합니다. MCP는 자격 파일을 실행 중 다시 읽지 않으므로 회전 후 재시작해야 합니다.
-- 브로커는 현재 바인딩된 포트로 brokerUrl을 발행합니다. `localPort: 0`이나 설정 변경으로 주소가 달라지면 MCP도 다시 시작해야 합니다.
+- 브로커는 현재 바인딩된 포트로 brokerUrl을 발행합니다. `localPort`를 명시적으로 `0`으로 설정하면 시작할 때마다 자동 배정합니다. 포트 변경으로 주소가 달라지면 MCP도 다시 시작해야 합니다.
 - 자격 파일은 16KiB 이하이며 원자적으로 발행하고 파일·직계 부모의 링크 및 Windows reparse point를 거부합니다. Windows 소유권·DACL 설정·검증은 실행 확인했고 Unix 소유권·권한 검사 코드는 실행 미검증입니다. 손상되거나 권한이 안전하지 않은 자격은 기동 시 오류로 처리합니다.
 - 중앙 `DEVLINK_TOKEN`은 로컬 제어 토큰과 별개이며 MCP 클라이언트가 읽거나 반환할 필요가 없습니다.
 

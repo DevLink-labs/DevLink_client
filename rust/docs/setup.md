@@ -27,14 +27,26 @@ devlink setup --tool codex --agent-id 34 --issue-token
 # 비대화형에서 이번 계획의 프로젝트 MCP 설정 적용을 허용
 devlink setup --tool codex --agent-id 34 --apply-mcp
 # 자동 발견이 안 되면 Node와 빌드된 MCP 진입점을 절대 경로로 지정
-devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "C:\DevLink\mcp-server\dist\index.js" --apply-mcp
+devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "$HOME\DevLink\mcp-server\dist\index.js" --apply-mcp
 # Host 파일은 쓰지 않고 DevLink 설정 예시와 적용 위치를 반환
 devlink setup --mcp-mode manual
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--non-interactive --input <FILE>`로 v1 입력 파일을 사용한 비대화형 실행을 제공한다.
+setup으로 새로 만든 프로필은 첫 기동에 실제로 바인딩한 루프백 포트를 `localPort`에 저장하고, 이후 같은 포트를 사용한다. Windows에서는 현재 IPv4 동적 TCP 범위를 조회해 그 범위를 피한다. `43127–49151`을 우선 확인하고, 필요하면 `43126`부터 `1024`까지 내려가며 점유됐거나 바인딩이 거부된 포트를 건너뛴다.
+
+기존 고정 포트가 점유됐거나 OS가 바인딩을 거부하면 `devlink --config <FILE> config set localPort <FREE_PORT>`로 사용 가능한 고정 포트를 지정한다. 기존 자동 포트 프로필을 고정할 때도 같은 명령을 사용한다. 실행 중인 브로커는 설정 변경 후 재시작하며, 주소가 바뀌면 Host도 다시 연다.
+
+### Windows paths
+
+`SETUP_UNSAFE_FILE`의 `location.file`에 표시된 경로를 `icacls "<경로>"`로 확인한다. 프로젝트 설정, 프로필, Node 실행 파일, MCP 진입점과 각 파일의 직계 상위 디렉터리는 다른 사용자가 내용을 쓰거나 교체할 수 없도록 보호되어야 한다. 검사 대상 폴더에 `BUILTIN\Users`의 수정 권한이나 다른 계정의 쓰기 권한이 상속되어 있으면 기본 경로에서도 설치가 중단될 수 있다.
+
+조직에서 관리하는 Desktop이나 AppData의 ACL을 수정할 수 없다면 `$HOME` 바로 아래에 현재 사용자 전용 디렉터리를 만든다. 오류가 난 대상에 맞춰 프로젝트는 `--project`, 별도 프로필은 `--config`, 실행 파일은 `--node-path`, 빌드한 MCP는 `--mcp-entry`로 새 경로를 지정한다. MCP는 `dist`와 함께 `package.json`, `node_modules`를 포함한 런타임을 통째로 복사한다. 완료 후 `devlink setup status`는 프로젝트 설정에서 적용된 런타임 경로를 읽는다.
+
+Codex에서 해당 프로젝트를 열고 신뢰 여부를 묻는 메시지가 표시되면 신뢰를 승인해야 `.codex/config.toml`을 읽는다. 대화형 setup은 Agent 이름이 충돌하면 새 이름을 묻고, 기존 Agent에 토큰이 필요하면 확인한 Agent ID를 보여 주고 발급 동의를 받는다.
+
+현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 터미널에서 발급을 승인하거나 `--issue-token`을 지정하면 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--non-interactive --input <FILE>`로 v1 입력 파일을 사용한 비대화형 실행을 제공한다.
 
 기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤 verify_connection에서 브로커·중앙·Agent 신원·자격·MCP 설정을 확인한다. 검증 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 

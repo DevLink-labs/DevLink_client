@@ -239,7 +239,7 @@ result는 data/error 중 정확히 하나를 갖는다. progress에는 data/erro
 
 ## 5. 오류·추가 입력·복구·종료 코드
 
-오류는 `code/step/message/outcome/retryable/requiredInputs/recovery`가 필수다. 추가 입력이 없으면 빈 배열을 사용한다. `known`은 확인한 userId/teamId/agentId만 포함하며, 알 수 없는 ID는 만들지 않는다. `requiredInputs[]`는 `field/kind/secret/source`이며 kind는 `value | selection | secret`, source는 `input | hidden_prompt_or_stdin | verified_team_list | owned_agent_list` 중 하나다. 비밀은 필드 설명만 반환한다.
+오류는 `code/step/message/outcome/retryable/requiredInputs/recovery`가 필수다. 추가 입력이 없으면 빈 배열을 사용한다. `known`은 확인한 userId/teamId/agentId만 포함하며, 알 수 없는 ID는 만들지 않는다. `requiredInputs[]`는 `field/kind/secret/source`이며 kind는 `value | selection | secret`, source는 `input | hidden_prompt_or_stdin | verified_team_list | owned_agent_list | detected_tool_list` 중 하나다. 비밀은 필드 설명만 반환한다.
 
 MANUAL_ACTION_REQUIRED에서만 error.manualConfig에 `toolType`, `suggestedTargetPath`, `executable`, `brokerFile`, `snippet`, `restartRequired`를 추가할 수 있다. 검증된 DevLink 항목만 포함하며 일반 Host 설정 전체를 복사하지 않는다. `requiredInputs`는 비워두고 적용 후 setup 재실행을 안내한다.
 

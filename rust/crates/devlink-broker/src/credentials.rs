@@ -402,6 +402,24 @@ pub fn verify_directory_permissions(path: &Path) -> Result<()> {
 /// - others_may_read이면 파일에도 부모와 같은 852310 마스크만 적용해 읽기 Allow는 허용
 /// - source/state 모드만 SYSTEM/TrustedInstaller 소유를 허용하며 config 예외와 분리
 #[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct UnsafeWindowsPermissions(pub PathBuf);
+
+#[cfg(windows)]
+impl std::fmt::Display for UnsafeWindowsPermissions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Insecure or inaccessible Windows permissions on {}",
+            self.0.display()
+        )
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for UnsafeWindowsPermissions {}
+
+#[cfg(windows)]
 fn verify_permissions(
     path: &Path,
     directory: bool,
@@ -409,22 +427,21 @@ fn verify_permissions(
     source: bool,
     config_file: bool,
 ) -> Result<()> {
-    let insecure = || {
-        anyhow::anyhow!(
-            "Insecure or inaccessible Windows permissions on {}",
-            path.display()
-        )
-    };
     let abs_path = std::path::absolute(path)
         .with_context(|| format!("Cannot determine absolute path for {}", path.display()))?;
     let sid = current_user_sid()?;
     let mut targets = vec![abs_path.as_path()];
     if !directory {
-        targets.push(abs_path.parent().ok_or_else(insecure)?);
+        targets.push(
+            abs_path
+                .parent()
+                .ok_or_else(|| UnsafeWindowsPermissions(abs_path.clone()))?,
+        );
     }
     for (index, target) in targets.into_iter().enumerate() {
         let primary = index == 0;
-        let descriptor = crate::win_acl::read(target).map_err(|_| insecure())?;
+        let descriptor =
+            crate::win_acl::read(target).map_err(|_| UnsafeWindowsPermissions(target.into()))?;
         let mode = AclMode {
             is_file: primary && !directory,
             others_may_read: public_read,
@@ -433,7 +450,7 @@ fn verify_permissions(
             config_file,
         };
         if acl_failure(&descriptor, &sid, mode) != 0 {
-            return Err(insecure());
+            return Err(UnsafeWindowsPermissions(target.into()).into());
         }
     }
     Ok(())

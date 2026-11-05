@@ -72,7 +72,11 @@ fn select_server(
     existing: Option<&Config>,
     requested: Option<&str>,
 ) -> Result<Config, Failure> {
-    let mut config = existing.cloned().unwrap_or_default();
+    let mut config = existing.cloned().unwrap_or_else(|| Config {
+        local_port: 0,
+        local_port_pending: true,
+        ..Config::default()
+    });
     if let Some(url) = requested {
         config.server_url = url.to_owned();
         validate_config(&config, path)?;

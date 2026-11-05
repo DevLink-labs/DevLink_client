@@ -35,10 +35,30 @@ pub enum FailureKind {
     Unhealthy,
     TokenUnavailable,
     SpawnFailed,
+    Port(PortProblem),
     ChildExited,
     StartupTimedOut,
     ShutdownFailed,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortProblem {
+    Unavailable,
+    AssignmentFailed,
+}
+
+impl PortProblem {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => {
+                "The configured broker loopback port is in use or the OS denied the bind. Run devlink --config <FILE> config set localPort <FREE_PORT> with this profile's configuration file, then retry. Reopen any running Host if the port changes."
+            }
+            Self::AssignmentFailed => {
+                "Setup could not assign a broker port outside the Windows dynamic TCP range. Check the active IPv4 TCP range and port exclusions, or set an available fixed port with devlink --config <FILE> config set localPort <FREE_PORT> and retry."
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     NotApplied,
@@ -68,6 +88,7 @@ impl std::fmt::Display for Failure {
             FailureKind::Unhealthy => "Broker identity or health could not be verified",
             FailureKind::TokenUnavailable => "Cannot prepare the central Agent token",
             FailureKind::SpawnFailed => "Cannot spawn broker process",
+            FailureKind::Port(problem) => problem.message(),
             FailureKind::ChildExited => "Broker exited during startup; check configuration and local port, or run devlink broker in foreground",
             FailureKind::StartupTimedOut => "Broker startup timed out; child process cleaned up",
             FailureKind::ShutdownFailed => "Broker shutdown timed out; process was not force-killed",
@@ -115,6 +136,13 @@ pub enum StopResult {
 /// Observe the OS lock, then authenticate service/version/PID/instance identity.
 /// Stale discovery cleanup follows local::running's existing locked policy.
 pub async fn status(path: &Path) -> Result<Status> {
+    Ok(match running_broker(path).await? {
+        Some((health, _)) => Status::Running { health },
+        None => Status::Stopped,
+    })
+}
+
+async fn running_broker(path: &Path) -> Result<Option<(Health, u16)>> {
     if !local::running(path).map_err(|e| {
         classify(
             e,
@@ -123,7 +151,7 @@ pub async fn status(path: &Path) -> Result<Status> {
             Outcome::NotApplied,
         )
     })? {
-        return Ok(Status::Stopped);
+        return Ok(None);
     }
     let runtime = Runtime::load(path).map_err(|e| {
         // The lock holder publishes runtime.json after acquiring the lock, so a
@@ -143,7 +171,7 @@ pub async fn status(path: &Path) -> Result<Status> {
             Outcome::NotApplied,
         )
     })?;
-    Ok(Status::Running { health })
+    Ok(Some((health, runtime.port)))
 }
 
 fn runtime_unpublished(path: &Path, error: &anyhow::Error) -> bool {
@@ -210,7 +238,10 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
     Config::load(path)
         .map_err(|e| classify(e, FailureKind::InvalidConfig, path, Outcome::NotApplied))?;
     let _control = control_lock(path)?;
-    if let Status::Running { health } = status(path).await? {
+    let config = Config::load(path)
+        .map_err(|e| classify(e, FailureKind::InvalidConfig, path, Outcome::NotApplied))?;
+    if let Some((health, port)) = running_broker(path).await? {
+        save_pending_port(path, &config, port)?;
         return Ok(StartResult {
             reused: true,
             health,
@@ -262,7 +293,8 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
         child: &mut child,
         armed: true,
     };
-    let health = wait_for_start(path, owned.child, startup_timeout(path)).await?;
+    let (health, port) = wait_for_start(path, owned.child, startup_timeout(path)).await?;
+    save_pending_port(path, &config, port)?;
     owned.armed = false; // std::process::Child drop deliberately leaves a ready broker running.
     Ok(StartResult {
         reused: false,
@@ -270,17 +302,39 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
     })
 }
 
-async fn wait_for_start(path: &Path, child: &mut Child, timeout: Duration) -> Result<Health> {
+fn save_pending_port(path: &Path, config: &Config, port: u16) -> Result<()> {
+    if config.local_port_pending {
+        config::save_setup_port(path, port)
+            .map_err(|e| classify(e, FailureKind::Storage, path, Outcome::Unknown))?;
+    }
+    Ok(())
+}
+
+async fn wait_for_start(
+    path: &Path,
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<(Health, u16)> {
     let deadline = Instant::now() + timeout;
     let lock = state_directory(path).join("broker.lock");
     let mut lock_error = None;
     loop {
-        if child
+        if let Some(exit) = child
             .try_wait()
             .map_err(|e| classify(e.into(), FailureKind::ChildExited, path, Outcome::Unknown))?
-            .is_some()
         {
-            return Err(failure(FailureKind::ChildExited, path, Outcome::Unknown).into());
+            let (kind, outcome) = match exit.code() {
+                Some(broker::PortFailure::UNAVAILABLE_EXIT) => (
+                    FailureKind::Port(PortProblem::Unavailable),
+                    Outcome::NotApplied,
+                ),
+                Some(broker::PortFailure::ASSIGNMENT_FAILED_EXIT) => (
+                    FailureKind::Port(PortProblem::AssignmentFailed),
+                    Outcome::NotApplied,
+                ),
+                _ => (FailureKind::ChildExited, Outcome::Unknown),
+            };
+            return Err(failure(kind, path, outcome).into());
         }
         // Probing broker.lock before runtime publication can compete with the
         // child's initial acquisition. Verify the published child first.
@@ -292,7 +346,7 @@ async fn wait_for_start(path: &Path, child: &mut Child, timeout: Duration) -> Re
             // failing lock inspection here must not end a healthy broker. Keep
             // polling; a persistent error is reported at the deadline instead.
             match local::running(path) {
-                Ok(true) => return Ok(health),
+                Ok(true) => return Ok((health, runtime.port)),
                 Ok(false) => lock_error = None,
                 Err(error) => lock_error = Some(error),
             }

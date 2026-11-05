@@ -7,7 +7,9 @@ use super::{
     TeamInputError, ToolInput, ToolInputError, parse_team_id,
 };
 use clap::{Args, Subcommand, ValueEnum};
-use devlink_broker::{setup_connection, setup_mcp};
+use devlink_broker::{
+    mcp_config, sessions::ToolType, setup_connection, setup_mcp, tool_discovery::DetectionStatus,
+};
 use serde::Serialize;
 use std::{
     fmt,
@@ -146,6 +148,7 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     let mut output = Renderer::new(stdout.lock(), args.output);
     let mut control = RunControl::new(terminal_signal());
     if args.non_interactive || args.input.is_some() {
+        output.batch = true;
         let result = run_batch(&context, args, &mut output, &mut control).await;
         return finish(&mut output, &result);
     }
@@ -367,6 +370,10 @@ fn render_connection_result<W: Write>(
         )
         .map_err(|_| SetupExit(1))?;
         if !data.next_actions.is_empty() {
+            if data.next_actions.contains(&"trust_codex_project") {
+                writeln!(output.writer, "Open the project in Codex and trust it if prompted so Codex loads the project config.")
+                    .map_err(|_| SetupExit(1))?;
+            }
             writeln!(
                 output.writer,
                 "Next actions: {}",
@@ -444,11 +451,7 @@ impl ToolInput for TerminalToolInput {
             use std::io::{BufRead, Read};
             let stderr = std::io::stderr();
             let mut renderer = Renderer::new(stderr.lock(), OutputFormat::Json);
-            for tool in tools {
-                renderer
-                    .json(&tool)
-                    .map_err(|_| ToolInputError::ReadFailed)?;
-            }
+            render_tools(&mut renderer.writer, &tools).map_err(|_| ToolInputError::ReadFailed)?;
             write!(renderer.writer, "Tool (codex or claude-code): ")
                 .and_then(|_| renderer.writer.flush())
                 .map_err(|_| ToolInputError::ReadFailed)?;
@@ -552,11 +555,16 @@ fn secret_input_error(error: anyhow::Error) -> LoginInputError {
 pub struct Renderer<W> {
     writer: W,
     format: OutputFormat,
+    batch: bool,
 }
 
 impl<W: Write> Renderer<W> {
     pub fn new(writer: W, format: OutputFormat) -> Self {
-        Self { writer, format }
+        Self {
+            writer,
+            format,
+            batch: false,
+        }
     }
 
     pub fn progress(&mut self, event: &ProgressEvent) -> Result<(), ProgressUnavailable> {
@@ -589,7 +597,39 @@ impl<W: Write> Renderer<W> {
                 let message = match &result.completion {
                     Completion::Success { .. } if result.stages.is_empty() => "Setup status.",
                     Completion::Success { .. } => "Setup completed.",
-                    Completion::Failure { error } => error.message(),
+                    Completion::Failure { error } => {
+                        if self.batch {
+                            match error.code {
+                                ErrorCode::AuthRequired => {
+                                    "Sign in using user.mode=login and user.email in the input JSON, and supply the password with --password-stdin."
+                                }
+                                ErrorCode::RegistrationUnknown => {
+                                    "Check devlink agent list. Recover a confirmed owned ID with agent.action=use and agent.id in the input JSON. If the server confirms there is no delayed creation, advanced recovery is devlink agent reset-pending --accept-duplicate-risk. A later create can produce duplicates."
+                                }
+                                ErrorCode::TokenRequired => {
+                                    "Inspect the known Agent ID and request token issuance with agent.issueToken=true in the input JSON."
+                                }
+                                ErrorCode::AgentAlreadyExists => {
+                                    "Choose another agent.name in the input JSON or select a confirmed owned Agent with agent.action=use and agent.id."
+                                }
+                                ErrorCode::ProjectPathInvalid => {
+                                    "Set project.path in the input JSON to an existing directory."
+                                }
+                                ErrorCode::ToolRequired => {
+                                    "Choose an available tool with tool.type in the input JSON."
+                                }
+                                ErrorCode::ToolUnavailable => {
+                                    "Check tool.type and tool.executable in the input JSON. Use --node-path and --mcp-entry to specify Node >=24 and a built DevLink entry."
+                                }
+                                ErrorCode::TeamRequired => {
+                                    "Choose a joined team with team.id in the input JSON."
+                                }
+                                _ => error.message(),
+                            }
+                        } else {
+                            error.message()
+                        }
+                    }
                 };
                 writeln!(self.writer, "{message}").map_err(|_| ProgressUnavailable)?;
                 if let Completion::Failure { error } = &result.completion {
@@ -602,16 +642,21 @@ impl<W: Write> Renderer<W> {
                     }
                     if let Some(location) = &error.location {
                         write!(self.writer, "Location: ").map_err(|_| ProgressUnavailable)?;
-                        self.json(location)?;
+                        write_public_text(
+                            &mut self.writer,
+                            &mcp_config::host_path(&location.file),
+                            true,
+                        )?;
+                        if let Some(field) = location.field {
+                            write!(self.writer, " ({field})").map_err(|_| ProgressUnavailable)?;
+                        }
+                        writeln!(self.writer).map_err(|_| ProgressUnavailable)?;
                     }
                     if !error.tools.is_empty() {
-                        write!(self.writer, "Tools: ").map_err(|_| ProgressUnavailable)?;
-                        self.json(&error.tools)?;
+                        render_tools(&mut self.writer, &error.tools)?;
                     }
                     if !error.agent_choices.is_empty() {
-                        write!(self.writer, "Owned Agents for the selected tool: ")
-                            .map_err(|_| ProgressUnavailable)?;
-                        self.json(&error.agent_choices)?;
+                        render_agent_choices(&mut self.writer, &error.agent_choices)?;
                     }
                     if let Some(code) = error.agent_list_error {
                         write!(self.writer, "Owned Agent list unavailable: ")
@@ -622,16 +667,22 @@ impl<W: Write> Renderer<W> {
                         write!(self.writer, "DevLink MCP plan: ")
                             .map_err(|_| ProgressUnavailable)?;
                         self.json(plan)?;
-                        writeln!(
-                            self.writer,
-                            "Review the project entry; approve with --apply-mcp when ready."
-                        )
-                        .map_err(|_| ProgressUnavailable)?;
+                        if !self.batch {
+                            writeln!(
+                                self.writer,
+                                "Review the project entry and approve with --apply-mcp when ready."
+                            )
+                            .map_err(|_| ProgressUnavailable)?;
+                        }
                     }
                     if let Some(manual) = &error.manual_config {
                         write!(self.writer, "Manual DevLink MCP configuration: ")
                             .map_err(|_| ProgressUnavailable)?;
                         self.json(manual)?;
+                        if manual.tool_type == devlink_broker::sessions::ToolType::Codex {
+                            writeln!(self.writer, "Open the project in Codex and trust it if prompted so Codex loads the project config.")
+                                .map_err(|_| ProgressUnavailable)?;
+                        }
                     }
                     if let Some(result) = &error.mcp_config {
                         write!(self.writer, "MCP configuration result: ")
@@ -661,16 +712,8 @@ impl<W: Write> Renderer<W> {
 
     fn json(&mut self, value: &impl Serialize) -> Result<(), ProgressUnavailable> {
         let json = serde_json::to_string(value).map_err(|_| ProgressUnavailable)?;
-        // Match the CLI's existing escaping of control/bidi characters in public values.
-        for c in json.chars() {
-            if matches!(c, '\u{7f}'..='\u{9f}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
-            {
-                write!(self.writer, "\\u{:04x}", c as u32)
-            } else {
-                write!(self.writer, "{c}")
-            }
-            .map_err(|_| ProgressUnavailable)?;
-        }
+        // serde_json has already escaped ASCII controls.
+        write_public_text(&mut self.writer, &json, false)?;
         writeln!(self.writer)
             .and_then(|_| self.writer.flush())
             .map_err(|_| ProgressUnavailable)
@@ -685,6 +728,31 @@ impl AgentInput for TerminalAgentInput {
     fn interactive(&self) -> bool {
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
     }
+    async fn rename(&mut self) -> Result<String, AgentInputError> {
+        tokio::task::spawn_blocking(|| {
+            let name =
+                read_agent_input("That Agent name is already in use. Enter a different name: ")?;
+            let name = name.trim();
+            if name.is_empty() || name.encode_utf16().count() > 100 {
+                return Err(AgentInputError::Invalid);
+            }
+            Ok(name.to_owned())
+        })
+        .await
+        .map_err(|_| AgentInputError::ReadFailed)?
+    }
+    async fn confirm_issue(&mut self, id: u64) -> Result<(), AgentInputError> {
+        tokio::task::spawn_blocking(move || {
+            let answer = read_agent_input(&format!("Issue a token for Agent {id}? [y/N]: "))?;
+            if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                Ok(())
+            } else {
+                Err(AgentInputError::Cancelled)
+            }
+        })
+        .await
+        .map_err(|_| AgentInputError::ReadFailed)?
+    }
     async fn request(
         &mut self,
         choices: &[AgentChoice],
@@ -695,38 +763,13 @@ impl AgentInput for TerminalAgentInput {
         let choices = choices.to_vec();
         tokio::task::spawn_blocking(move || {
             use devlink_broker::agent_profile::registration::Selection;
-            use std::io::{BufRead, Read};
-            fn read(prompt: &str) -> Result<String, AgentInputError> {
-                let mut stderr = std::io::stderr().lock();
-                write!(stderr, "{prompt}")
-                    .and_then(|_| stderr.flush())
-                    .map_err(|_| AgentInputError::ReadFailed)?;
-                let mut bytes = Vec::new();
-                let n = std::io::stdin()
-                    .lock()
-                    .take(128)
-                    .read_until(b'\n', &mut bytes)
-                    .map_err(|_| AgentInputError::ReadFailed)?;
-                if n == 0 {
-                    return Err(AgentInputError::Cancelled);
-                }
-                if n >= 128 {
-                    return Err(AgentInputError::Invalid);
-                }
-                String::from_utf8(bytes).map_err(|_| AgentInputError::Invalid)
-            }
             if !choices.is_empty() {
-                let stderr = std::io::stderr();
-                let mut renderer = Renderer::new(stderr.lock(), OutputFormat::Json);
-                writeln!(renderer.writer, "Owned Agents for the selected tool:")
-                    .map_err(|_| AgentInputError::ReadFailed)?;
-                renderer
-                    .json(&choices)
+                render_agent_choices(&mut std::io::stderr().lock(), &choices)
                     .map_err(|_| AgentInputError::ReadFailed)?;
             }
-            match read("Agent action (create/use): ")?.trim() {
+            match read_agent_input("Agent action (create/use): ")?.trim() {
                 "create" => Ok(Selection::Create),
-                "use" => parse_team_id(read("Owned Agent ID: ")?.trim())
+                "use" => parse_team_id(read_agent_input("Owned Agent ID: ")?.trim())
                     .map(Selection::Use)
                     .map_err(|_| AgentInputError::Invalid),
                 _ => Err(AgentInputError::Invalid),
@@ -735,6 +778,99 @@ impl AgentInput for TerminalAgentInput {
         .await
         .map_err(|_| AgentInputError::ReadFailed)?
     }
+}
+
+fn render_tools(
+    writer: &mut impl Write,
+    tools: &[devlink_broker::tool_discovery::ToolDetection],
+) -> Result<(), ProgressUnavailable> {
+    writeln!(writer, "Tools").map_err(|_| ProgressUnavailable)?;
+    for tool in tools {
+        let label = match tool.tool_type {
+            ToolType::Codex => "codex",
+            ToolType::ClaudeCode => "claude-code",
+        };
+        if let Some(installation) = &tool.selected {
+            write!(writer, "  {label} ").map_err(|_| ProgressUnavailable)?;
+            write_public_text(writer, &installation.version, true)?;
+            write!(writer, " (").map_err(|_| ProgressUnavailable)?;
+            write_public_text(
+                writer,
+                &mcp_config::host_path(&installation.executable.command),
+                true,
+            )?;
+            writeln!(writer, ")").map_err(|_| ProgressUnavailable)?;
+        } else {
+            let status = match tool.status {
+                DetectionStatus::Available => "available",
+                DetectionStatus::Missing => "missing",
+                DetectionStatus::NotExecutable => "not executable",
+                DetectionStatus::VersionCheckFailed => "version check failed",
+                DetectionStatus::TimedOut => "version check timed out",
+                DetectionStatus::InvalidVersion => "invalid version",
+            };
+            writeln!(writer, "  {label} ({status}) {}", tool.install_url)
+                .map_err(|_| ProgressUnavailable)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_agent_choices(
+    writer: &mut impl Write,
+    choices: &[AgentChoice],
+) -> Result<(), ProgressUnavailable> {
+    writeln!(writer, "Owned Agents for the selected tool").map_err(|_| ProgressUnavailable)?;
+    for choice in choices {
+        write!(writer, "  {}  ", choice.id).map_err(|_| ProgressUnavailable)?;
+        write_public_text(writer, &choice.name, true)?;
+        write!(writer, " (").map_err(|_| ProgressUnavailable)?;
+        write_public_text(writer, &choice.project_name, true)?;
+        writeln!(writer, ")").map_err(|_| ProgressUnavailable)?;
+    }
+    Ok(())
+}
+
+fn write_public_text(
+    writer: &mut impl Write,
+    text: &str,
+    escape_ascii_controls: bool,
+) -> Result<(), ProgressUnavailable> {
+    for c in text.chars() {
+        if (escape_ascii_controls && c.is_ascii_control())
+            || matches!(c, '\u{7f}'..='\u{9f}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        {
+            write!(writer, "\\u{:04x}", c as u32)
+        } else {
+            write!(writer, "{c}")
+        }
+        .map_err(|_| ProgressUnavailable)?;
+    }
+    Ok(())
+}
+
+fn read_agent_input(prompt: &str) -> Result<String, AgentInputError> {
+    use std::io::{BufRead, Read};
+    const MAX_INPUT: u64 = 512;
+    {
+        let mut stderr = std::io::stderr().lock();
+        write!(stderr, "{prompt}")
+            .and_then(|_| stderr.flush())
+            .map_err(|_| AgentInputError::ReadFailed)?;
+    }
+    let mut bytes = Vec::new();
+    let n = std::io::stdin()
+        .lock()
+        .take(MAX_INPUT)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| AgentInputError::ReadFailed)?;
+    if n == 0 {
+        return Err(AgentInputError::Cancelled);
+    }
+    if n as u64 >= MAX_INPUT {
+        return Err(AgentInputError::Invalid);
+    }
+    String::from_utf8(bytes).map_err(|_| AgentInputError::Invalid)
 }
 
 struct TerminalMcpInput;

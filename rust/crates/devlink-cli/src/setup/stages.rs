@@ -110,6 +110,7 @@ struct ToolState {
 #[derive(Default)]
 struct AgentState {
     issue_token: bool,
+    confirmed_token_agent: Option<u64>,
     selection: Option<Selection>,
     waiting: bool,
     registration: Option<Registration>,
@@ -498,11 +499,34 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
             }
         }
         if required.step == Step::RegisterAgent {
-            let code = match self.agent_input.request(&required.agent_choices).await {
-                Ok(selection) => {
-                    self.agents.selection = Some(selection);
-                    return Ok(());
+            let resolved = match required.code {
+                ErrorCode::AgentAlreadyExists => self.agent_input.rename().await.map(|name| {
+                    if let Some(project) = &mut self.project.prepared {
+                        project.metadata.agent_name = name;
+                    }
+                }),
+                ErrorCode::TokenRequired => {
+                    let id = required
+                        .known
+                        .agent_id
+                        .as_deref()
+                        .and_then(|id| id.parse().ok())
+                        .ok_or_else(|| required.clone())?;
+                    self.agent_input.confirm_issue(id).await.map(|()| {
+                        self.agents.selection = None;
+                        self.agents.confirmed_token_agent = Some(id);
+                    })
                 }
+                _ => self
+                    .agent_input
+                    .request(&required.agent_choices)
+                    .await
+                    .map(|selection| {
+                        self.agents.selection = Some(selection);
+                    }),
+            };
+            let code = match resolved {
+                Ok(()) => return Ok(()),
                 Err(AgentInputError::Unavailable) => return Err(required.clone()),
                 Err(AgentInputError::Invalid) => ErrorCode::InputInvalid,
                 Err(AgentInputError::Cancelled) => ErrorCode::Cancelled,
@@ -661,6 +685,14 @@ fn project_error(step: Step, failure: setup_project::Failure) -> SetupError {
 fn broker_error(path: &std::path::Path, error: &anyhow::Error) -> SetupError {
     use broker_control::{Failure, FailureKind};
     let failure = error.downcast_ref::<Failure>();
+    if let Some(Failure {
+        kind: FailureKind::Port(problem),
+        file,
+        ..
+    }) = failure
+    {
+        return SetupError::broker_port_failure(file.clone(), problem.message());
+    }
     let code = match failure.map(|f| f.kind) {
         Some(FailureKind::InvalidConfig) => ErrorCode::ConfigInvalid,
         Some(FailureKind::ConfigBusy) => ErrorCode::ConfigBusy,
@@ -1322,8 +1354,10 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
             project: project.clone(),
             tool: tool.tool_type,
         };
+        self.agents.waiting = false;
         self.agents.creation_pending = false;
         self.agents.issuance_pending = false;
+        let confirmed_token_agent = self.agents.confirmed_token_agent.take();
         let result = registration::ensure_tracked(
             &context.config_path,
             &expected,
@@ -1334,6 +1368,18 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
         self.agents.creation_pending = matches!(
             &result, Ok(registration) if registration.state == RegistrationState::CreationUnknown
         );
+        if let Some(id) = confirmed_token_agent
+            && matches!(&result, Ok(registered) if registered.agent_id != Some(id))
+        {
+            let mut error = SetupError::new(
+                ErrorCode::AgentBindingConflict,
+                Step::RegisterAgent,
+                Outcome::NotApplied,
+            );
+            error.known.agent_id = Some(id.to_string());
+            return StepResult::Failed(error);
+        }
+        let mut can_prompt_token = false;
         let result = match result {
             Ok(mut registered)
                 if matches!(
@@ -1349,7 +1395,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 // A grant belongs to one attempt, including an unknown outcome.
                 // Retrying this stage cannot silently reuse an issuance grant.
                 let explicit_issue = std::mem::take(&mut self.agents.issue_token);
-                let permission = registered.created || explicit_issue;
+                let permission =
+                    registered.created || explicit_issue || confirmed_token_agent == Some(id);
                 self.agents.registration = Some(registered.clone());
                 let issued = tokens::ensure_tracked(
                     &context.config_path,
@@ -1364,6 +1411,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 self.agents.issuance_pending = issuance_unconfirmed(&issued);
                 match issued {
                     Ok(prepared) => {
+                        can_prompt_token = !permission && !prepared.verified;
                         registered.state = if prepared.verified {
                             RegistrationState::Ready
                         } else {
@@ -1471,8 +1519,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 }
                 if code == ErrorCode::AgentAlreadyExists {
                     error.required_inputs.push(RequiredInput {
-                        field: "agent.action",
-                        kind: InputKind::Selection,
+                        field: "agent.name",
+                        kind: InputKind::Value,
                         secret: false,
                         source: InputSource::Input,
                     });
@@ -1504,6 +1552,14 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                 | ErrorCode::AgentForbidden
         ) {
             add_agent_choices(&mut error, &context.config_path, &expected).await;
+        }
+        if self.agent_input.interactive()
+            && ((error.code == ErrorCode::AgentAlreadyExists
+                && self.agents.selection == Some(Selection::Create))
+                || (error.code == ErrorCode::TokenRequired && can_prompt_token))
+        {
+            self.agents.waiting = true;
+            return StepResult::InputRequired(error);
         }
         StepResult::Failed(error)
     }
@@ -2035,7 +2091,8 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
 }
 fn mcp_error(step: Step, error: mcp_config::ConfigError) -> SetupError {
     let code = match error.code {
-        "SETUP_INPUT_INVALID" | "SETUP_PROJECT_INVALID" => ErrorCode::InputInvalid,
+        "SETUP_INPUT_INVALID" => ErrorCode::InputInvalid,
+        "SETUP_PROJECT_INVALID" => ErrorCode::ProjectPathInvalid,
         "SETUP_TOOL_UNAVAILABLE" => ErrorCode::ToolUnavailable,
         "SETUP_UNSAFE_FILE" => ErrorCode::UnsafeFile,
         "SETUP_AUTH_BUSY" => ErrorCode::AuthBusy,
@@ -2067,6 +2124,11 @@ fn mcp_error(step: Step, error: mcp_config::ConfigError) -> SetupError {
         }
     }
     if code != ErrorCode::InternalError {
+        safe.location = error
+            .path
+            .as_deref()
+            .cloned()
+            .map(|file| ErrorLocation { file, field: None });
         safe.mcp_error = Some(error);
     }
     safe
@@ -2079,6 +2141,7 @@ mod tests {
         for rollback in ["restored", "failed", "conflict", "not_needed"] {
             let backup = std::path::PathBuf::from("safe-private-backup");
             let provider = mcp_config::ConfigError {
+                path: None,
                 code: "SETUP_MCP_CONFIG_WRITE_FAILED",
                 outcome: "unknown",
                 rollback,
