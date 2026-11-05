@@ -966,6 +966,48 @@ foreach ($line in [System.IO.File]::ReadAllLines($env:DEVLINK_ACL_CASES)) {
     }
 
     #[cfg(windows)]
+    fn assert_private_windows_dacl(path: &Path, sid: &str) {
+        use std::os::windows::process::CommandExt;
+        // Inspect the descriptor's semantics independently of the native writer.
+        // The SDDL auto-inheritance marker and SID formatting can vary by runner.
+        const SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$p = $env:DEVLINK_TEST_ACL_PATH
+$isDir = [System.IO.Directory]::Exists($p)
+$acl = if ($isDir) { [System.IO.Directory]::GetAccessControl($p) } else { [System.IO.File]::GetAccessControl($p) }
+$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+$dacl = $raw.DiscretionaryAcl
+$flags = 0
+if ($isDir) {
+  $flags = [int][System.Security.AccessControl.AceFlags]::ContainerInherit -bor [int][System.Security.AccessControl.AceFlags]::ObjectInherit
+}
+if (-not $acl.AreAccessRulesProtected -or $null -eq $dacl -or $dacl.Count -ne 1) {
+  throw "Expected a protected DACL with one ACE; got $($acl.GetSecurityDescriptorSddlForm('Access'))"
+}
+$ace = $dacl[0]
+if ($ace.AceType -ne [System.Security.AccessControl.AceType]::AccessAllowed -or
+    [int]$ace.AceFlags -ne $flags -or
+    $ace.AccessMask -ne [int][System.Security.AccessControl.FileSystemRights]::FullControl -or
+    $ace.SecurityIdentifier.Value -ne $env:DEVLINK_TEST_ACL_SID) {
+  throw "Unexpected private ACE; got $($acl.GetSecurityDescriptorSddlForm('Access'))"
+}
+"#;
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("DEVLINK_TEST_ACL_PATH", path)
+            .env("DEVLINK_TEST_ACL_SID", sid)
+            .stdin(std::process::Stdio::null())
+            .creation_flags(0x08000000)
+            .output()
+            .expect("Failed to inspect the private Windows DACL");
+        assert!(
+            output.status.success(),
+            "Private Windows DACL mismatch: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn native_private_permissions_leave_only_a_protected_user_ace() {
         let sid = current_user_sid().unwrap();
@@ -974,9 +1016,8 @@ foreach ($line in [System.IO.File]::ReadAllLines($env:DEVLINK_ACL_CASES)) {
         fs::write(&file, b"{}").unwrap();
         set_private_permissions(dir.path()).unwrap();
         set_private_permissions(&file).unwrap();
-        // Same descriptor `icacls /inheritance:r /grant:r *SID:(OI)(CI)(F)` produced.
-        assert!(get_sddl(dir.path()).ends_with(&format!("D:PAI(A;OICI;FA;;;{sid})")));
-        assert!(get_sddl(&file).ends_with(&format!("D:PAI(A;;FA;;;{sid})")));
+        assert_private_windows_dacl(dir.path(), &sid);
+        assert_private_windows_dacl(&file, &sid);
         verify_private_permissions(&file).unwrap();
         verify_directory_permissions(dir.path()).unwrap();
         // A later explicit grant is replaced, not kept beside the user ACE.
@@ -988,7 +1029,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($env:DEVLINK_ACL_CASES)) {
         assert!(grant.status.success());
         assert!(verify_private_permissions(&file).is_err());
         set_private_permissions(&file).unwrap();
-        assert!(get_sddl(&file).ends_with(&format!("D:PAI(A;;FA;;;{sid})")));
+        assert_private_windows_dacl(&file, &sid);
     }
 
     #[cfg(windows)]
