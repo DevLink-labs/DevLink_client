@@ -29,9 +29,9 @@ impl std::fmt::Display for PortFailure {
                 f,
                 "Broker loopback port {port} is in use or its bind was denied"
             ),
-            Self::AssignmentFailed => {
-                f.write_str("Cannot assign a broker port outside the Windows dynamic TCP range")
-            }
+            Self::AssignmentFailed => f.write_str(
+                "Cannot assign a broker port outside the system's dynamic TCP port ranges",
+            ),
         }
     }
 }
@@ -47,9 +47,9 @@ fn unavailable(error: &io::Error) -> bool {
 }
 
 pub(super) async fn bind(config: &Config) -> Result<TcpListener> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     if config.local_port_pending {
-        return windows::bind_setup_port().await;
+        return setup_port::bind().await;
     }
     TcpListener::bind((Ipv4Addr::LOCALHOST, config.local_port))
         .await
@@ -62,11 +62,136 @@ pub(super) async fn bind(config: &Config) -> Result<TcpListener> {
         })
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod setup_port {
+    use super::{PortFailure, unavailable};
+    use crate::config::DEFAULT_LOCAL_PORT;
+    use anyhow::{Context, Result};
+    use std::{io, net::Ipv4Addr, ops::RangeInclusive};
+    use tokio::net::TcpListener;
+
+    const LAST_REGISTERED_PORT: u16 = 49151;
+    const FIRST_REGISTERED_PORT: u16 = 1024;
+
+    fn candidates(dynamic: &[RangeInclusive<u16>]) -> impl Iterator<Item = u16> + '_ {
+        (DEFAULT_LOCAL_PORT..=LAST_REGISTERED_PORT)
+            .chain((FIRST_REGISTERED_PORT..DEFAULT_LOCAL_PORT).rev())
+            .filter(move |port| !dynamic.iter().any(|range| range.contains(port)))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parse_linux_range(value: &str) -> Option<RangeInclusive<u16>> {
+        let mut ports = value.split_whitespace();
+        let start = ports.next()?.parse::<u16>().ok()?;
+        let end = ports.next()?.parse::<u16>().ok()?;
+        (start > 0 && end >= start && ports.next().is_none()).then_some(start..=end)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_ranges() -> Result<Vec<RangeInclusive<u16>>> {
+        let value = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .context("Cannot read the Linux IPv4 dynamic port range")?;
+        Ok(vec![
+            parse_linux_range(&value).context("Unexpected Linux IPv4 dynamic port range")?,
+        ])
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_ranges() -> Result<Vec<RangeInclusive<u16>>> {
+        use std::ffi::CStr;
+
+        fn port(name: &CStr) -> Result<u16> {
+            let mut value: libc::c_int = 0;
+            let mut len = std::mem::size_of_val(&value);
+            // These sysctls return a C int. The buffer is writable for len bytes.
+            let result = unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr(),
+                    std::ptr::from_mut(&mut value).cast(),
+                    &mut len,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error())
+                    .context("Cannot query the macOS IPv4 port range");
+            }
+            anyhow::ensure!(
+                len == std::mem::size_of_val(&value) && value > 0,
+                "Unexpected macOS IPv4 port"
+            );
+            u16::try_from(value).context("Invalid macOS IPv4 port")
+        }
+
+        let first = port(c"net.inet.ip.portrange.first")?;
+        let last = port(c"net.inet.ip.portrange.last")?;
+        let high_first = port(c"net.inet.ip.portrange.hifirst")?;
+        let high_last = port(c"net.inet.ip.portrange.hilast")?;
+        // XNU supports both ascending and descending endpoints.
+        Ok(vec![
+            first.min(last)..=first.max(last),
+            high_first.min(high_last)..=high_first.max(high_last),
+        ])
+    }
+
+    pub(super) async fn bind() -> Result<TcpListener> {
+        #[cfg(windows)]
+        let ranges = super::windows::active_dynamic_range()
+            .await
+            .map(|range| vec![range]);
+        #[cfg(target_os = "linux")]
+        let ranges = linux_ranges();
+        #[cfg(target_os = "macos")]
+        let ranges = macos_ranges();
+
+        let ranges = ranges.context(PortFailure::AssignmentFailed)?;
+        for port in candidates(&ranges) {
+            match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
+                Ok(listener) => return Ok(listener),
+                Err(error)
+                    if unavailable(&error) || error.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(error) => return Err(error).context("Cannot bind broker loopback port"),
+            }
+        }
+        Err(PortFailure::AssignmentFailed.into())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn avoids_dynamic_ranges_and_prefers_ports_near_the_default() {
+            for (dynamic, expected) in [
+                (49152..=65535, Some(DEFAULT_LOCAL_PORT)),
+                (32768..=60999, Some(32767)),
+                (43126..=43128, Some(43129)),
+                (43127..=65535, Some(43126)),
+                (1024..=65535, None),
+            ] {
+                assert_eq!(candidates(std::slice::from_ref(&dynamic)).next(), expected);
+            }
+            assert_eq!(
+                candidates(&[43126..=43128, 43129..=43131]).next(),
+                Some(43132)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn parses_linux_kernel_port_range() {
+            assert_eq!(parse_linux_range("44620\t48715\n"), Some(44620..=48715));
+            assert_eq!(parse_linux_range("60999 32768"), None);
+            assert_eq!(parse_linux_range("0 65535"), None);
+            assert_eq!(parse_linux_range("32768 60999 1"), None);
+        }
+    }
+}
+
 #[cfg(windows)]
 mod windows {
-    use super::*;
-    use crate::config::DEFAULT_LOCAL_PORT;
-    use anyhow::Context;
+    use anyhow::{Context, Result};
     use std::{
         ffi::OsString, ops::RangeInclusive, os::windows::ffi::OsStringExt, path::PathBuf,
         process::Stdio, time::Duration,
@@ -76,15 +201,6 @@ mod windows {
         Foundation::MAX_PATH, System::SystemInformation::GetSystemDirectoryW,
         System::Threading::CREATE_NO_WINDOW,
     };
-
-    const LAST_REGISTERED_PORT: u16 = 49151;
-    const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
-
-    fn candidates(dynamic: RangeInclusive<u16>) -> impl Iterator<Item = u16> {
-        (DEFAULT_LOCAL_PORT..=LAST_REGISTERED_PORT)
-            .chain((FIRST_UNPRIVILEGED_PORT..DEFAULT_LOCAL_PORT).rev())
-            .filter(move |port| !dynamic.contains(port))
-    }
 
     fn parse_dynamic_range(output: &str) -> Option<RangeInclusive<u16>> {
         // netsh localizes the labels. The start and count are the numeric values.
@@ -101,7 +217,7 @@ mod windows {
         Some(u16::try_from(start).ok()?..=u16::try_from(end).ok()?)
     }
 
-    async fn active_dynamic_range() -> Result<RangeInclusive<u16>> {
+    pub(super) async fn active_dynamic_range() -> Result<RangeInclusive<u16>> {
         let mut system_dir = [0u16; MAX_PATH as usize];
         // The buffer is writable for the number of UTF-16 units passed to Windows.
         let length = unsafe { GetSystemDirectoryW(system_dir.as_mut_ptr(), MAX_PATH) } as usize;
@@ -134,20 +250,6 @@ mod windows {
             .context("Unexpected Windows IPv4 dynamic TCP range")
     }
 
-    pub(super) async fn bind_setup_port() -> Result<TcpListener> {
-        let dynamic = active_dynamic_range()
-            .await
-            .context(PortFailure::AssignmentFailed)?;
-        for port in candidates(dynamic) {
-            match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
-                Ok(listener) => return Ok(listener),
-                Err(error) if unavailable(&error) => {}
-                Err(error) => return Err(error).context("Cannot bind broker loopback port"),
-            }
-        }
-        Err(PortFailure::AssignmentFailed.into())
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -166,13 +268,11 @@ mod windows {
         }
 
         #[test]
-        fn avoids_custom_dynamic_range_and_prefers_ports_near_the_default() {
-            assert_eq!(candidates(49152..=65535).next(), Some(DEFAULT_LOCAL_PORT));
-            assert_eq!(candidates(43126..=43128).next(), Some(43129));
-            assert_eq!(candidates(43127..=65535).next(), Some(43126));
-            assert_eq!(candidates(1024..=65535).next(), None);
-            assert!(unavailable(&io::Error::from_raw_os_error(10013)));
-            assert!(unavailable(&io::Error::from_raw_os_error(10048)));
+        fn windows_port_conflicts_include_excluded_ports() {
+            use crate::broker::ports::unavailable;
+            use std::io::Error;
+            assert!(unavailable(&Error::from_raw_os_error(10013)));
+            assert!(unavailable(&Error::from_raw_os_error(10048)));
         }
     }
 }

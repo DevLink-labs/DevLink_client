@@ -1934,6 +1934,16 @@ async fn first_setup_port_and_mcp_local_token_survive_normal_restart() {
         assert_ne!(saved.local_port, 43127);
         assert!((1024..=49151).contains(&saved.local_port));
     }
+    #[cfg(target_os = "linux")]
+    {
+        let configured = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+        let mut endpoints = configured
+            .split_whitespace()
+            .map(|port| port.parse::<u16>().unwrap());
+        let first = endpoints.next().unwrap();
+        let last = endpoints.next().unwrap();
+        assert!(!(first..=last).contains(&saved.local_port));
+    }
     assert!(!saved.local_port_pending);
     devlink_broker::credentials::verify_private_permissions(&f.path).unwrap();
     let saved_bytes = std::fs::read(&f.path).unwrap();

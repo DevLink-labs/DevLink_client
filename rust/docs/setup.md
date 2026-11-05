@@ -34,7 +34,7 @@ devlink setup --mcp-mode manual
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-setup으로 새로 만든 프로필은 첫 기동에 실제로 바인딩한 루프백 포트를 `localPort`에 저장하고, 이후 같은 포트를 사용한다. Windows에서는 현재 IPv4 동적 TCP 범위를 조회해 그 범위를 피한다. `43127–49151`을 우선 확인하고, 필요하면 `43126`부터 `1024`까지 내려가며 점유됐거나 바인딩이 거부된 포트를 건너뛴다.
+setup으로 새로 만든 프로필은 첫 기동에 실제로 바인딩한 루프백 포트를 `localPort`에 저장하고, 이후 같은 포트를 사용한다. Windows·Linux·macOS에서는 현재 IPv4 임시 포트 범위를 읽어 후보에서 제외한다. `43127–49151`을 우선 확인하고, 필요하면 `43126`부터 `1024`까지 내려가며 점유됐거나 바인딩이 거부된 포트를 건너뛴다. 범위를 읽을 수 없거나 사용 가능한 후보가 없으면 고정 포트를 명시하도록 안내한다.
 
 기존 고정 포트가 점유됐거나 OS가 바인딩을 거부하면 `devlink --config <FILE> config set localPort <FREE_PORT>`로 사용 가능한 고정 포트를 지정한다. 기존 자동 포트 프로필을 고정할 때도 같은 명령을 사용한다. 실행 중인 브로커는 설정 변경 후 재시작하며, 주소가 바뀌면 Host도 다시 연다.
 
@@ -394,7 +394,7 @@ validate는 설정 생성·로그인·팀 조회 전에 경로만 검사한다. 
 
 bind_project는 프로필·Agent/MCP 자격을 쓰거나 토큰을 발급/회전하지 않는다. 성공은 `outcome:not_applied`이며 기존 프로젝트를 재사용하면 `reused:true`다. 결과는 `SetupStages::project()`의 PreparedProject에 보관해 후속 도구·등록 단계에서 사용한다. 실제 프로필 저장은 후속 register_agent의 역할이다. 로컬 root를 가진 PreparedProject는 Serialize를 구현하지 않고, AgentMetadata는 이름·프로젝트 표시명·역할만 직렬화한다. 기존 create 요청도 이 공개 필드와 toolType만 중앙에 보내고 projectRoot는 로컬 비공개 프로필에만 저장한다.
 
-없는 경로/파일은 `SETUP_PROJECT_PATH_INVALID`/종료 2, 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`/종료 5다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 작업 06 종료 당시에는 select_tool에서 종료 3이었으며 작업 07에서 도구 선택을 연결했다.
+없는 경로 또는 디렉터리가 아닌 경로는 `SETUP_PROJECT_INVALID`와 종료 2를 반환한다. 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`와 종료 5를 반환한다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 작업 06 종료 당시에는 select_tool에서 종료 3이었으며 작업 07에서 도구 선택을 연결했다.
 
 ### 작업 06 검증 결과
 
@@ -462,7 +462,7 @@ stop은 control.lock 안에서 health를 인증한 뒤 같은 control token으�
 
 프로필 변경·중앙 Agent 토큰 발급·계정 전환 전의 기존 agent_profile::stopped는 이제 require_stopped를 공유한다. control.lock과 broker.lock을 모두 잡아 변경이 끝날 때까지 유지하며 runtime 발행 전 기동 중인 브로커도 차단한다. 기존 AuthFault 분류와 복구 안내를 보존한다. 실행 중인 브로커를 setup이 자동 중지하지 않으며 devlink stop을 명시적으로 실행하도록 안내한다. 사용자가 정상 중지한 뒤 변경을 재시도하면 같은 잠금 검사를 다시 수행한다. 기존 MCP 자격 회전의 중지 요구 정책도 유지한다.
 
-setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStages::broker()에 보관한다. 신규 기동은 applied/reused:false, 재사용은 not_applied/reused:true다. 공통 실행부의 시작/신원 검증 실패는 SETUP_BROKER_START_FAILED/종료 5·inspect_broker_then_retry로, 설정/잠금/자격 실패는 기존 setup 코드로 매핑한다. broker.lock은 잡혀 있지만 runtime.json이 아직 발행되지 않은 기동 중 브로커(BrokerStarting)는 잠시 뒤 다시 시도하면 풀리므로 SETUP_UNSAFE_FILE 대신 재시도 가능한 SETUP_BROKER_BUSY/종료 6으로 보고한다. runtime.json이 있으나 읽을 수 없는 경우만 Storage/SETUP_UNSAFE_FILE이다. 작업 08~10의 Agent 등록 흐름을 대신 구현하거나 건너뛰지는 않는다. 현재 일반 setup은 register_agent에서 종료 3이며 어댑터 통합 검사는 이미 등록된 합성 프로필에서 StartBroker를 호출해 검증한다.
+setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStages::broker()에 보관한다. 신규 기동은 applied/reused:false, 재사용은 not_applied/reused:true다. 공통 실행부의 시작 또는 신원 검증 실패는 `SETUP_BROKER_START_FAILED`, 종료 7, `inspect_local_broker`로 보고한다. 설정·잠금·자격 실패에는 각각의 setup 오류 코드를 적용한다. broker.lock이 잡혀 있고 runtime.json이 아직 발행되지 않은 기동 중 브로커(BrokerStarting)는 재시도 가능한 `SETUP_BROKER_BUSY`와 종료 6으로 보고한다. runtime.json이 있으나 읽을 수 없는 경우는 Storage/`SETUP_UNSAFE_FILE`이다. 작업 11 검증 당시에는 일반 setup이 register_agent에서 종료 3으로 멈췄고, 통합 검사는 이미 등록된 합성 프로필에서 StartBroker를 호출했다.
 
 ### 작업 11 검증 결과
 

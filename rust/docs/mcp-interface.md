@@ -32,7 +32,7 @@ Agent ID의 영속 저장·기존 ID 재사용·토큰 관리는 [Agent bootstra
 
 ## 로컬 연결과 제어 API
 
-- 전송은 HTTP/1.1 JSON이며 IPv4 `127.0.0.1`에만 바인딩합니다. `setup`으로 새로 만든 프로필은 첫 기동에서 바인딩한 포트를 저장하고 이후 같은 포트를 사용합니다. Windows에서는 첫 포트 선택 시 현재 동적 TCP 범위를 피합니다. `init`과 `localPort`를 생략한 기존 프로필의 기본값은 43127입니다. MCP URL 검증과 맞추기 위해 포트 80은 거부합니다.
+- 전송은 HTTP/1.1 JSON이며 IPv4 `127.0.0.1`에만 바인딩합니다. `setup`으로 새로 만든 프로필은 첫 기동에서 바인딩한 포트를 저장하고 이후 같은 포트를 사용합니다. Windows·Linux·macOS에서는 첫 포트 선택 시 시스템의 현재 IPv4 임시 포트 범위를 제외합니다. `init`과 `localPort`를 생략한 기존 프로필의 기본값은 43127입니다. MCP URL 검증과 맞추기 위해 포트 80은 거부합니다.
 - 발견: Rust CLI는 설정 디렉터리 아래의 `.devlink-runtime/runtime.json`을 읽고 MCP는 같은 디렉터리의 `broker.json`을 읽습니다. `devlink [--config <FILE>] mcp path`는 자격 파일 경로만 출력하며 파일을 생성하지 않습니다. 브로커 기동 시 스냅샷을 발행합니다. `broker.lock`과 `control.lock`도 `.devlink-runtime/`에 저장하며, 설정 디렉터리당 한 인스턴스입니다. 구버전 브로커는 업그레이드 전에 구버전 CLI로 종료해야 합니다.
 - 런타임 필드: `apiVersion`, `pid`, `port`, `instanceId`, `controlToken`. 토큰과 전체 런타임 JSON은 로그·Tool 응답에 포함하지 않습니다.
 - 인증: `Authorization: Bearer <토큰>`을 사용합니다. CLI의 `controlToken`과 MCP의 `localToken` 모두 health를 조회할 수 있지만 `/shutdown`은 CLI 제어 토큰만 허용합니다. `Origin`이 있는 브라우저 요청은 거절하며 CORS 허용 헤더를 제공하지 않습니다.

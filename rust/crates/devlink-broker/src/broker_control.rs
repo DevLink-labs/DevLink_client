@@ -53,7 +53,7 @@ impl PortProblem {
                 "The configured broker loopback port is in use or the OS denied the bind. Run devlink --config <FILE> config set localPort <FREE_PORT> with this profile's configuration file, then retry. Reopen any running Host if the port changes."
             }
             Self::AssignmentFailed => {
-                "Setup could not assign a broker port outside the Windows dynamic TCP range. Check the active IPv4 TCP range and port exclusions, or set an available fixed port with devlink --config <FILE> config set localPort <FREE_PORT> and retry."
+                "Setup could not assign a broker port outside the system's dynamic TCP port ranges. Check the active IPv4 TCP ranges and port restrictions, or set an available fixed port with devlink --config <FILE> config set localPort <FREE_PORT> and retry."
             }
         }
     }
