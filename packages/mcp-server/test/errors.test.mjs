@@ -256,6 +256,32 @@ test('a mutation aborted before any response preserves the caller-known task and
   assert.equal(broker.calls.filter(call => call.body.operation === 'update_task_status').length, 1);
 });
 
+test('question and answer keys survive a lost response so the retry can reuse them', async (t) => {
+  const { broker, client } = await fixture(t);
+  await client.execute('get_tasks', {});
+  for (const [operation, args] of [
+    ['ask_question', { taskId: '101', message: 'Which API?', requestKey: 'issued-question-key' }],
+    ['answer_question', { taskId: '101', questionEventId: '501', message: 'v2', requestKey: 'issued-answer-key' }],
+  ]) {
+    const entered = gate();
+    broker.setHook(({ body }) => {
+      if (body.operation !== operation) return false;
+      entered.resolve();
+      return true;
+    });
+    const controller = new AbortController();
+    const pending = faultOf(client.execute(operation, args, { signal: controller.signal, mcpRequestId: operation }));
+    await entered.promise;
+    controller.abort();
+    const error = await pending;
+    assert.equal(error.code, 'REQUEST_ABORTED');
+    assert.equal(error.outcome, 'unknown');
+    assert.equal(error.requestKey, args.requestKey);
+    assert.equal(error.taskId, '101');
+    await drained(client);
+  }
+});
+
 test('a caller create_task key survives a lost response so the retry can reuse it', async (t) => {
   const { broker, client } = await fixture(t);
   await client.execute('get_tasks', {});

@@ -24,6 +24,8 @@ const samples = {
   update_task_status: { taskId: 'task-1', version: '0', status: 'IN_PROGRESS' },
   complete_task: { taskId: 'task-1', version: '1', resultText: 'Done\nVerification: npm test passed', taskFiles: [{ relativePath: 'src/example.ts', changeType: 'MODIFIED', diffText: '- old\n+ new' }] },
   get_tasks: {}, get_task_result: { taskId: 'task-1' }, get_updates: {},
+  ask_question: { taskId: 'task-1', message: 'Which API version applies?', requestKey: 'question-1' },
+  answer_question: { taskId: 'task-1', questionEventId: '501', message: 'Use v2.', requestKey: 'answer-1' },
 };
 async function connected(t, { brokerClient, extensions } = {}) {
   const broker = await fakeBroker();
@@ -42,10 +44,10 @@ async function invalid(client, name, args) {
   } catch (error) { assert.equal(error.code, -32602); }
 }
 
-test('all eight business tools use the common invocation/result path and trusted broker context', async (t) => {
+test('all ten business tools use the common invocation/result path and trusted broker context', async (t) => {
   const { client, broker } = await connected(t);
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 11);
+  assert.equal(listed.tools.length, 13);
   assert.equal(broker.calls.length, 0);
   for (const [name, args] of Object.entries(samples)) {
     const result = await client.callTool({ name, arguments: args });
@@ -65,6 +67,14 @@ test('all eight business tools use the common invocation/result path and trusted
   assert.equal(rejected.isError, undefined);
   const forwarded = broker.calls.findLast((c) => c.path === operationRoutes.update_task_status);
   assert.deepEqual(forwarded.body.arguments, reject);
+  const question = { taskId: 'task-1', message: '  같은 Task 질문\n원문  ' };
+  assert.equal((await client.callTool({ name: 'ask_question', arguments: question })).isError, undefined);
+  const asked = broker.calls.findLast((c) => c.path === operationRoutes.ask_question).body.arguments;
+  assert.equal(asked.message, question.message);
+  assert.match(asked.requestKey, /^[0-9a-f-]{36}$/, 'MCP issues a key so a lost response can be retried');
+  const answerArgs = { ...samples.answer_question, message: '가'.repeat(8_000) };
+  assert.equal((await client.callTool({ name: 'answer_question', arguments: answerArgs })).isError, undefined);
+  assert.deepEqual(broker.calls.findLast((c) => c.path === operationRoutes.answer_question).body.arguments, answerArgs);
   const retry = { ...samples.create_task, requestKey: 'agent-chosen-key' };
   assert.equal((await client.callTool({ name: 'create_task', arguments: retry })).isError, undefined);
   assert.deepEqual(broker.calls.findLast((c) => c.path === operationRoutes.create_task).body.arguments, retry);
@@ -92,6 +102,11 @@ test('invalid inputs and actor overrides are rejected before any session or brok
     ['get_task_result', { taskId: 1 }],
     ['get_updates', { limit: 51 }],
     ['get_updates', { cursor: '' }],
+    ...['', '   ', 'x'.repeat(8_001), 'nul\0inside'].map(message => ['ask_question', { ...samples.ask_question, message }]),
+    ...['0', '01', 'q', 501, '9223372036854775808'].map(questionEventId => ['answer_question', { ...samples.answer_question, questionEventId }]),
+    ['answer_question', { taskId: 'task-1', message: 'missing question' }],
+    ['ask_question', { ...samples.ask_question, requestKey: 'a b' }],
+    ['ask_question', { ...samples.ask_question, questionEventId: '501' }],
     ['complete_task', { taskId: 'task', result: { summary: '' } }],
   ]) await invalid(client, name, args);
   assert.equal(broker.calls.length, 0);
@@ -117,7 +132,7 @@ test('a functional module extends registration without changing the registry; un
     handler: async () => { if (name === 'throws_secret') throw new Error('secret raw internal detail'); return { privateToken: 'secret raw internal detail' }; },
   }))];
   const { client, broker } = await connected(t, { extensions: examples });
-  assert.equal((await client.listTools()).tools.length, 14);
+  assert.equal((await client.listTools()).tools.length, 16);
   assert.deepEqual((await client.callTool({ name: 'example_echo', arguments: { message: 'hello' } })).structuredContent, { message: 'hello' });
   for (const name of ['throws_secret', 'invalid_output']) {
     const result = await client.callTool({ name, arguments: {} });
@@ -135,7 +150,7 @@ test('missing broker settings produce a tool error while diagnostics remain usab
   const result = await client.callTool({ name: 'register_agent', arguments: samples.register_agent });
   assert.equal(result.structuredContent.error.code, 'CREDENTIAL_FILE_INVALID');
   assert.equal((await client.callTool({ name: 'devlink_ping', arguments: {} })).structuredContent.status, 'ok');
-  assert.equal((await client.listTools()).tools.length, 11);
+  assert.equal((await client.listTools()).tools.length, 13);
   assert.equal(broker.calls.length, 0);
 });
 
@@ -162,7 +177,7 @@ for (const mode of ['legacy', { pin: '2026-07-28' }]) {
     transport.stderr.on('data', (chunk) => { logs += chunk; });
     t.after(async () => { await client.close(); try { await file.cleanup(); } finally { await broker.close(); } });
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 11);
+    assert.equal((await client.listTools()).tools.length, 13);
     await invalid(client, 'create_task', { ...samples.create_task, teamId: 'forged' });
     await client.callTool({ name: 'devlink_ping', arguments: {} });
     assert.equal(broker.calls.length, 0);

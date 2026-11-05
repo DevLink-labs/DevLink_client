@@ -20,7 +20,7 @@ async function connect(t) {
 test('published correlation key schema advertises the actual 64-unit limit', async (t) => {
   const { client, broker } = await connect(t);
   const tools = (await client.listTools()).tools;
-  for (const name of ['create_task', 'update_task_status', 'complete_task', 'get_task_result']) {
+  for (const name of ['create_task', 'update_task_status', 'complete_task', 'get_task_result', 'ask_question', 'answer_question']) {
     assert.equal(tools.find(tool => tool.name === name).inputSchema.properties.requestKey.maxLength, 64);
   }
   assert.equal(broker.calls.length, 0);
