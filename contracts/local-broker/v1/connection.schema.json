@@ -134,6 +134,8 @@
             "TASK_STATE_CONFLICT",
             "TASK_VERSION_CONFLICT",
             "TASK_SAVE_FAILED",
+            "TASK_CONVERSATION_UNAVAILABLE",
+            "INVALID_QUESTION_REFERENCE",
             "RESOURCE_NOT_FOUND",
             "REQUEST_KEY_CONFLICT",
             "BROKER_STORAGE_FAILED",

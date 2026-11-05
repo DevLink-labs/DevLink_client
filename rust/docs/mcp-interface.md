@@ -87,6 +87,8 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | complete_task | /v1/tasks/complete | [완료](task-operations.md) |
 | get_tasks | /v1/tasks/list | [목록](task-operations.md) |
 | get_task_result | /v1/tasks/result | [상세·결과](task-operations.md) |
+| ask_question | /v1/tasks/questions | [질문·답변](task-operations.md#질문답변-s15p31d108-166) |
+| answer_question | /v1/tasks/answers | [질문·답변](task-operations.md#질문답변-s15p31d108-166) |
 
 register_agent는 최초 Agent 생성이 아니라 bootstrap 자격의 기존 Agent 확인이다. 목록·생성·상태 변경·완료는 bound 세션을 요구한다. 업무 권한·상태 전이·원자 저장은 중앙이 판단한다.
 
