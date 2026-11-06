@@ -363,6 +363,9 @@ async fn wait_for_start(
 
 /// Only a Child handle obtained by our spawn is ever force-cleaned up. This also
 /// handles errors or cancellation while waiting, before releasing control.lock.
+/// The kill is always sent, but reaping is bounded: if the exit takes longer, a
+/// terminating child may still hold broker.lock briefly after control.lock is released,
+/// and the next start or stop reports a busy broker until it is gone.
 struct StartingChild<'a> {
     child: &'a mut Child,
     armed: bool,
@@ -371,7 +374,13 @@ impl Drop for StartingChild<'_> {
     fn drop(&mut self) {
         if self.armed {
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            // Reap without blocking indefinitely: termination can be delayed by the OS
+            // or security software, and this drop may run on an async worker thread.
+            let deadline = std::time::Instant::now() + crate::tool_discovery::REAP_TIMEOUT;
+            while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 }

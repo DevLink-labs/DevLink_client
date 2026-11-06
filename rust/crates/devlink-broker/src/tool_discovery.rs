@@ -15,6 +15,11 @@ use tokio::{
     process::Command,
 };
 
+/// Upper bound on reaping a probe or startup child after it was told to terminate.
+/// Termination may be delayed by the OS or security software; once this passes the
+/// child is left to finish exiting on its own, so the exit is not guaranteed yet.
+pub(crate) const REAP_TIMEOUT: Duration = Duration::from_millis(500);
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostExecutable {
@@ -384,7 +389,7 @@ async fn probe(
             // Termination may be delayed by the OS or security software. Keep
             // cleanup bounded as well as the version probe itself.
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
+            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await;
             Err(if failure.is_err() {
                 DetectionStatus::TimedOut
             } else {
