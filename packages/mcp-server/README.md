@@ -16,6 +16,8 @@ S15P31D108-59의 TypeScript·Node.js MCP 실행 기반, -60 로컬 브로커 호
 
 ## 설치와 실행
 
+릴리스 압축 파일에는 빌드된 `dist/`와 런타임 의존성이 `devlink` 실행 파일 옆 `mcp-server/`에 들어 있어 아래 빌드가 필요 없습니다. [릴리스로 설치](../../rust/README.md#릴리스로-설치)를 참고합니다.
+
 Node.js 24 이상이 필요합니다. 현재 Windows, Node.js 24.18.0, npm 12.0.2에서 검증했습니다. 아래 명령은 저장소 루트에서 실행합니다.
 
 ```powershell
