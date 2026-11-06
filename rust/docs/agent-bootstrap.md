@@ -28,7 +28,40 @@ devlink agent token
 
 CSRF 선행 조회가 실패하면 생성 POST 전이므로 pending을 남기지 않는다. 실제 POST의 결과가 불확실하고 목록에도 생성된 Agent를 찾을 수 없으면, 서버 기록·지연 처리를 확인한 사용자가 `devlink agent reset-pending --accept-duplicate-risk`로 해당 pending만 명시적으로 비울 수 있다. 이 명령은 생성 요청을 보내지 않는다. 중앙에 지연 생성이 남았을 가능성은 사라지지 않으므로 기존 ID 복구를 우선하며, 이후 새 생성은 사용자의 별도 명령이다. 이미 ID가 알려진 프로필은 reset할 수 없다.
 
-`agent token`은 중앙에서 지원하는 명시적 발급/회전이다. 먼저 `needs_token`을 내구 저장하므로 응답 유실 시 옛 토큰을 계속 사용하지 않는다. 발급 후 Agent Bearer `GET /api/v1/agents/me`의 ID/ownerUserId/teamId가 일치해야 `ready`를 게시한다. 발급 성공 후 검증이나 저장이 실패해도 새 Agent를 생성하지 않고 같은 ID에서 명시적으로 다시 발급한다. 중앙에 없는 메타데이터 수정·삭제·폐기 API를 가정하지 않는다.
+`agent token`은 중앙에서 지원하는 명시적 발급/회전이다. 먼저 `needs_token`을 내구 저장하므로 응답 유실 시 옛 토큰을 계속 사용하지 않는다. 발급 후 Agent Bearer `GET /api/v1/agents/me`의 ID/ownerUserId/teamId가 일치해야 `ready`를 게시한다. 발급 성공 후 검증이나 저장이 실패해도 새 Agent를 생성하지 않고 같은 ID에서 명시적으로 다시 발급한다. 메타데이터 수정은 아래 `agent update`만 쓰며, 중앙에 없는 삭제·폐기 API를 가정하지 않는다.
+
+## Agent 정보 수정 (S15P31D108-146)
+
+```powershell
+devlink agent update --project-name "DevLink client" --role-description "MCP 담당"
+```
+
+프로필에 묶인 Agent의 `projectName`·`roleDescription`만 바꾼다. 둘 중 하나 이상이 필요하고, 공백만인 값·제어 문자·역할 비우기는 받지 않는다. 중앙 `isBlank`가 U+001C–U+001F를 공백으로 보아 역할을 null로 저장하므로 제어 문자를 막는다. 같은 동작을 MCP `update_agent`(로컬 `/v1/agents/update`)로도 제공한다.
+
+**중앙 계약.** server develop `34b2c15`의 `AgentController`·`AgentService` 코드를 기준으로 했다. 백엔드와 문서로 따로 합의한 계약은 아니다.
+
+- `PATCH /api/v1/agents/{agentId}`, 본문 `{name?, roleDescription?, projectName?}`(`UpdateAgentRequest`, 각각 최대 100·255·120자).
+- 사용자 세션(`JSESSIONID`)과 CSRF만 받는다. Agent Bearer는 받지 않는다.
+- 팀원이면서 Agent 소유자여야 한다. 아니면 403 ACCESS_DENIED이고, 없는 Agent는 404 RESOURCE_NOT_FOUND다.
+- null은 기존 값을 유지한다. 공백 name·projectName은 400 VALIDATION_FAILED이고, 공백 roleDescription은 null로 저장된다.
+- 응답은 `AgentResponse`다. part·roles(3차 MVP)는 이 API로 바꿀 수 없다.
+
+**client 규칙.**
+
+- name은 `register_agent`의 일치 확인과 팀 내 이름·도구 고유 제약에 쓰이므로 바꾸지 않는다. toolType·소유자·팀도 바꾸지 않는다.
+- 실행 순서: 사용자 세션 확인 → 선택 팀 확인 → 프로필의 origin·사용자·팀 일치 확인 → `GET /api/v1/agents/{id}`로 현재 값 확인 → 다른 필드만 PATCH. 모두 같으면 PATCH하지 않는다.
+- 응답의 ID·소유자·팀·name·toolType과 요청한 값이 모두 맞아야 성공이다. 어긋나면 결과 불명(unknown)으로 보고하고 로컬 프로필을 바꾸지 않는다.
+- PATCH가 4xx로 거부되면 rejected다. 전송 실패·5xx·응답 불일치는 중앙에 반영됐을 수 있으므로 결과 불명으로 안내한다. PATCH 전 단계(세션·팀·Agent 조회)의 연결 실패도 지금은 unknown으로 보고하는데, 안전한 쪽으로 틀리는 분류라 그대로 두었다.
+- 성공하면 프로필에 캐시한 projectName·roleDescription만 갱신한다. ID·projectRoot·토큰은 그대로이고, 그 사이 다른 작업이 프로필을 바꿨으면 덮어쓰지 않고 `localProfileSynced:false`로 알린다. 새 Agent 생성·토큰 발급은 하지 않는다.
+- 브로커는 Agent 정보를 중앙 `/agents/me`에서 실시간으로 읽으므로, 수정 후 `get_my_context`에 새 값이 바로 보인다. 프로필 바인딩(ID·팀·projectRoot·도구)은 바뀌지 않아 실행 중인 브로커를 멈출 필요가 없다.
+
+**MCP 경로의 권한.** 중앙 PATCH가 사용자 세션만 받으므로, 브로커는 이 PC의 `devlink auth login` 세션 파일을 읽어 호출한다. 이 경로를 쓰는 조건은 다음과 같다.
+
+- 요청 세션이 bind된 Agent가 프로필의 Agent와 같아야 한다.
+- 사용자 세션의 사용자가 프로필 사용자와 같아야 한다.
+- 바꿀 수 있는 필드는 위 두 가지뿐이다.
+
+사용자 세션이 없거나 만료되면 `USER_LOGIN_REQUIRED`(412), 다른 CLI 작업이 계정 잠금을 쥐고 있으면 `LOCAL_ACCOUNT_BUSY`(409)로 거부한다. 둘 다 중앙을 변경하기 전이다. 모델에게 비밀번호나 쿠키를 넘기지 않는다.
 
 ## 자격과 소유권
 

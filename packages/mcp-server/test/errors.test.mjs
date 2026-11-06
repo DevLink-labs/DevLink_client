@@ -182,6 +182,24 @@ test('registration requestKey survives bind failure while internal IDs do not re
   assert.notEqual(error.requestId, broker.calls.at(-1).body.requestId);
 });
 
+test('update_agent keeps login, busy, binding and unconfirmed outcomes distinct (S15P31D108-146)', async (t) => {
+  const { broker, client } = await fixture(t);
+  for (const [status, remote, code, outcome] of [
+    [412, { scope: 'domain', code: 'USER_LOGIN_REQUIRED', outcome: 'rejected' }, 'USER_LOGIN_REQUIRED', 'rejected'],
+    [409, { scope: 'domain', code: 'LOCAL_ACCOUNT_BUSY', outcome: 'rejected' }, 'LOCAL_ACCOUNT_BUSY', 'rejected'],
+    [403, { scope: 'domain', code: 'FORBIDDEN', outcome: 'rejected' }, 'BROKER_FORBIDDEN', 'rejected'],
+    [502, { scope: 'transport', code: 'CENTRAL_PROTOCOL_ERROR', outcome: 'unknown' }, 'CENTRAL_PROTOCOL_ERROR', 'unknown'],
+  ]) {
+    broker.setHook(({ body, send }) => {
+      if (body.operation !== 'update_agent') return false;
+      send({ error: remote }, status); return true;
+    });
+    const error = await faultOf(client.execute('update_agent', { projectName: 'DevLink' }));
+    assert.equal(error.code, code, `${status}`); assert.equal(error.outcome, outcome, `${status}`);
+    assert.equal(error.taskId, undefined); assert.equal(error.requestKey, undefined);
+  }
+});
+
 test('ambiguous envelopes, conflicting keys and invalid metadata fail safely', async (t) => {
   const { broker } = await fixture(t);
   const http = new BrokerHttp(broker.settings);

@@ -65,6 +65,8 @@ pub struct MockState {
     pub pause_token: Arc<AtomicBool>,
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
+    /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404
+    pub update_mode: Arc<AtomicU8>,
 }
 
 pub fn success(value: Value) -> Response {
@@ -323,6 +325,52 @@ async fn agent_get(
     agent_for(&state, id)
         .map(success)
         .unwrap_or_else(|| failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"))
+}
+/// Mirrors central AgentService.update: owner-only, null keeps, only the profile fields.
+async fn agent_update(
+    Path(id): Path<u64>,
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    assert!(authorized(&state, &headers, true));
+    let keys = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter()
+            .all(|k| k == "projectName" || k == "roleDescription"),
+        "{keys:?}"
+    );
+    state
+        .calls
+        .lock()
+        .unwrap()
+        .push(format!("agent_update:{}", keys.join(",")));
+    match state.update_mode.load(Ordering::SeqCst) {
+        1 => return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED"),
+        3 => return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED"),
+        4 => return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),
+        _ => {}
+    }
+    let mut agents = state.agents.lock().unwrap();
+    let Some(agent) = agents.get_mut(&id) else {
+        return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
+    };
+    if agent["ownerUserId"] != user(&state)["userId"] {
+        return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
+    }
+    for key in &keys {
+        agent[key.as_str()] = body[key.as_str()].clone();
+    }
+    let mut reply = agent.clone();
+    if state.update_mode.load(Ordering::SeqCst) == 2 {
+        reply["projectName"] = json!("changed by provider");
+    }
+    success(reply)
 }
 async fn agent_token(
     Path(id): Path<u64>,
@@ -585,7 +633,7 @@ impl Fixture {
                 "/api/v1/agents/teams/{id}",
                 get(agent_list).post(agent_create),
             )
-            .route("/api/v1/agents/{id}", get(agent_get))
+            .route("/api/v1/agents/{id}", get(agent_get).patch(agent_update))
             .route("/api/v1/agents/{id}/token", post(agent_token))
             .route("/api/v1/agents/me", get(agent_context))
             .route("/ws/broker", get(websocket))

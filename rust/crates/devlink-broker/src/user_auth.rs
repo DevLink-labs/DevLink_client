@@ -446,6 +446,17 @@ impl UserClient {
             .await
     }
 
+    /// CSRF-protected partial update with the same cookie and response rules as POST.
+    pub(crate) async fn patch<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        body: Value,
+    ) -> Result<T> {
+        let csrf = self.csrf().await?;
+        self.exchange(Method::PATCH, path, Some(body), Some(csrf))
+            .await
+    }
+
     async fn exchange<T: DeserializeOwned>(
         &mut self,
         method: Method,
