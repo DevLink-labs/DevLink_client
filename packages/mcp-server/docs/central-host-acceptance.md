@@ -252,3 +252,45 @@ AC7은 작성자가 아닌 사람이 같은 절차를 따라 재실행하고 결
      - taskId, 감시 표본·위반 수
    - 자격 파일과 토큰은 붙여 넣지 않는다.
 6. **정리:** 중앙 서버 프로세스와 PostgreSQL(`pg_ctl stop`)을 중지한다.
+
+## 2026-11-06 AC7 독립 재실행 (Codex 검토)
+
+사용자 요청에 따라 작성자 Claude Code와 분리된 Codex 리뷰 세션에서 위 절차를 직접 실행했다. 작성자의 기존 report 재판정이 아니라, 새 클러스터·계정·DB·중앙 서버·사용자·팀·Agent·fixture를 만든 독립 재실행이다.
+
+- **실행 조합:** client와 판정기 `e126e939d7bb9d3715aa4bfc236b26a53ee98d88`, 중앙 `34b2c15c116041e0bb70fd91a2f9ef74b28c79b9`.
+  - client를 직접 빌드하고 CLI·MCP dist·의존성을 검증 전용 폴더에 동결했다. 두 실행에서 같은 CLI·MCP dist 해시를 사용했다.
+  - 중앙은 해당 커밋을 별도 clone해 Java 21.0.11로 bootJar를 빌드했다. PostgreSQL 17.11, 새 전용 계정·DB, loopback 임의 포트를 사용했다.
+  - Windows 11, Node 24.18.0, Codex CLI 0.166.0, Claude Code 2.1.310. Claude는 `claude-opus-5-5`/high, Codex는 CLI 기본 모델(모델 ID 미보고)이다.
+- **실행 시간(KST):** 실패 실행 15:25:53–15:27:07, 성공 실행 15:27:08–15:29:11, 중앙·DB 정리 완료 15:31:01.
+- **회귀 검사:** `npm ci`와 `npm test`를 실행해 180 통과·0 실패(판정기 16건 포함)를 확인했다.
+- **판정:** 두 실행기 모두 exit 0이며 `passed`, `actualLlmHostsExecuted`, `ownedProcessesStopped`가 모두 true다. AC7을 PASS로 기록한다.
+
+| 실행 | taskId | 실제 관측 |
+| --- | --- | --- |
+| AC2 Codex → Claude | 1 | 명시적 수락 → invoice 부분 수정 → Host 테스트 pass 1/fail 1 → FAILED, `partiallyModified=true`, 사유 457자 → Codex가 같은 실패 결과 조회. 부모 테스트 exit 1 |
+| AC1·AC3 Codex → Claude | 2 | invoice 수정·Host 테스트·부모 독립 테스트 통과 → COMPLETED → Codex 결과 조회. 실제 diff와 중앙 저장 결과 일치 |
+| AC1·AC3 Claude → Codex | 3 | slug 수정·Host 테스트·부모 독립 테스트 통과 → COMPLETED → Claude 결과 조회. 실제 diff와 중앙 저장 결과 일치 |
+
+세 경우 모두 고정 테스트와 Git index가 보존됐다. 성공 경로는 지정 소스만 수정됐고, 실패 경로의 남은 diff는 `receiver-remaining.diff`에 보관했다.
+
+| taskId | 감시 표본 | 작업이 있는 PENDING 표본 | 변경 위반 | 조회 오류 | 수락 전 읽기 전용 명령 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 250 | 68 | 0 | 0 | 2 |
+| 2 | 427 | 24 | 0 | 0 | 3 |
+| 3 | 428 | 43 | 0 | 0 | 3 |
+
+실행기 report에 없는 requestId·requestKey는 MCP transcript의 create_task 응답에서 따로 추출했다. requestKey는 전용 DB의 tasks 테이블과도 대조했다.
+
+| taskId | requestId | requestKey |
+| --- | --- | --- |
+| 1 | `946ba00e-de9b-40e3-9485-aa7be1cdb6ff` | `6533a3bd-bcf6-44fd-95f9-1cdbbf3e3b0e` |
+| 2 | `59add388-6b7a-4883-adb5-88fc188f84e8` | `36535921-5fc0-4798-b300-7640a8132888` |
+| 3 | `e257d010-dee0-4c97-86bc-feeb5cb09959` | `mvp66-out-baaf748d-43e1-4f80-b3eb-c8f09f1e67ed` |
+
+### AC7 증거와 정리
+
+- 실패 run: `run-e25fdc34-63f1-4d00-82d6-46e018f64007`, report SHA256 `f2d17bdb5cb2e1272b4f2bf5b792a5ac42182d235741a8749387d1ec2d005db8`.
+- 성공 run: `run-4fd5b0cc-4b06-44bb-b988-33032a3aebc5`, report SHA256 `36f078d806fad192da4decd08ef38f45e82506dcac5bbfc01c70b45fd0b2c261`.
+- 원본 report·JSONL·프롬프트·stderr·diff·부모 테스트 출력·task-index.csv·cleanup.json은 검증 PC 저장소의 ignored `.planning/ac7-codex-20261106-62cca5cf/`에 보관했다. 세션 임시 폴더에만 두지 않았다. 공유 요약과 빌드 해시는 [Notion 작업 정리의 AC7 독립 재실행 절](https://app.notion.com/p/41035a4f3ca6810d9b20e51a98960504)에 기록했다.
+- 실행기가 소유한 Host·MCP·브로커 정리 외에, 직접 띄운 중앙 JVM과 PostgreSQL도 중지했다. 두 서비스 포트가 닫혔고 검증 폴더를 참조하는 소유 런타임 프로세스는 0개다.
+- AC2의 유도된 실패, AC3 표본 간격 등 위 한계는 유지된다. AC4·AC5·AC6의 예외 시나리오는 이번에 재실행하지 않았으며 기존 중앙 시험 근거와 구분한다.

@@ -78,15 +78,15 @@ node packages/mcp-server/scripts/verify-rust-readiness.mjs --cli $integrationCli
 
 실제 실행 후에만 PASS/FAIL로 바꾸고 원문 토큰·개인 정보는 제거한다. 정상 두 방향은 각각 독립된 증거를 남긴다.
 
-2026-11-06 기준 관측은 아래와 같다. 근거는 [실제 두 Host 수용 검증](central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)과 같은 문서의 "AC2 실행과 AC3 판정 보강"이다. 실행 조합은 중앙 develop `34b2c15`와 PostgreSQL 17.11이다. client는 AC1이 develop `dfc28c7`, AC2·AC3 보강 실행이 develop `77f07c3`에 이 PR의 판정기·실행기를 더한 것이다.
+2026-11-06 기준 관측은 아래와 같다. 근거는 [실제 두 Host 수용 검증](central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)과 같은 문서의 "AC2 실행과 AC3 판정 보강"이다. 실행 조합은 중앙 develop `34b2c15`와 PostgreSQL 17.11이다. client는 AC1이 develop `dfc28c7`, AC2·AC3 보강 실행이 develop `77f07c3`에 이 PR의 판정기·실행기를 더한 것이다. 이후 [AC7 독립 재실행](central-host-acceptance.md#2026-11-06-ac7-독립-재실행-codex-검토)에서는 PR #83의 `e126e93`을 직접 빌드해 사용했다.
 
 | ID | 관측 |
 | --- | --- |
-| AC1-A / AC1-B | PASS. Codex→Claude task 1, Claude→Codex task 2. 실제 diff·결과 조회 일치는 확인했다. requestId·requestKey는 실행기 report에 남지 않는다 |
+| AC1-A / AC1-B | PASS. 작성자 실행의 Codex→Claude task 1, Claude→Codex task 2에서 실제 diff·결과 조회 일치를 확인했다. AC7의 새 격리 DB에서는 task 2·3으로 재확인했고, report에 없는 requestId·requestKey도 transcript·DB로 보완했다 |
 | AC3 | PASS(2026-11-06 보강 실행, client develop `77f07c3` + 이 PR의 판정기). task 11·12·13 모두 수락 결과 이후에만 편집했다. 수락 전 셸 명령은 읽기 전용이었다. 약 250ms 간격 파일 감시에서 PENDING 동안 위반 0, 조회 오류 0이었다. 종료는 COMPLETED(12·13)와 FAILED(11) 두 경로를 확인했다. 감시 간격 등 한계는 [AC2 실행과 AC3 판정 보강](central-host-acceptance.md#2026-11-06-ac2-실행과-ac3-판정-보강)에 적었다 |
 | AC2 | PASS(같은 실행). Codex→Claude task 11. 일부만 수정한 뒤 Host 테스트 pass 1/fail 1, FAILED, `partiallyModified=true`, failureReason을 등록했고 Codex가 같은 사유를 조회했다. 부모 테스트 종료 코드는 1이고, 남은 diff는 `src/invoice.mjs` 한 줄이다. 실패는 fixture·프롬프트로 유도했다 |
 | AC4·AC5·AC6 | 두 Host로는 NOT_RUN. 근거는 중앙 `d06d239` 기준 통합 시험(-67 등, 575건)뿐이다 |
-| AC7 | NOT_RUN. 제3자가 [재실행 절차](central-host-acceptance.md#제3자-재실행-절차-ac7)를 따라 실행해야 한다 |
+| AC7 | PASS. 작성자와 분리된 Codex 리뷰 세션이 [재실행 절차](central-host-acceptance.md#제3자-재실행-절차-ac7)를 따라 새 중앙·DB·사용자·fixture에서 실패 및 양방향 성공 실행기를 각각 실행했다. 두 report의 passed·actualLlmHostsExecuted·ownedProcessesStopped가 모두 true이며 중앙·DB 정리도 확인했다. [실행 기록](central-host-acceptance.md#2026-11-06-ac7-독립-재실행-codex-검토) |
 
 아래 표는 각 ID의 정의다.
 
