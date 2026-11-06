@@ -198,21 +198,44 @@ fn groups(doc: &Document, event: &str) -> Result<Vec<Value>> {
         None => Ok(Vec::new()),
     }
 }
-fn commands(tool: ToolType, groups: &[Value]) -> Result<Vec<String>> {
+/// The group's matcher when it limits when the hooks run. SessionStart matchers filter
+/// the start source (startup, resume, clear, compact, ...); an absent, empty or `*`
+/// matcher runs always. UserPromptSubmit has no matcher semantics in either Host.
+fn condition(event: &str, group: &Value) -> Option<String> {
+    if event == "UserPromptSubmit" {
+        return None;
+    }
+    match group.get("matcher")? {
+        Value::String(matcher) if matcher.is_empty() || matcher == "*" => None,
+        Value::String(matcher) => Some(matcher.clone()),
+        other => Some(other.to_string()),
+    }
+}
+/// DevLink commands of this Host in `event`. An entry in a conditional group is listed
+/// as `<command> [matcher: <m>]`, so it never equals a wanted command: it does not run
+/// on every start and therefore does not satisfy the install.
+fn commands(tool: ToolType, event: &str, groups: &[Value]) -> Result<Vec<String>> {
     let mut found = Vec::new();
     for group in groups {
         let Some(hooks) = group.get("hooks") else {
             continue;
         };
+        let condition = condition(event, group);
         for hook in hooks.as_array().ok_or_else(invalid)? {
             if let Some(command) = hook.get("command").and_then(Value::as_str)
                 && is_devlink(tool, command)
             {
-                found.push(command.to_owned());
+                found.push(match &condition {
+                    Some(matcher) => format!("{command} [matcher: {matcher}]"),
+                    None => command.to_owned(),
+                });
             }
         }
     }
     Ok(found)
+}
+fn conditional(command: &str) -> bool {
+    command.ends_with(']') && command.contains(" [matcher: ")
 }
 /// Remove DevLink hooks for this Host; drop groups left without hooks.
 fn without_devlink(tool: ToolType, groups: Vec<Value>) -> Result<Vec<Value>> {
@@ -309,19 +332,23 @@ pub fn status(
         let groups = located(target, groups(&doc, event))?;
         found.insert(
             event.to_owned(),
-            located(target, commands(target.tool, &groups))?,
+            located(target, commands(target.tool, event, &groups))?,
         );
     }
     let present = found.values().filter(|c| !c.is_empty()).count();
     // Matches install: an event is as expected only when its DevLink entries are exactly
-    // the expected command, so `installed` here means install would be unchanged.
-    let expected = wanted.is_none_or(|wanted| {
-        wanted.iter().all(|(event, command)| {
+    // the expected command, so `installed` here means install would be unchanged. Without
+    // expected commands, an event still needs an entry that runs unconditionally.
+    let expected = match wanted {
+        Some(wanted) => wanted.iter().all(|(event, command)| {
             found
                 .get(event)
                 .is_some_and(|c| !c.is_empty() && c.iter().all(|found| found == command))
-        })
-    });
+        }),
+        None => found
+            .values()
+            .all(|c| c.iter().any(|found| !conditional(found))),
+    };
     Ok(HookStatus {
         tool_type: target.tool,
         target_path: target.path.clone(),
@@ -349,7 +376,7 @@ pub fn plan_install(
     let mut conflicted = false;
     for (event, command) in &wanted {
         let groups = located(target, groups(&doc, event))?;
-        let found = located(target, commands(target.tool, &groups))?;
+        let found = located(target, commands(target.tool, event, &groups))?;
         let others: Vec<_> = found.iter().filter(|c| *c != command).cloned().collect();
         let satisfied = found.iter().any(|c| c == command);
         if !others.is_empty() {
@@ -399,7 +426,7 @@ pub fn plan_uninstall(target: &HookTarget) -> Result<HookPlan> {
     let mut existing = IndexMap::new();
     for (event, _) in EVENTS {
         let groups = located(target, groups(&doc, event))?;
-        let found = located(target, commands(target.tool, &groups))?;
+        let found = located(target, commands(target.tool, event, &groups))?;
         if !found.is_empty() {
             existing.insert(event.to_owned(), found);
             events.insert(
@@ -493,7 +520,10 @@ mod tests {
             state_root: root.join("state"),
         }
     }
+    /// Callers pass canonical paths (the CLI and setup canonicalize first). A temporary
+    /// directory can be an 8.3 short path such as `RUNNER~1` on Windows CI (#81).
     fn wanted_at(tool: ToolType, root: &Path) -> IndexMap<String, String> {
+        let root = root.canonicalize().unwrap();
         wanted(tool, &root.join("devlink.exe"), &root.join("config.json")).unwrap()
     }
     fn install(t: &HookTarget, root: &Path, replace: bool) -> Result<HookApplyResult> {
@@ -510,10 +540,11 @@ mod tests {
     #[test]
     fn command_uses_forward_slashes_and_refuses_paths_needing_quotes() {
         let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
         let value = command(
             ToolType::Codex,
-            &root.path().join("devlink.exe"),
-            &root.path().join("config.json"),
+            &base.join("devlink.exe"),
+            &base.join("config.json"),
             "session-start",
         )
         .unwrap();
@@ -521,18 +552,13 @@ mod tests {
         assert!(value.ends_with("updates-hook --host codex --event session-start"));
         assert!(is_devlink(ToolType::Codex, &value));
         assert!(!is_devlink(ToolType::ClaudeCode, &value));
-        let spaced = root.path().join("with space").join("devlink.exe");
-        let error = command(ToolType::Codex, &spaced, &root.path().join("c.json"), "x");
+        let spaced = base.join("with space").join("devlink.exe");
+        let error = command(ToolType::Codex, &spaced, &base.join("c.json"), "x");
         assert_eq!(error.unwrap_err().code, "HOOKS_PATH_UNSUPPORTED");
         assert_eq!(
-            command(
-                ToolType::Codex,
-                Path::new("devlink"),
-                &root.path().join("c"),
-                "x"
-            )
-            .unwrap_err()
-            .code,
+            command(ToolType::Codex, Path::new("devlink"), &base.join("c"), "x")
+                .unwrap_err()
+                .code,
             "SETUP_INPUT_INVALID"
         );
     }
@@ -713,7 +739,7 @@ mod tests {
     #[test]
     fn unix_backslashes_and_unc_paths_are_refused() {
         let root = tempfile::tempdir().unwrap();
-        let config = root.path().join("config.json");
+        let config = root.path().canonicalize().unwrap().join("config.json");
         #[cfg(unix)]
         {
             let escaped = root.path().join("a\\b").join("devlink");
@@ -734,5 +760,79 @@ mod tests {
                 "HOOKS_PATH_UNSUPPORTED"
             );
         }
+    }
+
+    #[test]
+    fn a_conditional_session_start_entry_does_not_count_as_installed() {
+        for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+            let root = tempfile::tempdir().unwrap();
+            let t = target(root.path(), tool);
+            let wanted = wanted_at(tool, root.path());
+            // The exact wanted command, but only on compaction (#79). A matcher on
+            // UserPromptSubmit has no meaning there, so that entry still counts.
+            seed(
+                &t,
+                &serde_json::to_vec(&json!({"hooks": {
+                    "SessionStart": [{"matcher": "^compact$", "hooks": [
+                        {"type": "command", "command": wanted["SessionStart"]},
+                        {"type": "command", "command": "keep-me"}
+                    ]}],
+                    "UserPromptSubmit": [{"matcher": "ignored", "hooks": [
+                        {"type": "command", "command": wanted["UserPromptSubmit"]}
+                    ]}]
+                }}))
+                .unwrap(),
+            );
+            let before = fs::read(&t.path).unwrap();
+            assert_eq!(status(&t, Some(&wanted)).unwrap().status, "stale");
+            assert_eq!(status(&t, None).unwrap().status, "stale");
+            let plan = plan_install(&t, wanted.clone(), false).unwrap();
+            assert_eq!(plan.change, HookChange::Conflict);
+            assert_eq!(
+                plan.existing["SessionStart"],
+                [format!("{} [matcher: ^compact$]", wanted["SessionStart"])]
+            );
+            assert!(!plan.existing.contains_key("UserPromptSubmit"));
+            assert!(apply(&t, &plan).is_err());
+            assert_eq!(fs::read(&t.path).unwrap(), before);
+
+            // Replacing keeps the user's conditional group and its other hook, and adds
+            // an unconditional DevLink group; a reinstall is then unchanged.
+            install(&t, root.path(), true).unwrap();
+            let value = json(&t);
+            let start = value["hooks"]["SessionStart"].as_array().unwrap();
+            assert_eq!(start[0]["matcher"], "^compact$");
+            assert_eq!(start[0]["hooks"].as_array().unwrap().len(), 1);
+            assert_eq!(start[0]["hooks"][0]["command"], "keep-me");
+            assert!(start[1].get("matcher").is_none());
+            assert_eq!(start[1]["hooks"][0]["command"], wanted["SessionStart"]);
+            assert_eq!(value["hooks"]["UserPromptSubmit"][0]["matcher"], "ignored");
+            assert_eq!(status(&t, Some(&wanted)).unwrap().status, "installed");
+            assert_eq!(install(&t, root.path(), false).unwrap().status, "unchanged");
+        }
+    }
+
+    #[test]
+    fn an_empty_or_star_matcher_runs_always() {
+        let root = tempfile::tempdir().unwrap();
+        let t = target(root.path(), ToolType::ClaudeCode);
+        let wanted = wanted_at(t.tool, root.path());
+        seed(
+            &t,
+            &serde_json::to_vec(&json!({"hooks": {
+                "SessionStart": [{"matcher": "*", "hooks": [
+                    {"type": "command", "command": wanted["SessionStart"]}
+                ]}],
+                "UserPromptSubmit": [{"matcher": "", "hooks": [
+                    {"type": "command", "command": wanted["UserPromptSubmit"]}
+                ]}]
+            }}))
+            .unwrap(),
+        );
+        assert_eq!(status(&t, Some(&wanted)).unwrap().status, "installed");
+        assert_eq!(
+            plan_install(&t, wanted, false).unwrap().change,
+            HookChange::Unchanged
+        );
     }
 }
