@@ -120,6 +120,8 @@ fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
     let mut sent: Vec<(u64, u64, TaskStatus)> = Vec::new();
     // New question/answer counts per task, in first-seen order. Never the message text.
     let mut conversations: Vec<(u64, usize, usize)> = Vec::new();
+    // Sent tasks with no final status after the configured minutes, in first-seen order.
+    let mut overdue: Vec<(u64, u64)> = Vec::new();
     for update in updates {
         match update {
             Update::Received(message) => received.push(format!(
@@ -156,9 +158,21 @@ fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
                     TaskMessageType::Answer => conversations[index].2 += 1,
                 }
             }
+            Update::Overdue(event) => {
+                // A final status that arrived after the advisory makes it moot.
+                let finished = feed.latest_sent(event.task_id).is_some_and(|latest| {
+                    matches!(
+                        latest.status(),
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Rejected
+                    )
+                });
+                if !finished && !overdue.iter().any(|(id, _)| *id == event.task_id) {
+                    overdue.push((event.task_id, event.minutes));
+                }
+            }
         }
     }
-    if received.is_empty() && sent.is_empty() && conversations.is_empty() {
+    if received.is_empty() && sent.is_empty() && conversations.is_empty() && overdue.is_empty() {
         return None;
     }
     let mut lines =
@@ -206,6 +220,18 @@ fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
              Read them with get_task_result; answer only when the user wants you to.",
             counts.len(),
             listed(&counts)
+        ));
+    }
+    if !overdue.is_empty() {
+        let tasks: Vec<String> = overdue
+            .iter()
+            .map(|(task, minutes)| format!("#{task} ({minutes} min)"))
+            .collect();
+        lines.push(format!(
+            "- No result yet on {} sent task(s) after the set time: {}. \
+             The task is not cancelled; check get_task_result before following up.",
+            tasks.len(),
+            listed(&tasks)
         ));
     }
     lines.push(

@@ -37,7 +37,7 @@ MCP 세션 없이 동작하므로 세션 claim 대신 바인딩 파일로 actor�
 
 ## 요약 내용
 
-- 사실 서술만 넣는다. 받은 작업은 task ID와 요청 Agent ID, 보낸 작업은 task별 가장 높은 version의 상태, 질문·답변은 task별 새 질문·답변 개수다(예: `- New questions/answers from the other agent on 1 task(s): #300 (1 question, 2 answers). Read them with get_task_result; answer only when the user wants you to.`).
+- 사실 서술만 넣는다. 받은 작업은 task ID와 요청 Agent ID, 보낸 작업은 task별 가장 높은 version의 상태, 지연 알림은 task ID와 기준 분(보존된 알림에 최종 상태가 이미 있으면 생략), 질문·답변은 task별 새 질문·답변 개수다(예: `- New questions/answers from the other agent on 1 task(s): #300 (1 question, 2 answers). Read them with get_task_result; answer only when the user wants you to.`).
 - 보낸 작업의 최신 version은 이번 실행분이 아니라 보존된 전체 알림 이력에서 고른다. 그 최신 version이 이번에 새로 소비한 이벤트일 때만 보고한다. 이전 실행에서 이미 보고한 것보다 낮은 version이 늦게 도착하면 cursor는 넘기되 요약하지 않으므로, 보고한 상태가 뒤로 돌아가지 않는다.
 - 범주마다 task ID는 최대 10개이고 나머지는 `and N more`로 센다.
 - prompt·resultText·질문·답변 본문·파일 경로는 넣지 않는다. 다른 Agent가 쓴 본문이 Host 문맥에 지시처럼 들어가지 않도록 하기 위해서다.

@@ -521,7 +521,7 @@ async fn question_and_answer_arrivals_follow_other_sources_without_bodies() {
         before["nextCursor"]
             .as_str()
             .unwrap()
-            .starts_with("v2.1.0.0.")
+            .starts_with("v3.1.0.0.0.")
     );
 
     arrive(
@@ -550,7 +550,7 @@ async fn question_and_answer_arrivals_follow_other_sources_without_bodies() {
         page["nextCursor"]
             .as_str()
             .unwrap()
-            .starts_with("v2.1.0.2.")
+            .starts_with("v3.1.0.2.0.")
     );
 
     // Paging crosses into the new source without gaps.

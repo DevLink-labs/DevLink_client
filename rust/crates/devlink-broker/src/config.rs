@@ -40,6 +40,9 @@ pub struct Config {
     /// 질문·답변 안전망 pull 주기 (ms, 기본값: 60000, 실제 대기는 ±1/6 무작위)
     #[serde(default = "task_message_sync_interval")]
     pub task_message_sync_interval_ms: u64,
+    /// 보낸 작업에 이 시간(분) 동안 완료·실패·거절 알림이 없으면 로컬 지연 알림을 남김 (기본값: 30, 0이면 끔)
+    #[serde(default = "task_overdue_minutes")]
+    pub task_overdue_minutes: u64,
 }
 
 pub(crate) const DEFAULT_LOCAL_PORT: u16 = 43127;
@@ -58,6 +61,9 @@ fn auth_timeout() -> u64 {
 }
 fn task_message_sync_interval() -> u64 {
     60000
+}
+fn task_overdue_minutes() -> u64 {
+    30
 }
 
 /// Safe field diagnostics, shared by config commands and setup.
@@ -91,6 +97,7 @@ impl Default for Config {
             reconnect_max_ms: max_delay(),
             auth_timeout_ms: auth_timeout(),
             task_message_sync_interval_ms: task_message_sync_interval(),
+            task_overdue_minutes: task_overdue_minutes(),
         }
     }
 }
@@ -153,6 +160,12 @@ impl Config {
             return Err(invalid(
                 "taskMessageSyncIntervalMs",
                 "taskMessageSyncIntervalMs must be between 1000 and 3600000",
+            ));
+        }
+        if self.task_overdue_minutes > 10_080 {
+            return Err(invalid(
+                "taskOverdueMinutes",
+                "taskOverdueMinutes must be between 0 (off) and 10080 (7 days)",
             ));
         }
         if self.local_port == 80 {
@@ -411,6 +424,18 @@ pub fn set(path: &Path, key: &str, raw: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_overdue_minutes_accepts_zero_to_one_week() {
+        for (minutes, ok) in [(0, true), (30, true), (10_080, true), (10_081, false)] {
+            let config = Config {
+                task_overdue_minutes: minutes,
+                ..Config::default()
+            };
+            assert_eq!(config.validate().is_ok(), ok, "{minutes}");
+        }
+        assert_eq!(Config::default().task_overdue_minutes, 30);
+    }
+
     use super::*;
 
     #[test]

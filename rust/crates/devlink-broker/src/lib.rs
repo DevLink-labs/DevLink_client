@@ -17,6 +17,7 @@ pub mod mcp_config;
 pub mod notifications;
 pub mod private_file;
 pub mod protocol;
+pub mod sent_tasks;
 pub mod session_api;
 pub mod sessions;
 pub mod setup_config;

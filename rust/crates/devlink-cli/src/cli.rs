@@ -298,6 +298,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 devlink_broker::notifications::Notifications::clear_config(&path)?;
                 // Question/answer arrivals are local notices too; their central cursor is kept.
                 devlink_broker::task_messages::TaskMessages::clear_config(&path)?;
+                // Overdue advisories and their sent-task ledger are local only as well.
+                devlink_broker::sent_tasks::clear_config(&path)?;
                 print_json(&serde_json::json!({"cleared":true,"centralTasksChanged":false}))?;
                 return Ok(());
             }

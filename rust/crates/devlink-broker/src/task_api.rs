@@ -30,6 +30,8 @@ struct Api {
     central: TaskClient,
     requests: TaskRequests,
     cancel: CancellationToken,
+    /// Records successful creates for the local "no result yet" advisory.
+    sent: Option<crate::sent_tasks::Ledger>,
 }
 
 /// 작업 생성 API 라우터 생성 (`POST /v1/tasks/create`)
@@ -39,6 +41,7 @@ pub fn router(
     central: TaskClient,
     requests: TaskRequests,
     cancel: CancellationToken,
+    sent: Option<crate::sent_tasks::Ledger>,
 ) -> Router {
     Router::new()
         .route("/v1/tasks/create", post(create))
@@ -48,6 +51,7 @@ pub fn router(
             central,
             requests,
             cancel,
+            sent,
         })
 }
 
@@ -232,7 +236,17 @@ async fn process(
         .authorize(&body.context.session_id, &actor)
         .await
         .map_err(session_error)?;
-    api.central.create(team_id, &prepared.command).await
+    let created = api.central.create(team_id, &prepared.command).await;
+    // A replayed requestKey returns the same task; the ledger keeps the first record.
+    if let (Ok(value), Some(sent)) = (&created, &api.sent)
+        && let Some(task_id) = value
+            .get("taskId")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse::<u64>().ok())
+    {
+        sent.created(prepared.command.requester_agent_id, team_id, task_id);
+    }
+    created
 }
 
 /// 입력 검증 실패 시 400 에러 생성 헬퍼

@@ -80,6 +80,7 @@ cargo run -p devlink-cli -- --config .\.devlink\config.json start
 | `reconnectMaxMs` | `30000` | 초기 지연 이상, 300000 이하 |
 | `authTimeoutMs` | `5000` | 100~60000 |
 | `taskMessageSyncIntervalMs` | `60000` | 1000~3600000. 질문·답변 안전망 pull 주기, 실제 간격은 ±1/6 무작위 ([task-messages](docs/task-messages.md)) |
+| `taskOverdueMinutes` | `30` | 0~10080. 보낸 작업에 이 시간 동안 최종 상태 알림이 없으면 로컬 `TASK_OVERDUE` 알림. 0이면 끔 ([local-updates](docs/local-updates.md#보낸-작업-지연-알림-rcv-005)) |
 
 `config`와 `config show`는 동일합니다. `config set <키> <값>`은 검증한 뒤 임시 파일을 원자적으로 교체합니다. 잘못된 값·알 수 없는 키는 실패하며 기존 파일을 유지합니다. 설정 변경은 브로커 재시작 후 반영됩니다. `init`은 기존 파일을 덮어쓰지 않습니다. TypeScript의 `serverUrl`/`agent`/`autoReconnect` 3필드 설정도 읽을 수 있지만 기존 `.devlink-practice` 파일을 자동 이동하지는 않습니다.
 

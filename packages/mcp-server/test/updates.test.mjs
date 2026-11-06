@@ -8,7 +8,7 @@ import { createServer } from '../dist/server.js';
 import { fakeBroker } from './helpers/fake-broker.mjs';
 
 const silent = { debug() {}, info() {}, error() {} };
-const cursor = (r, s, m) => `v2.${r}.${s}.${m}.${'a'.repeat(32)}`;
+const cursor = (r, s, m, o) => `v3.${r}.${s}.${m}.${o}.${'a'.repeat(32)}`;
 const feed = {
   updates: [
     { eventId: 'created-1', kind: 'TASK_CREATED', direction: 'received', taskId: '101', requesterAgentId: '11' },
@@ -16,8 +16,9 @@ const feed = {
     { eventId: 'done-1', kind: 'TASK_COMPLETED', direction: 'sent', taskId: '201', taskVersion: '2', status: 'COMPLETED' },
     { eventId: '502', kind: 'TASK_QUESTION_CREATED', direction: 'received', taskId: '300', sequence: '13' },
     { eventId: '503', kind: 'TASK_ANSWER_CREATED', direction: 'received', taskId: '300', sequence: '14' },
+    { eventId: 'overdue:204', kind: 'TASK_OVERDUE', direction: 'sent', taskId: '204', minutes: 30 },
   ],
-  nextCursor: cursor(1, 2, 2), hasMore: false, cursorReset: false, coverage: 'local',
+  nextCursor: cursor(1, 2, 2, 1), hasMore: false, cursorReset: false, coverage: 'local',
 };
 
 async function connected(t) {
@@ -62,7 +63,13 @@ test('provider feeds that leak bodies or break the contract become protocol erro
   const sentQuestion = structuredClone(feed); sentQuestion.updates[3].direction = 'sent';
   const badSequence = structuredClone(feed); badSequence.updates[4].sequence = '0';
   const v2WithoutMessages = { ...feed, nextCursor: `v2.1.2.${'a'.repeat(32)}` };
-  for (const data of [leaked, wrongState, notLocal, badCursor, leakedQuestion, sentQuestion, badSequence, v2WithoutMessages]) {
+  const v3WithoutOverdue = { ...feed, nextCursor: `v3.1.2.2.${'a'.repeat(32)}` };
+  const receivedOverdue = structuredClone(feed); receivedOverdue.updates[5].direction = 'received';
+  const overdueWithBody = structuredClone(feed); overdueWithBody.updates[5].prompt = 'secret prompt text';
+  const forgedOverdueId = structuredClone(feed); forgedOverdueId.updates[5].eventId = 'overdue:x';
+  const otherTaskOverdue = structuredClone(feed); otherTaskOverdue.updates[5].eventId = 'overdue:205';
+  for (const data of [leaked, wrongState, notLocal, badCursor, leakedQuestion, sentQuestion, badSequence, v2WithoutMessages,
+    v3WithoutOverdue, receivedOverdue, overdueWithBody, forgedOverdueId, otherTaskOverdue]) {
     broker.setBusinessHook(({ send }) => (send({ data }), true));
     const result = await client.callTool({ name: 'get_updates', arguments: {} });
     assert.equal(result.isError, true);
