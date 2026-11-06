@@ -153,6 +153,17 @@ pub async fn run(path: &Path) -> Result<()> {
         cancel.clone(),
     ));
 
+    // 보낸 작업의 로컬 지연 알림 판정 (taskOverdueMinutes, 0이면 끔)
+    // Off (0) records nothing, so enabling it later does not flag old tasks at once.
+    let sent_tasks = (config.task_overdue_minutes > 0)
+        .then(|| crate::sent_tasks::Ledger::new(path, &config.server_url))
+        .transpose()?;
+    tokio::spawn(crate::sent_tasks::run(
+        path.to_path_buf(),
+        config.task_overdue_minutes,
+        cancel.clone(),
+    ));
+
     // 중앙 서버와 통신하는 비동기 태스크 시작
     let central = tokio::spawn(central::run_with_state(
         config,
@@ -206,6 +217,7 @@ pub async fn run(path: &Path) -> Result<()> {
             task_client.clone(),
             task_requests,
             cancel.clone(),
+            sent_tasks,
         ))
         .merge(crate::task_routes::router(
             mcp_token,

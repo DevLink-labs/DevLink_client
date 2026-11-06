@@ -24,12 +24,18 @@ export const updateSchema = z.union([
     taskId: decimalId, taskVersion: version, status: z.literal('COMPLETED') }),
   z.strictObject({ eventId: messageId, kind: z.enum(['TASK_QUESTION_CREATED', 'TASK_ANSWER_CREATED']),
     direction: z.literal('received'), taskId: messageId, sequence: messageId }),
+  // Local advisory: no final status was seen for `minutes` after you created the task.
+  // Central state is unchanged and the task is not cancelled; get_task_result stays authoritative.
+  z.strictObject({ eventId: z.string().regex(/^overdue:[1-9][0-9]{0,18}$/), kind: z.literal('TASK_OVERDUE'),
+    direction: z.literal('sent'), taskId: messageId, minutes: z.number().int().min(1).max(10_080) })
+    .refine(update => update.eventId === `overdue:${update.taskId}`, 'Overdue eventId must name its task.'),
 ]);
 export const updatesSchema = z.strictObject({
   updates: z.array(updateSchema).max(50),
-  // v2 adds the question/answer position; a v1 cursor from an older broker is still accepted.
+  // v2 adds the question/answer position and v3 the overdue position; older cursors from
+  // an older broker are still accepted.
   nextCursor: z.string().regex(new RegExp(
-    `^(v1\\.${position}\\.${position}|v2\\.${position}\\.${position}\\.${position})\\.[0-9a-f]{32}$`)),
+    `^(v1\\.${position}\\.${position}|v2\\.${position}\\.${position}\\.${position}|v3\\.${position}\\.${position}\\.${position}\\.${position})\\.[0-9a-f]{32}$`)),
   hasMore: z.boolean(),
   cursorReset: z.boolean(),
   coverage: z.literal('local'),

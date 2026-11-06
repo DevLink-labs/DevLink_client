@@ -289,6 +289,13 @@ impl Broker {
                 task_client.clone(),
                 requests,
                 cancel.clone(),
+                Some(
+                    devlink_broker::sent_tasks::Ledger::new(
+                        path,
+                        &format!("ws://{}", remote.address),
+                    )
+                    .unwrap(),
+                ),
             ))
             .merge(devlink_broker::agent_api::router(
                 Arc::new(LOCAL.into()),
@@ -439,6 +446,19 @@ async fn verified_team_creation_replays_a_rejected_task_without_creating_another
     assert_eq!(calls[0]["requestKey"], calls[1]["requestKey"]);
     drop(calls);
     broker.stop().await;
+    // The ledger write is detached from the response; wait for it, then confirm the
+    // replayed create did not record the task twice for the overdue advisory.
+    let mut recorded = 0;
+    for _ in 0..100 {
+        recorded += devlink_broker::sent_tasks::scan(&path, 1, u64::MAX).unwrap();
+        if recorded > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    recorded += devlink_broker::sent_tasks::scan(&path, 1, u64::MAX).unwrap();
+    assert_eq!(recorded, 1);
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@ use devlink_broker::{
     notifications::{Notifications, TaskNotification},
     private_file,
     protocol::{TaskCreatedMessage, TaskCreatedPayload, TaskMessageType},
+    sent_tasks,
     task_messages::{TaskMessage, TaskMessages},
     teams,
     update_hook::digest,
@@ -339,4 +340,34 @@ async fn digest_reports_arrivals_after_sixteen_other_scopes_pulled_empty() {
         .unwrap();
     let text = f.digest("codex").unwrap();
     assert!(text.contains("on 1 task(s): #300 (1 question)."), "{text}");
+}
+
+#[tokio::test]
+async fn digest_reports_overdue_sent_tasks_once_unless_already_finished() {
+    let f = Fixture::new();
+    for (agent, team, task) in [
+        (12, 1, 401),
+        (12, 1, 402),
+        (12, 1, 403),
+        (12, 2, 404),
+        (13, 1, 405),
+    ] {
+        sent_tasks::record(&f.path, ORIGIN, agent, team, task, 0).unwrap();
+    }
+    // 403 finished before the threshold; 402 finishes after its advisory was written.
+    f.notify(12, 403, 1, "IN_PROGRESS").await;
+    f.notify(12, 403, 2, "FAILED").await;
+    assert_eq!(sent_tasks::scan(&f.path, 30, 30 * 60_000).unwrap(), 4);
+    f.notify(12, 402, 1, "IN_PROGRESS").await;
+    f.notify(12, 402, 2, "COMPLETED").await;
+    let text = f.digest("claude-code").unwrap();
+    assert!(
+        text.contains("No result yet on 1 sent task(s) after the set time: #401 (30 min)."),
+        "{text}"
+    );
+    for absent in ["#403 (", "#404", "#405"] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+    assert!(!text.contains("#402 ("), "{text}");
+    assert_eq!(f.digest("claude-code"), None);
 }
