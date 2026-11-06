@@ -20,7 +20,7 @@ Rust CLI와 독립 로컬 브로커입니다. CLI는 설정과 프로세스 수�
 | Linux x64 (glibc) | `devlink-<버전>-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS Apple Silicon | `devlink-<버전>-aarch64-apple-darwin.tar.gz` |
 
-Linux 바이너리는 GitHub `ubuntu-latest` runner(현재 Ubuntu 24.04)에서 빌드합니다. 그보다 glibc가 오래된 배포판(Ubuntu 20.04, Debian 11, RHEL 8 등)에서는 `GLIBC_… not found`로 실행되지 않을 수 있습니다. 이때는 소스에서 빌드합니다. macOS Intel 번들은 아직 없습니다.
+Linux 바이너리는 GitHub `ubuntu-latest` runner에서 빌드합니다. 이 레이블의 OS 버전은 바뀔 수 있으므로 해당 릴리스의 빌드 로그에서 실제 이미지 버전을 확인합니다. 빌드 환경보다 glibc가 오래된 배포판(Ubuntu 20.04, Debian 11, RHEL 8 등)에서는 `GLIBC_… not found`로 실행되지 않을 수 있습니다. 이때는 소스에서 빌드합니다. macOS Intel 번들은 아직 없습니다.
 
 압축을 풀면 `devlink` 실행 파일 옆에 MCP 서버 런타임(`mcp-server/` 아래 `package.json`, `dist/`, `node_modules/`)이 있습니다. `devlink setup`은 실행 파일 옆의 `mcp-server/dist/index.js`를 MCP 진입점으로 찾으므로 두 항목을 같은 폴더에 두고 함께 옮겨야 합니다. 실행 파일만 다른 폴더로 복사하거나 심볼릭 링크로 PATH에 넣지 말고, 압축을 푼 폴더 자체를 PATH에 추가합니다(macOS는 링크 경로를 실행 파일 위치로 볼 수 있습니다). Node.js는 포함하지 않습니다.
 
