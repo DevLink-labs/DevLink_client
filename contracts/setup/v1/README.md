@@ -346,7 +346,7 @@ setup과 `setup status`가 같은 집계 규칙을 사용한다. CLI는 OS 잠�
 | `setupReady` | boolean. running + Connected + verified + valid + applied 모두 참일 때만 true |
 | `collaborationReady` | boolean 또는 null. setupReady=false이면 false, true일 때 Host bound면 true, unbound/conflict면 false, not_checked/unknown이면 null |
 
-`Connected`·`devlink_ping`·tools/list·설정 파일 존재만으로 setupReady/Host 바인딩을 확정하지 않는다. setup 성공은 Host가 로드할 설정과 브로커 준비까지이며 Host 실행/재시작은 nextActions로 안내한다. Host가 아직 실행되지 않아도 setupReady는 true일 수 있다. 협업 준비는 별도 필드로 표시하며 작업 왕복 E2E 완료와 동일시하지 않는다.
+`Connected`·`devlink_ping`·tools/list·설정 파일 존재만으로 setupReady/Host 바인딩을 확정하지 않는다. setup 성공은 Host가 로드할 설정과 브로커 준비까지이며 Host 실행/재시작은 nextActions로 안내한다. 사용자 계층 Host 훅(`devlink updates-hook`)이 설치되지 않았으면 `install_host_hooks`를 함께 안내한다. setup은 사용자 계층 파일을 읽기만 하고 쓰지 않으며, 설치는 `devlink hooks install`로 사용자가 명시적으로 한다. Host가 아직 실행되지 않아도 setupReady는 true일 수 있다. 협업 준비는 별도 필드로 표시하며 작업 왕복 E2E 완료와 동일시하지 않는다.
 
 현재 신원 진단을 안전하게 얻지 못하면 verify_connection은 성공할 수 없다. Connected이지만 identity=unknown인 경우 제한시간까지 읽기 전용 확인 후 SETUP_PROTOCOL_ERROR와 check_provider_contract로 반환한다. 인증 거부/신원 불일치는 즉시 중단한다. 호스트 세션 관측만 미지원이면 hostSession=not_checked로 표시하고 setupReady 판정에는 사용하지 않는다.
 
