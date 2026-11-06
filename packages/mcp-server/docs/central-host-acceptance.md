@@ -95,6 +95,12 @@ node packages/mcp-server/scripts/verify-central-hosts.mjs
   - 이 확인은 설치된 파일을 `--settings`로 직접 넘긴 것이다. 그래서 설치된 내용이 동작한다는 확인이며, Claude Code가 사용자 계층(`CLAUDE_CONFIG_DIR`)의 파일을 스스로 찾아 읽는지는 확인하지 않았다.
   - 세션이 끝난 뒤 같은 작업 폴더에서 `updates-hook --host claude-code --event user-prompt-submit`을 다시 실행하면 출력이 없었다. 훅이 그 알림을 소비했다는 뜻이다. Claude 세션 안에서 SessionStart와 UserPromptSubmit 중 어느 쪽이 문맥을 넣었는지는 따로 관측하지 않았다.
   - Codex는 같은 설치기가 만든 `hooks.json`의 이벤트 키(SessionStart·UserPromptSubmit)와 `trust_codex_hooks` 안내만 확인했다. `CODEX_HOME`을 격리하면 로그인 정보도 함께 빠지기 때문에 실제 Codex 세션은 실행하지 않았다. 사용자의 실제 `~/.claude`·`~/.codex`는 건드리지 않았다.
+- **실제 사용자 계층 설치 (같은 날)**
+  - 개발 PC의 `~/.claude/settings.json`·`~/.codex/hooks.json`에 `devlink hooks install --yes`로 설치했다. 설치된 `devlink.exe`는 같은 develop의 release 빌드로 교체했다.
+  - 두 Host 모두 사용자 설정만으로 DevLink 훅이 실행돼 Host별 cursor가 v1에서 v3로 다시 저장됐다.
+    - Claude Code는 SessionStart·UserPromptSubmit 훅 이벤트가 모두 exit 0이었다.
+    - Codex는 사용자가 `/hooks`에서 신뢰 승인한 뒤 실행했다.
+  - 실제 운영 중앙에는 새 작업을 만들지 않았다. 그래서 이 단계에서 주입된 내용은 없다.
 - **증거 보관**
   - report 전문(빌드 출처 SHA256 포함)과 `hook-check.log` 요약은 Notion 2026-11-06 작업 정리에 옮겼다.
   - 프롬프트·JSONL·stderr 원본(`run-0710922e-c4ea-416d-8635-15f3fdfc6bfc`)은 실행 세션의 임시 작업 폴더에만 있어 영구 보관되지 않는다.
