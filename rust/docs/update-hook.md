@@ -168,8 +168,18 @@ Codex (`~/.codex/hooks.json` 또는 `<repo>/.codex/hooks.json`):
 - 두 Host가 Agent 하나와 브로커 하나를 공유했다. 알림 cursor는 Host별로 독립이지만, MCP 업무 세션 소유권은 한 번에 한 Host만 갖는다. 소유 Host 종료 직후 다른 Host는 `SESSION_CONFLICT`를 받고 임대 만료(최대 약 90초)를 기다려야 했다.
 - 상세 기록은 팀 Notion "현재 PC DevLink 자동 알림 설치·검증 기록"(2026-11-04)에 있다.
 
+### 설치기 실제 확인 (2026-11-06, S15P31D108-176)
+
+- `devlink hooks install --host claude-code --yes`로 `CLAUDE_CONFIG_DIR`의 임시 위치에 설치했다. 격리 중앙에서 실제 작업 하나를 받은 프로필의 프로젝트에서 `claude -p --setting-sources project --settings <설치된 settings.json>`을 실행했다. Claude는 훅 문맥에서 task ID와 "사용자 승인이 아님" 문구를 읽었다. 그 뒤 같은 폴더·Host로 helper를 다시 실행하면 출력이 없었다.
+- 이어서 개발 PC의 실제 사용자 계층에 설치했다. 설치된 `devlink.exe`를 같은 develop 빌드로 교체한 뒤 `hooks install --yes`를 실행했다. 기존에 수동으로 넣은 UserPromptSubmit 항목은 같은 명령이라 그대로 두었고, SessionStart 항목만 추가됐다.
+  - Claude Code: 실제 프로젝트에서 `--settings` 없이 `claude -p --include-hook-events`를 실행했다. DevLink SessionStart(startup)·UserPromptSubmit 훅이 모두 exit 0으로 끝났고, Host별 cursor가 v1에서 v3로 다시 저장됐다. 이번에는 새 업데이트가 없어 주입 내용은 없었다.
+  - Codex: 사용자가 대화형 `/hooks`에서 새 훅을 신뢰 승인한 뒤 `codex exec`를 실행했다. 세션은 exit 0으로 끝났고, Host별 cursor가 v1에서 v3로 다시 저장됐다. 즉 helper가 실행됐다. Codex JSONL에는 훅 이벤트가 나오지 않아, 어느 이벤트에서 실행됐는지는 구분하지 않았다.
+  - 같은 실행에서, 수동으로 넣어 두었던 SessionStart 래퍼(`node …/session-start.cjs`)는 파일이 없어 실패하고 있었다. 이 항목은 DevLink 항목이 아니므로 설치기가 남겨 둔다.
+- 처음 격리 확인에서 Codex는 같은 설치기가 만든 `hooks.json`과 신뢰 안내까지만 확인했다. 상세는 [실제 두 Host 수용 검증](../../packages/mcp-server/docs/central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)에 있다.
+
 ### 남은 미검증
 
-- 신뢰된 프로젝트에서 프로젝트 계층 `.codex/hooks.json` 훅이 실행되는지. 두 검증 모두 사용자 계층 또는 `-c`만 사용했다.
+- 실제 사용자 계층에서 새 업데이트가 Codex 문맥에 주입되는지. 이번에는 helper 실행(cursor 갱신)까지만 확인했다. 내용 주입은 Claude Code에서 격리 중앙으로만 확인했다.
+- 신뢰된 프로젝트에서 프로젝트 계층 `.codex/hooks.json` 훅이 실행되는지. Codex 검증은 모두 사용자 계층 또는 `-c`만 사용했다.
 - 대화형 세션(TUI)에서 시작·재개·입력 시점별 동작을 따로 기록하지 않았다.
 - 시작 래퍼 없이 SessionStart에 `updates-hook`만 건 구성의 실제 서버 검증. 격리 PoC에서는 이 구성으로 확인했다.

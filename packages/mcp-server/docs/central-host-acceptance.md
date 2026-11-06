@@ -58,3 +58,54 @@ node packages/mcp-server/scripts/verify-central-hosts.mjs
 재현 증거는 ignored `.planning/mvp-closeout-2026-11-02/66-resumed-artifacts/run-bbd58f6e-5f1c-4094-bce5-57a12386b3cb/`의 프롬프트·JSONL·report·빌드 출처/SHA256과 `66-hosts-resumed.log`에 보관한다. 자격 파일·토큰은 PR에 포함하지 않는다. 최신 develop 기준 MCP 전체 시험은 115 passed, 0 failed이며, 이 중 판정기 시험 10건은 실제 Host 수용을 대체하지 않는다.
 
 다른 팀 접근 거부, 실패 사유/부분 수정 여부, 미존재·오프라인 수신자의 저장 전 거부, 저장 후 전달 실패의 PENDING 보존, 동일 requestKey 멱등성과 ACK 시간 초과는 선행 -97 실제 SDK 왕복 및 -67 중앙 시험에서 별도로 검증했다. 중앙 d06d239의 PostgreSQL 기반 전체 575건 통과 기록을 사용하며, 모든 예외를 두 LLM Host가 직접 재현했다고 확대하지 않는다. 주요 근거는 `TaskCreationIntegrationTest`의 duplicate/replay/routingFailure/unavailableReceiver/missingReceiver/timeout 사례, `TaskRoutingIntegrationTest`의 readyOnlyAndStaleOnlineReceiversCannotCreateAnyTask, `TaskAckIntegrationTest`의 missingAckTimesOutAndLateAckCannotChangeTimeoutResult, `TaskQueryIntegrationTest`의 rejectsAccessToAnotherTeam이다.
+
+## 2026-11-06 재검증 (develop 병합 후)
+
+2026-11-02 통과는 미병합 client 빌드를 합성한 결과였다. 그래서 관련 client PR이 모두 develop에 병합된 뒤, 병합된 develop 그대로 다시 실행했다.
+
+- **실행 조합**
+  - client develop `dfc28c72b7523284ec83c3c7d816dcf18a44fd8a`
+    - -96·-97, 질문·답변, 거절, requestKey, 훅 설치(#76), 지연 알림(#78), 프로브 상한(#73)이 모두 들어 있다.
+    - native CLI는 이 소스의 debug 빌드다.
+  - 중앙 서버 `34b2c15c116041e0bb70fd91a2f9ef74b28c79b9`(실행 시점 DevLink_server `origin/develop`)
+  - 격리 PostgreSQL 17.11: 포터블, loopback 임의 포트, 전용 계정
+  - Windows 11, Codex CLI 0.166.0, Claude Code 2.1.310. 실행기가 Claude를 `--model claude-opus-5-5 --effort high`로 실행한다.
+  - 서버는 `local` 프로필로 실행했다. 기본 프로필만으로는 `devlink.websocket.allowed-origins` placeholder가 채워지지 않아 시작에 실패했다.
+- **결과: 양방향 통과**
+  - report의 `passed`, `actualLlmHostsExecuted`, `ownedProcessesStopped`가 모두 true다.
+
+| 요청 | 실제 결과 |
+| --- | --- |
+| Codex → Claude, task 1 | PENDING → 명시적 IN_PROGRESS → invoice 수정 → Host 테스트 통과 → COMPLETED → Codex가 결과·diff 조회 |
+| Claude → Codex, task 2 | PENDING → 명시적 IN_PROGRESS → slug 수정 → Host 테스트 통과 → COMPLETED → Claude가 결과·diff 조회 |
+
+- **판정기가 확인한 항목** (2026-11-02와 같음)
+  - 부모의 독립 테스트가 통과했다.
+  - 고정 테스트와 Git index가 바뀌지 않았다.
+  - 지정한 소스 파일만 수정됐다.
+  - 실제 diff, 중앙 저장 결과, 요청자가 조회한 결과가 서로 일치한다.
+- **모델**
+  - Claude는 `claude-opus-5-5`로 보고됐다.
+  - Codex는 CLI 기본 모델을 썼다. transcript에 모델 ID가 없어 적지 않는다.
+- **훅 설치 실제 확인 (S15P31D108-176)**
+  - 같은 격리 중앙에서 별도 사용자 A·B를 만들고, A가 B에게 실제 작업 하나(task 4)를 보냈다.
+  - B 프로필로 `devlink hooks install --host claude-code --yes`를 실행했다. 대상은 `CLAUDE_CONFIG_DIR`로 지정한 임시 사용자 계층이다.
+  - 결과는 `applied`이고 status는 `installed`였다.
+  - B의 프로젝트에서 `claude -p --setting-sources project --settings <설치된 settings.json>`을 실행했다. Claude Code가 훅 문맥에서 "Task #4 (from agent 9)"를 읽었고, 이것이 사용자 승인이 아니라는 점도 인식했다.
+  - 이 확인은 설치된 파일을 `--settings`로 직접 넘긴 것이다. 그래서 설치된 내용이 동작한다는 확인이며, Claude Code가 사용자 계층(`CLAUDE_CONFIG_DIR`)의 파일을 스스로 찾아 읽는지는 확인하지 않았다.
+  - 세션이 끝난 뒤 같은 작업 폴더에서 `updates-hook --host claude-code --event user-prompt-submit`을 다시 실행하면 출력이 없었다. 훅이 그 알림을 소비했다는 뜻이다. Claude 세션 안에서 SessionStart와 UserPromptSubmit 중 어느 쪽이 문맥을 넣었는지는 따로 관측하지 않았다.
+  - Codex는 같은 설치기가 만든 `hooks.json`의 이벤트 키(SessionStart·UserPromptSubmit)와 `trust_codex_hooks` 안내만 확인했다. `CODEX_HOME`을 격리하면 로그인 정보도 함께 빠지기 때문에 실제 Codex 세션은 실행하지 않았다. 사용자의 실제 `~/.claude`·`~/.codex`는 건드리지 않았다.
+- **실제 사용자 계층 설치 (같은 날)**
+  - 개발 PC의 `~/.claude/settings.json`·`~/.codex/hooks.json`에 `devlink hooks install --yes`로 설치했다. 설치된 `devlink.exe`는 같은 develop의 release 빌드로 교체했다.
+  - 두 Host 모두 사용자 설정만으로 DevLink 훅이 실행돼 Host별 cursor가 v1에서 v3로 다시 저장됐다.
+    - Claude Code는 SessionStart·UserPromptSubmit 훅 이벤트가 모두 exit 0이었다.
+    - Codex는 사용자가 `/hooks`에서 신뢰 승인한 뒤 실행했다.
+  - 실제 운영 중앙에는 새 작업을 만들지 않았다. 그래서 이 단계에서 주입된 내용은 없다.
+- **증거 보관**
+  - report 전문(빌드 출처 SHA256 포함)과 `hook-check.log` 요약은 Notion 2026-11-06 작업 정리에 옮겼다.
+  - 프롬프트·JSONL·stderr 원본(`run-0710922e-c4ea-416d-8635-15f3fdfc6bfc`)은 실행 세션의 임시 작업 폴더에만 있어 영구 보관되지 않는다.
+  - 자격 파일과 토큰은 기록하지 않았다.
+- **아직 하지 않은 것**
+  - AC2(부분 수정 뒤 FAILED)와 AC7(제3자 재실행)은 여전히 실행하지 않았다.
+  - 교차 팀·offline·전달 실패·중복 요청은 이번에도 Host로 직접 재현하지 않았다. 근거는 위에 적은 중앙 `d06d239` 기준 통합 시험이다.
+  - 실행기 report는 taskId만 남기고 requestId·requestKey는 기록하지 않는다.
