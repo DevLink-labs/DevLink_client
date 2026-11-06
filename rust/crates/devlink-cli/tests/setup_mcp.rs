@@ -366,18 +366,32 @@ async fn changed_runtime_is_rejected_after_review_and_cannot_reuse_a_prior_probe
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_node_wrong_service_and_raw_runtime_errors_never_become_applied_configuration() {
     let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
-    for mode in ["old-node", "wrong-server", "invalid", "timeout"] {
+    for mode in [
+        "old-node",
+        "wrong-server",
+        "invalid",
+        "timeout",
+        "version-timeout",
+    ] {
         fs::write(
             f.options.node.as_ref().unwrap().with_extension("mcp-mode"),
             mode,
         )
         .unwrap();
-        let result = setup_mcp::prepare(
-            f.context.clone(),
-            f.options.clone(),
-            PathBuf::from(env!("CARGO_BIN_EXE_devlink")),
+        // Covers a stalled `--version` as well as a stalled initialize: each must end at
+        // the probe deadline, before the fixture's own 30s sleep. The bound leaves room
+        // for slow launches of the freshly copied fixture (#69). A termination held up by
+        // security software is not reproduced here.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(25),
+            setup_mcp::prepare(
+                f.context.clone(),
+                f.options.clone(),
+                PathBuf::from(env!("CARGO_BIN_EXE_devlink")),
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|_| panic!("{mode} runtime probe did not return in time"));
         let Err(error) = result else {
             panic!("invalid runtime accepted")
         };

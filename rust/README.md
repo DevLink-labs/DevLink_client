@@ -10,6 +10,83 @@ Rust CLI와 독립 로컬 브로커입니다. CLI는 설정과 프로세스 수�
 
 2026-10-29: 중앙 `TASK_CREATED` 수신 → 디스크 수신함 저장 → `ACK` 전송을 추가했습니다. 재접속·재시작 후 중복 수신을 구분하고, 저장 실패는 ACK 없이 `InboxFailed`로 중단합니다. 상태·완료·목록·결과의 Rust HTTP provider도 구현되어 있으며, MCP 최종 DTO와 실제 Host 전체 왕복은 후속 범위입니다. [수신함·ACK와 Mock 데모](docs/task-inbox.md)에 보관 위치·제한·실패 정책과 공동 계약이 필요한 항목을 정리했습니다.
 
+## 릴리스로 설치
+
+소스를 빌드하지 않고 GitHub Release의 압축 파일로 설치할 수 있습니다. 압축 파일 이름은 `devlink-<버전>-<target>`이고 `SHA256SUMS`가 함께 올라갑니다.
+
+| OS | 파일 |
+| --- | --- |
+| Windows x64 | `devlink-<버전>-x86_64-pc-windows-msvc.zip` |
+| Linux x64 (glibc) | `devlink-<버전>-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `devlink-<버전>-aarch64-apple-darwin.tar.gz` |
+
+Linux 바이너리는 GitHub `ubuntu-latest` runner에서 빌드합니다. 이 레이블의 OS 버전은 바뀔 수 있으므로 해당 릴리스의 빌드 로그에서 실제 이미지 버전을 확인합니다. 빌드 환경보다 glibc가 오래된 배포판(Ubuntu 20.04, Debian 11, RHEL 8 등)에서는 `GLIBC_… not found`로 실행되지 않을 수 있습니다. 이때는 소스에서 빌드합니다. macOS Intel 번들은 아직 없습니다.
+
+압축을 풀면 `devlink` 실행 파일 옆에 MCP 서버 런타임(`mcp-server/` 아래 `package.json`, `dist/`, `node_modules/`)이 있습니다. `devlink setup`은 실행 파일 옆의 `mcp-server/dist/index.js`를 MCP 진입점으로 찾으므로 두 항목을 같은 폴더에 두고 함께 옮겨야 합니다. 실행 파일만 다른 폴더로 복사하거나 심볼릭 링크로 PATH에 넣지 말고, 압축을 푼 폴더 자체를 PATH에 추가합니다(macOS는 링크 경로를 실행 파일 위치로 볼 수 있습니다). Node.js는 포함하지 않습니다.
+
+1. **압축 해제.** 현재 사용자만 쓸 수 있는 홈 아래 폴더에 풉니다. setup은 MCP 진입점과 상위 폴더를 다른 사용자가 바꿀 수 없어야 진행합니다([Windows paths](docs/setup.md#windows-paths)).
+
+   ```powershell
+   # Windows (PowerShell). 내려받은 폴더에서 실행합니다.
+   (Get-FileHash .\devlink-<버전>-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash  # SHA256SUMS와 비교
+   Expand-Archive .\devlink-<버전>-x86_64-pc-windows-msvc.zip -DestinationPath $HOME
+   Rename-Item "$HOME\devlink-<버전>-x86_64-pc-windows-msvc" "$HOME\DevLink"
+   ```
+
+   ```bash
+   # Linux / macOS
+   sha256sum -c SHA256SUMS --ignore-missing    # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
+   tar -xzf devlink-<버전>-<target>.tar.gz -C "$HOME"
+   mv "$HOME/devlink-<버전>-<target>" "$HOME/devlink"
+   ```
+
+   macOS에서 브라우저로 내려받았다면 Gatekeeper가 서명되지 않은 실행 파일을 막을 수 있습니다. 내용을 확인했다면 `xattr -dr com.apple.quarantine "$HOME/devlink"`로 격리 속성을 지웁니다.
+
+2. **PATH 추가.** 새 터미널에서 `devlink --version`이 버전을 출력하면 됩니다.
+
+   ```powershell
+   # Windows: 사용자 PATH에 한 번만 추가한 뒤 새 PowerShell을 엽니다.
+   # 사용자 PATH에 %VAR% 형태 항목이 있으면 이 방법 대신 "시스템 환경 변수 편집" 창에서 추가합니다.
+   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+   if (($userPath -split ';') -notcontains "$HOME\DevLink") {
+     [Environment]::SetEnvironmentVariable('Path', "$userPath;$HOME\DevLink", 'User')
+   }
+   ```
+
+   ```bash
+   # Linux / macOS: 셸 시작 파일(~/.bashrc, ~/.zshrc 등)에 추가합니다.
+   export PATH="$HOME/devlink:$PATH"
+   ```
+
+3. **Node 24 확인.** MCP 서버는 Node.js 24 이상으로 실행됩니다. `node --version`이 `v24` 이상이어야 합니다. 없으면 [Node.js](https://nodejs.org/) 24 LTS를 설치합니다. setup은 `--node-path`로 지정한 Node, 선택한 Host가 Node 스크립트(npm 설치)면 그 Host를 실행하는 Node, PATH의 Node 순서로 찾습니다. 따라서 Host를 실행하는 Node가 24 미만이면 PATH에 24가 있어도 실패할 수 있습니다. 이때는 `--node-path <Node 24 절대 경로>`를 지정합니다.
+
+4. **`devlink setup` 실행.** 연결할 프로젝트 폴더에서 실행합니다. 로그인·팀·도구·Agent 선택과 프로젝트 MCP 설정은 [setup 문서](docs/setup.md)를 따릅니다.
+
+   ```powershell
+   cd <프로젝트 폴더>
+   devlink setup
+   ```
+
+**업데이트.** Codex·Claude Code를 닫고 `devlink stop`으로 브로커를 멈춥니다. 이전 파일이 남지 않도록 기존 폴더를 지우고 새 압축 파일을 같은 이름으로 풉니다. 그다음 프로젝트 폴더에서 `devlink setup`을 다시 실행해 런타임을 확인합니다. 프로젝트 MCP 설정에는 Node와 MCP 진입점의 절대 경로가 들어가므로, 폴더 위치는 그대로 둡니다.
+
+```powershell
+# Windows
+devlink stop
+Remove-Item -Recurse -Force "$HOME\DevLink"
+Expand-Archive .\devlink-<새 버전>-x86_64-pc-windows-msvc.zip -DestinationPath $HOME
+Rename-Item "$HOME\devlink-<새 버전>-x86_64-pc-windows-msvc" "$HOME\DevLink"
+```
+
+```bash
+# Linux / macOS
+devlink stop
+rm -rf "$HOME/devlink"
+tar -xzf devlink-<새 버전>-<target>.tar.gz -C "$HOME"
+mv "$HOME/devlink-<새 버전>-<target>" "$HOME/devlink"
+```
+
+릴리스는 `.github/workflows/release.yml`이 `v*` 태그 push 때 만듭니다. 태그는 `rust/Cargo.toml`의 workspace 버전, `packages/mcp-server/package.json`의 버전과 같아야 합니다. 릴리스 워크플로는 번들 실행 확인만 하고 전체 테스트는 돌리지 않으므로, 태그는 master CI를 통과한 커밋에 답니다. 같은 태그의 Release가 이미 있으면 `gh release create`가 실패하므로 지운 뒤 다시 실행합니다. 로컬에서 같은 번들을 만들려면 저장소 루트에서 `node .github/scripts/package-release.mjs`를 실행합니다. 결과는 `dist/release/`에 생깁니다.
+
 ## Windows 개발 환경
 
 1. Visual Studio 2022 Build Tools의 **Desktop development with C++** 워크로드와 Windows SDK를 설치합니다.

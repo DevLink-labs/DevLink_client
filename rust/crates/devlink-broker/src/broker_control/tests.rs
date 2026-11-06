@@ -67,13 +67,13 @@ fn child(exit: bool) -> Child {
 #[tokio::test]
 async fn timeout_cleans_up_and_reaps_only_the_spawned_child() {
     let (_root, path) = fixture();
-    let mut child = child(false);
+    let mut child = Some(child(false));
     {
-        let owned = StartingChild {
+        let mut owned = StartingChild {
             child: &mut child,
             armed: true,
         };
-        let error = wait_for_start(&path, owned.child, Duration::from_millis(100))
+        let error = wait_for_start(&path, owned.child(), Duration::from_millis(100))
             .await
             .err()
             .unwrap();
@@ -82,7 +82,7 @@ async fn timeout_cleans_up_and_reaps_only_the_spawned_child() {
             FailureKind::StartupTimedOut
         );
     }
-    assert!(child.try_wait().unwrap().is_some());
+    assert!(child.expect("reaped inline").try_wait().unwrap().is_some());
     // Waiting for an unpublished child must not open the lock it needs to start.
     assert!(!state_directory(&path).join("broker.lock").exists());
     assert!(!local::running(&path).unwrap());
@@ -92,17 +92,17 @@ async fn timeout_cleans_up_and_reaps_only_the_spawned_child() {
 async fn cancellation_reaps_owned_child_while_control_lock_is_still_held() {
     let (_root, path) = fixture();
     let control = control_lock(&path).unwrap();
-    let mut child = child(false);
+    let mut child = Some(child(false));
     let result = tokio::time::timeout(Duration::from_millis(100), async {
-        let owned = StartingChild {
+        let mut owned = StartingChild {
             child: &mut child,
             armed: true,
         };
-        wait_for_start(&path, owned.child, Duration::from_secs(30)).await
+        wait_for_start(&path, owned.child(), Duration::from_secs(30)).await
     })
     .await;
     assert!(result.is_err());
-    assert!(child.try_wait().unwrap().is_some());
+    assert!(child.expect("reaped inline").try_wait().unwrap().is_some());
     assert!(
         config::try_lock(&state_directory(&path).join("control.lock"))
             .unwrap()
@@ -120,8 +120,8 @@ async fn cancellation_reaps_owned_child_while_control_lock_is_still_held() {
 async fn another_runtime_pid_cannot_satisfy_readiness_or_be_force_cleaned_up() {
     let (_root, path) = fixture();
     let _broker = config::lock(&state_directory(&path).join("broker.lock")).unwrap();
-    let mut unrelated = child(false);
-    let unrelated = StartingChild {
+    let mut unrelated = Some(child(false));
+    let mut unrelated = StartingChild {
         child: &mut unrelated,
         armed: true,
     };
@@ -129,7 +129,7 @@ async fn another_runtime_pid_cannot_satisfy_readiness_or_be_force_cleaned_up() {
         &path,
         &Runtime {
             api_version: local::API_VERSION,
-            pid: unrelated.child.id(),
+            pid: unrelated.child().id(),
             port: 9,
             instance_id: "other-instance".into(),
             control_token: "private-control-marker".into(),
@@ -137,13 +137,13 @@ async fn another_runtime_pid_cannot_satisfy_readiness_or_be_force_cleaned_up() {
     )
     .unwrap();
     let before = fs::read(Runtime::path(&path)).unwrap();
-    let mut spawned = child(false);
+    let mut spawned = Some(child(false));
     {
-        let owned = StartingChild {
+        let mut owned = StartingChild {
             child: &mut spawned,
             armed: true,
         };
-        let error = wait_for_start(&path, owned.child, Duration::from_millis(100))
+        let error = wait_for_start(&path, owned.child(), Duration::from_millis(100))
             .await
             .err()
             .unwrap();
@@ -152,8 +152,8 @@ async fn another_runtime_pid_cannot_satisfy_readiness_or_be_force_cleaned_up() {
             FailureKind::StartupTimedOut
         );
     }
-    assert!(spawned.try_wait().unwrap().is_some());
-    assert!(unrelated.child.try_wait().unwrap().is_none());
+    assert!(spawned.as_mut().unwrap().try_wait().unwrap().is_some());
+    assert!(unrelated.child().try_wait().unwrap().is_none());
     assert_eq!(before, fs::read(Runtime::path(&path)).unwrap());
     assert!(local::running(&path).unwrap());
 }
@@ -161,13 +161,13 @@ async fn another_runtime_pid_cannot_satisfy_readiness_or_be_force_cleaned_up() {
 #[tokio::test]
 async fn early_child_exit_is_reported_and_reaped() {
     let (_root, path) = fixture();
-    let mut child = child(true);
+    let mut child = Some(child(true));
     {
-        let owned = StartingChild {
+        let mut owned = StartingChild {
             child: &mut child,
             armed: true,
         };
-        let error = wait_for_start(&path, owned.child, Duration::from_secs(5))
+        let error = wait_for_start(&path, owned.child(), Duration::from_secs(5))
             .await
             .err()
             .unwrap();
@@ -176,7 +176,7 @@ async fn early_child_exit_is_reported_and_reaped() {
             FailureKind::ChildExited
         );
     }
-    assert!(child.try_wait().unwrap().is_some());
+    assert!(child.as_mut().unwrap().try_wait().unwrap().is_some());
 }
 
 #[tokio::test]
@@ -326,11 +326,11 @@ async fn a_held_lock_without_runtime_is_a_starting_broker_not_damaged_storage() 
 async fn a_linked_lock_after_verified_health_is_retried_and_reported_as_storage_at_the_deadline() {
     use axum::{Json, Router, routing::get};
     let (root, path) = fixture();
-    let mut child = child(false);
+    let mut child = Some(child(false));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let runtime = Runtime {
         api_version: local::API_VERSION,
-        pid: child.id(),
+        pid: child.as_ref().unwrap().id(),
         port: listener.local_addr().unwrap().port(),
         instance_id: "expected-instance".into(),
         control_token: "private-control-marker".into(),
@@ -389,13 +389,13 @@ async fn a_linked_lock_after_verified_health_is_retried_and_reported_as_storage_
     // error is retried until the deadline and then reported in place of a timeout.
     let started = Instant::now();
     {
-        let owned = StartingChild {
+        let mut owned = StartingChild {
             child: &mut child,
             armed: true,
         };
         let error = tokio::time::timeout(
             Duration::from_secs(5),
-            wait_for_start(&path, owned.child, Duration::from_millis(400)),
+            wait_for_start(&path, owned.child(), Duration::from_millis(400)),
         )
         .await
         .expect("unsafe lock must be reported at the readiness deadline")
@@ -407,7 +407,53 @@ async fn a_linked_lock_after_verified_health_is_retried_and_reported_as_storage_
         assert_eq!(fault.file, lock);
     }
     assert!(started.elapsed() >= Duration::from_millis(400));
-    assert!(child.try_wait().unwrap().is_some());
+    assert!(child.as_mut().unwrap().try_wait().unwrap().is_some());
     assert_eq!(fs::read_to_string(sentinel).unwrap(), "preserved");
     server.abort();
+}
+
+#[test]
+fn a_child_still_exiting_after_the_bound_is_reaped_in_the_background() {
+    // Not killed and no wait budget: the caller returns at once and the reaper owns it.
+    let mut child = child(false);
+    let id = child.id();
+    assert!(matches!(child.try_wait(), Ok(None)));
+    let started = std::time::Instant::now();
+    assert!(!reaped_within(&mut child, Duration::ZERO));
+    let reaper = hand_to_reaper(child).expect("handed to a reaper");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!reaper.is_finished());
+    // Ending the process lets the reaper's wait return, so nothing is left unreaped.
+    kill_pid(id);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !reaper.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        reaper.is_finished(),
+        "reaper did not finish after the child exited"
+    );
+    reaper.join().unwrap();
+}
+
+#[test]
+fn a_child_that_exits_within_the_bound_is_reaped_inline() {
+    let mut child = child(false);
+    child.kill().unwrap();
+    assert!(reaped_within(&mut child, Duration::from_secs(5)));
+    assert!(child.try_wait().unwrap().is_some());
+}
+
+fn kill_pid(id: u32) {
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &id.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(unix)]
+    let status = std::process::Command::new("kill")
+        .args(["-9", &id.to_string()])
+        .status();
+    assert!(status.unwrap().success());
 }

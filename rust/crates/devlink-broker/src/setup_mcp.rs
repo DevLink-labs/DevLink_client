@@ -492,6 +492,14 @@ fn command(executable: &Executable) -> tokio::process::Command {
     }
     command
 }
+/// Termination may be delayed by the OS or security software, so the reap after a
+/// failed probe is bounded as well as the probe itself. kill_on_drop stays as a backstop.
+/// If the bound passes, a child still exiting can keep the probe's temporary working
+/// directory in use on Windows; that empty directory is then left behind.
+async fn terminate(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(crate::tool_discovery::REAP_TIMEOUT, child.wait()).await;
+}
 async fn probe_runtime(executable: &Executable) -> Result<()> {
     let cwd = tempfile::tempdir().map_err(|_| error("SETUP_TOOL_UNAVAILABLE"))?;
     let mut version = command(executable)
@@ -530,8 +538,7 @@ async fn probe_runtime(executable: &Executable) -> Result<()> {
         _ => false,
     };
     if !valid {
-        let _ = version.kill().await;
-        let _ = version.wait().await;
+        terminate(&mut version).await;
         return Err(error("SETUP_TOOL_UNAVAILABLE"));
     }
     let mut child = command(executable)
@@ -575,8 +582,7 @@ async fn probe_runtime(executable: &Executable) -> Result<()> {
         Ok::<_, std::io::Error>(valid? && err.is_ok())
     }).await;
     if !matches!(checked, Ok(Ok(true))) {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        terminate(&mut child).await;
         return Err(error("SETUP_TOOL_UNAVAILABLE"));
     }
     Ok(())
