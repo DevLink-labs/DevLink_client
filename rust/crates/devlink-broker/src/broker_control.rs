@@ -281,19 +281,19 @@ pub async fn start(path: &Path, executable: &Path) -> Result<StartResult> {
     let spawned = command.spawn();
     #[cfg(windows)]
     drop(restore_inheritance);
-    let mut child = spawned.map_err(|e| {
+    let mut child = Some(spawned.map_err(|e| {
         classify(
             anyhow::Error::new(e).context("Cannot spawn broker process"),
             FailureKind::SpawnFailed,
             path,
             Outcome::NotApplied,
         )
-    })?;
+    })?);
     let mut owned = StartingChild {
         child: &mut child,
         armed: true,
     };
-    let (health, port) = wait_for_start(path, owned.child, startup_timeout(path)).await?;
+    let (health, port) = wait_for_start(path, owned.child(), startup_timeout(path)).await?;
     save_pending_port(path, &config, port)?;
     owned.armed = false; // std::process::Child drop deliberately leaves a ready broker running.
     Ok(StartResult {
@@ -363,26 +363,65 @@ async fn wait_for_start(
 
 /// Only a Child handle obtained by our spawn is ever force-cleaned up. This also
 /// handles errors or cancellation while waiting, before releasing control.lock.
-/// The kill is always sent, but reaping is bounded: if the exit takes longer, a
-/// terminating child may still hold broker.lock briefly after control.lock is released,
-/// and the next start or stop reports a busy broker until it is gone.
+/// The kill is always sent, but the caller waits for the exit only up to
+/// `REAP_TIMEOUT`: if the exit takes longer, a terminating child may still hold
+/// broker.lock briefly after control.lock is released, and the next start or stop
+/// reports a busy broker until it is gone. Reaping then continues in the background.
+/// The handle sits in an `Option` so a child still exiting can be moved to a reaper.
 struct StartingChild<'a> {
-    child: &'a mut Child,
+    child: &'a mut Option<Child>,
     armed: bool,
+}
+impl StartingChild<'_> {
+    fn child(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("the starting child is present until cleanup")
+    }
 }
 impl Drop for StartingChild<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = self.child.kill();
-            // Reap without blocking indefinitely: termination can be delayed by the OS
-            // or security software, and this drop may run on an async worker thread.
-            let deadline = std::time::Instant::now() + crate::tool_discovery::REAP_TIMEOUT;
-            while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline
+        if !self.armed {
+            return;
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            if !reaped_within(child, crate::tool_discovery::REAP_TIMEOUT)
+                && let Some(child) = self.child.take()
             {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                let _ = hand_to_reaper(child);
             }
         }
     }
+}
+
+/// Wait up to `timeout` for a killed child to exit and be reaped; this may run on an
+/// async worker thread. False means it is still exiting (termination can be delayed by
+/// the OS or security software).
+fn reaped_within(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Ok(None) => return false,
+            // Exited and reaped, or the status cannot be queried any more.
+            Ok(Some(_)) | Err(_) => return true,
+        }
+    }
+}
+
+/// Dropping a `std::process::Child` never reaps it and would leave a zombie on Unix, so
+/// a child still exiting is waited for on a background thread instead. If no thread can
+/// be started (resource exhaustion), the child is dropped unreaped as before this change.
+fn hand_to_reaper(mut child: Child) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("devlink-broker-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .ok()
 }
 
 /// Graceful authenticated stop only. An unhealthy/replaced broker is never killed.
