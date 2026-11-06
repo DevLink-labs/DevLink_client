@@ -1,6 +1,8 @@
 # MVP 실제 통합 검증 — S15P31D108-66
 
-## 현재 판정 (2026-10-28, Asia/Seoul)
+## 과거 판정 (2026-10-28, Asia/Seoul)
+
+> 아래 판정과 표는 2026-10-28 당시 기록이다. 최신 관측은 아래 "수용 기준과 증거 양식"의 2026-11-06 표와 [실제 두 Host 수용 검증](central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)을 따른다.
 
 **실제 MVP 수용 기준은 미검증이며 스토리를 완료로 처리하지 않는다.** 별도 통합 환경이 없어 이번 변경은 준비 상태 검사, 실제 Rust 재현, 후속 검증 절차를 제공한다. 기존 가짜 브로커 기반 Host 테스트(-64·-65)는 실제 중앙 서버·두 사용자 프로젝트의 결과를 대신하지 않는다.
 
@@ -74,7 +76,19 @@ node packages/mcp-server/scripts/verify-rust-readiness.mjs --cli $integrationCli
 
 ## 수용 기준과 증거 양식
 
-모든 행의 현재 관측은 **NOT_RUN / 선행 API·실제 환경 부재**다. 실제 실행 후에만 PASS/FAIL로 바꾸고 원문 토큰·개인 정보는 제거한다. 정상 두 방향은 각각 독립된 증거를 남긴다.
+실제 실행 후에만 PASS/FAIL로 바꾸고 원문 토큰·개인 정보는 제거한다. 정상 두 방향은 각각 독립된 증거를 남긴다.
+
+2026-11-06 기준 관측은 아래와 같다. 근거는 [실제 두 Host 수용 검증](central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)이고, 실행 조합은 client develop `dfc28c7`, 중앙 develop `34b2c15`, PostgreSQL 17.11이다.
+
+| ID | 관측 |
+| --- | --- |
+| AC1-A / AC1-B | PASS. Codex→Claude task 1, Claude→Codex task 2. 실제 diff·결과 조회 일치는 확인했다. requestId·requestKey는 실행기 report에 남지 않는다 |
+| AC3 | 부분 확인. 판정기는 두 방향의 PENDING 조회 → 명시적 IN_PROGRESS → COMPLETED 호출 순서만 확인했다. 수락 전에 로컬 파일이 바뀌지 않았는지와 각 시점의 파일 diff는 확인하지 않았다. FAILED 종료 경로는 AC2와 함께 미실행 |
+| AC2 | NOT_RUN |
+| AC4·AC5·AC6 | 두 Host로는 NOT_RUN. 근거는 중앙 `d06d239` 기준 통합 시험(-67 등, 575건)뿐이다 |
+| AC7 | NOT_RUN |
+
+아래 표는 각 ID의 정의다.
 
 | ID | 재현·예상 결과 | 필수 증거 |
 | --- | --- | --- |
