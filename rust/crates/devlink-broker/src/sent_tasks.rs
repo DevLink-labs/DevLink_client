@@ -137,8 +137,10 @@ fn now_ms() -> u64 {
 pub struct Ledger {
     config_path: Arc<PathBuf>,
     origin: Arc<String>,
-    /// Ledger generation when the broker started; `None` if it could not be read, in
-    /// which case recording fails on the same unreadable file anyway.
+    /// Ledger generation when the broker started, read under the ledger lock. `None`
+    /// (unreadable at start) refuses every record: a clear that later repairs the file
+    /// must not let this broker's queued records restore it, and while the broker runs
+    /// the file cannot be cleared, so no valid record is lost by refusing.
     generation: Option<u64>,
 }
 impl Ledger {
@@ -146,7 +148,13 @@ impl Ledger {
         Ok(Self {
             config_path: Arc::new(config_path.to_path_buf()),
             origin: Arc::new(endpoint_url(server_url)?.to_string()),
-            generation: read(&path(config_path)).ok().map(|s| s.generation),
+            generation: {
+                let path = path(config_path);
+                locked(&path)
+                    .ok()
+                    .and_then(|_guard| read(&path).ok())
+                    .map(|s| s.generation)
+            },
         })
     }
     /// The synchronous write behind `created`, exposed for ordering tests.
@@ -157,6 +165,9 @@ impl Ledger {
         task_id: u64,
         created_at_ms: u64,
     ) -> Result<()> {
+        let generation = self.generation.ok_or_else(|| {
+            anyhow::anyhow!("Sent task ledger was unreadable when the broker started")
+        })?;
         record_in(
             &self.config_path,
             &self.origin,
@@ -164,7 +175,7 @@ impl Ledger {
             team_id,
             task_id,
             created_at_ms,
-            self.generation,
+            Some(generation),
         )
     }
     /// Best effort and detached: the create response never waits for this local write,
@@ -488,20 +499,25 @@ mod tests {
         assert!(restarted.record_now(7, 3, 13, 0).is_err());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_create_still_queued_in_the_blocking_pool_is_dropped_after_a_clear() {
+    #[test]
+    fn a_ledger_that_was_unreadable_at_start_never_records_even_after_a_clear() {
         let (_dir, config) = profile();
+        // Readable JSON that fails validation, written with private permissions.
+        private_file::write(
+            &path(&config),
+            &serde_json::json!({"schemaVersion": 2, "tasks": [], "events": []}),
+            MAX_BYTES,
+        )
+        .unwrap();
         let ledger = Ledger::new(&config, ORIGIN).unwrap();
-        // Hold the only writer lock so the detached record waits, as a busy pool would.
-        let held = WRITER.lock().unwrap();
-        ledger.created(7, 3, 20);
-        // Clear runs first once the lock is free; the queued write must lose.
-        drop(held);
+        assert!(ledger.record_now(7, 3, 10, 0).is_err());
+        // Clearing repairs the file, but this broker's queued writes still lose.
         clear_config(&config).unwrap();
-        for _ in 0..50 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        assert!(ledger.record_now(7, 3, 11, 0).is_err());
         assert!(read(&path(&config)).unwrap().tasks.is_empty());
+        let restarted = Ledger::new(&config, ORIGIN).unwrap();
+        restarted.record_now(7, 3, 12, 0).unwrap();
+        assert_eq!(read(&path(&config)).unwrap().tasks.len(), 1);
     }
 
     #[test]
