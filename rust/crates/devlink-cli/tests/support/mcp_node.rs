@@ -9,6 +9,7 @@ fn main() {
     assert!(std::env::var_os("DEVLINK_BROKER_FILE").is_none());
     assert!(std::env::var_os("NODE_OPTIONS").is_none());
     if args == ["--version"] {
+        if mode == "version-timeout" { std::thread::sleep(std::time::Duration::from_secs(30)); }
         if mode == "old-node" { println!("v22.0.0"); } else { println!("v24.18.0"); }
         return;
     }
