@@ -619,7 +619,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 - Node 24 이상이 필요하다. `--node-path` → 선택 Host의 Node 실행 경로 → PATH의 절대 경로 순으로 찾는다. MCP 진입점은 `--mcp-entry` → CLI 옆 `mcp-server/dist/index.js` → CLI 위치에서 확인한 개발 checkout의 `packages/mcp-server/dist/index.js` 순이다. 현재 작업 폴더나 빌드 PC 경로를 실행 경로로 쓰지 않는다. 개발 checkout은 `npm.cmd --prefix packages/mcp-server run build`로 먼저 빌드한다. 다운로드·설치·배포 패키지 제작은 수행하지 않는다.
 - 실행 전 경로·권한을 확인하고 Node 버전과 MCP stdio `initialize`를 제한 시간 5초/출력 16 KiB 안에서 확인한다. 검사용 프로세스에는 DevLink 자격 환경변수와 Node 실행 옵션을 전달하지 않는다. AI 작업·업무 도구·Host 세션 등록을 호출하지 않는다.
-- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 / Claude Code 2.1.310**이다. 미검증 버전과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
+- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 / Claude Code 2.1.317**이다. 미검증 버전과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
 - 생성/병합 계획은 안전한 DevLink 항목만 표시한다. TTY에서는 계획을 보여준 후 확인하고, 비대화형에서는 `--apply-mcp`가 없으면 `SETUP_INPUT_REQUIRED`/종료 2와 `mcpPlan`을 반환한다. 거절/EOF는 종료 130이다. 기존 항목이 일치하면 확인·재작성·추가 백업 없이 재사용한다.
 - 확인한 같은 제공자 인스턴스와 `planId`/예상 digest로 적용한다. 입력 대기 동안 잠금은 해제하며 적용 직전에 사용자·팀·Agent·도구·브로커 PID/instance·프로필/자격/실행 파일 해시를 재확인한다. Host 파일의 동시 수정은 제공자의 digest 검사로 거절한다. 확인 후 계획을 몰래 재생성하지 않는다.
 
@@ -757,4 +757,4 @@ $env:DEVLINK_MCP_BUILD = (Resolve-Path ../packages/mcp-server/dist).Path
 cargo test --offline --locked -p devlink-broker --test task_creation actual_mcp_ -- --ignored
 ```
 
-실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.310` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
+실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.317` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.

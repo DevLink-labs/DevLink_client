@@ -14,7 +14,7 @@ use std::{
 };
 
 pub const CODEX_VERSION: &str = "0.166.0";
-pub const CLAUDE_VERSION: &str = "2.1.310";
+pub const CLAUDE_VERSION: &str = "2.1.317";
 const LIMIT: usize = 1024 * 1024;
 type Result<T> = std::result::Result<T, ConfigError>;
 

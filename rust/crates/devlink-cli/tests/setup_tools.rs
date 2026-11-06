@@ -76,7 +76,7 @@ async fn discovery_reports_missing_available_failure_and_invalid_output_without_
     let reports = search(root.path()).detect(None, None).await;
     assert!(reports.iter().all(|r| r.status == DetectionStatus::Missing));
     let exe = tool_fixture::host(root.path(), "codex", "codex-cli 0.166.0");
-    let claude = tool_fixture::host(root.path(), "claude", "2.1.310 (Claude Code)");
+    let claude = tool_fixture::host(root.path(), "claude", "2.1.317 (Claude Code)");
     let reports = search(root.path()).detect(None, None).await;
     assert!(
         reports
@@ -155,7 +155,7 @@ async fn real_node_loads_npm_esm_entries_for_both_hosts_and_reuses_saved_paths()
             "claude",
             "@anthropic-ai/claude-code",
             "cli.js",
-            "2.1.310 (Claude Code)",
+            "2.1.317 (Claude Code)",
         ),
     ] {
         let package = directory.join("node_modules").join(package);
@@ -179,7 +179,7 @@ async fn real_node_loads_npm_esm_entries_for_both_hosts_and_reuses_saved_paths()
             if tool == ToolType::Codex {
                 "0.166.0"
             } else {
-                "2.1.310"
+                "2.1.317"
             }
         );
         assert_eq!(
@@ -303,7 +303,7 @@ async fn multiple_tools_require_selection_and_saved_valid_choice_wins_when_both_
     let f = fixture().await;
     let directory = f._root.path().join("tools");
     tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
-    tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
     let context = SetupContext {
         config_path: f.path.clone(),
     };
@@ -347,7 +347,7 @@ async fn interactive_selection_emits_detected_choices_and_resumes_only_the_tool_
     let f = fixture().await;
     let directory = f._root.path().join("tools");
     tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
-    tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
     let mut events = Vec::new();
     let stages = SetupStages::default()
         .with_mcp(tool_fixture::mcp_options(
@@ -396,7 +396,7 @@ async fn a_requested_tool_is_probed_alone_and_other_hosts_are_never_launched() {
     let f = fixture().await;
     let directory = f._root.path().join("tools");
     let codex = tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
-    let claude = tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    let claude = tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
     let context = SetupContext {
         config_path: f.path.clone(),
     };
@@ -431,7 +431,7 @@ async fn a_resumed_interactive_choice_reprobes_only_the_chosen_tool() {
     let f = fixture().await;
     let directory = f._root.path().join("tools");
     let codex = tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
-    let claude = tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    let claude = tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
     let stages = SetupStages::default()
         .with_mcp(tool_fixture::mcp_options(
             &f._root.path().join("mcp-runtime"),
@@ -611,7 +611,7 @@ async fn saved_executable_is_reused_outside_path_and_a_stale_unbound_choice_can_
         first.execute(Step::SelectTool, &context).await,
         StepResult::Complete { .. }
     ));
-    tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
     let mut again = prepare(&f, &directory).await;
     assert!(matches!(
         again.execute(Step::SelectTool, &context).await,
@@ -632,7 +632,7 @@ async fn bound_agent_tool_is_preferred_and_cannot_be_silently_switched_or_rotate
     let f = fixture().await;
     let directory = f._root.path().join("tools");
     let exe = tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
-    tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+    tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
     private_file::write(&agent_profile::path(&f.path), &json!({
         "schemaVersion":1, "origin":devlink_broker::user_auth::origin(&config::Config::load(&f.path).unwrap()).unwrap().as_str(),
         "userId":51,"teamId":71,"projectRoot":f._root.path().canonicalize().unwrap(),
@@ -761,7 +761,7 @@ async fn cancellation_io_failure_removed_tool_and_changed_profile_are_not_retrie
         let f = fixture().await;
         let directory = f._root.path().join("tools");
         tool_fixture::host(&directory, "codex", "codex-cli 0.166.0");
-        tool_fixture::host(&directory, "claude", "2.1.310 (Claude Code)");
+        tool_fixture::host(&directory, "claude", "2.1.317 (Claude Code)");
         let mut stages = prepare(&f, &directory).await.with_tool_input(ChangedInput {
             path: f.path.clone(),
             mode,

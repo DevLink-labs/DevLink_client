@@ -212,12 +212,12 @@ async fn codex_project_configuration_is_applied_and_reused_without_token_values(
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_project_configuration_is_applied_and_reused_without_token_values() {
-    create_and_reuse(ToolType::ClaudeCode, "2.1.310").await;
+    create_and_reuse(ToolType::ClaudeCode, "2.1.317").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_preserves_other_mcp_settings_and_returns_a_private_exact_backup() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let original = br#"{"huge":9223372036854775807,"mcpServers":{"other":{"command":"other","env":{"OTHER_SECRET":"unrelated-private-marker"}}}}"#;
     fs::write(f.target(), original).unwrap();
     let prepared = f.plan().await;
@@ -262,7 +262,7 @@ impl McpInput for Confirm {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_keeps_the_same_plan_and_refuses_concurrent_config_edits() {
-    let mut f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let mut f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let snapshot = f.profile();
     let calls = Arc::new(AtomicUsize::new(0));
     let stages = f.stages.take().unwrap();
@@ -365,7 +365,7 @@ async fn changed_runtime_is_rejected_after_review_and_cannot_reuse_a_prior_probe
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_node_wrong_service_and_raw_runtime_errors_never_become_applied_configuration() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     for mode in [
         "old-node",
         "wrong-server",
@@ -407,7 +407,7 @@ async fn old_node_wrong_service_and_raw_runtime_errors_never_become_applied_conf
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_requires_review_applies_explicitly_and_then_reuses_configuration_before_verify_step() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let base = [
         "setup",
         "--output",
@@ -519,7 +519,7 @@ async fn preflight_rejects_existing_host_conflict_before_agent_or_token_creation
     app.state.calls.lock().unwrap().clear();
     let root = app._root.path();
     let host =
-        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.317 (Claude Code)");
     let (node, entry) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
     let target = root.join(".mcp.json");
     let original =
@@ -592,7 +592,7 @@ async fn preflight_rejects_existing_host_conflict_before_agent_or_token_creation
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn setup_reports_a_fixed_port_conflict_and_can_retry_with_another_fixed_port() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let free = local::Runtime::load(&f.app.path).unwrap().port;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let occupied = listener.local_addr().unwrap().port();
@@ -660,7 +660,7 @@ async fn preflight_reports_the_runtime_directory_with_unsafe_permissions() {
     let root = app._root.path();
     credentials::set_private_permissions(root).unwrap();
     let host =
-        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.317 (Claude Code)");
     let (node, _) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
     let shared = root.join("shared");
     fs::create_dir(&shared).unwrap();
@@ -737,7 +737,7 @@ async fn preflight_rejects_missing_node_before_agent_or_token_creation() {
     app.state.calls.lock().unwrap().clear();
     let root = app._root.path();
     let host =
-        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.317 (Claude Code)");
     let (_, entry) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
     let node = root.join(if cfg!(windows) {
         "missing/node.exe"
@@ -790,7 +790,7 @@ async fn preflight_checks_a_later_tool_selection_and_rechecks_changes_before_reg
     assert!(app.login().status.success());
     let root = app._root.path();
     let hosts = root.join("hosts");
-    account_server::tool_fixture::host(&hosts, "claude", "2.1.310 (Claude Code)");
+    account_server::tool_fixture::host(&hosts, "claude", "2.1.317 (Claude Code)");
     let options = account_server::tool_fixture::mcp_options(&root.join("runtime"));
     let mut stages = SetupStages::default()
         .with_project(ProjectOptions {
@@ -894,7 +894,7 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
     let script = npm.join("node_modules/@anthropic-ai/claude-code/cli.js");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
     fs::write(&script, "synthetic entry").unwrap();
-    fs::write(script.with_extension("probe"), "2.1.310 (Claude Code)").unwrap();
+    fs::write(script.with_extension("probe"), "2.1.317 (Claude Code)").unwrap();
     // PATH keeps PowerShell for the broker's ACL setup but offers no Node at all.
     let path = std::env::join_paths(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())

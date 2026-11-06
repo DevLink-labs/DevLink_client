@@ -8,7 +8,10 @@ use super::{
 };
 use clap::{Args, Subcommand, ValueEnum};
 use devlink_broker::{
-    mcp_config, sessions::ToolType, setup_connection, setup_mcp, tool_discovery::DetectionStatus,
+    mcp_config,
+    sessions::ToolType,
+    setup_connection, setup_mcp,
+    tool_discovery::{DetectionStatus, ToolSearch},
 };
 use serde::Serialize;
 use std::{
@@ -90,6 +93,8 @@ pub struct SetupArgs {
 
 #[derive(Subcommand)]
 pub enum SetupCommand {
+    /// List available Host tools as JSON using local version probes only
+    Tools,
     /// Inspect setup readiness without changing the profile, broker, or Host
     Status {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -124,22 +129,42 @@ impl fmt::Display for SetupExit {
 impl std::error::Error for SetupExit {}
 
 pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
-    if let Some(SetupCommand::Status {
-        output,
-        node_path,
-        mcp_entry,
-    }) = args.command
-    {
-        return status(
-            path,
+    match args.command {
+        Some(SetupCommand::Tools) => {
+            let available: Vec<_> = ToolSearch::default()
+                .detect(None, None)
+                .await
+                .into_iter()
+                .filter(|report| report.status == DetectionStatus::Available)
+                .map(|report| match report.tool_type {
+                    ToolType::Codex => "codex",
+                    ToolType::ClaudeCode => "claude-code",
+                })
+                .collect();
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string(&available)?
+            )?;
+            return Ok(());
+        }
+        Some(SetupCommand::Status {
             output,
-            setup_mcp::Options {
-                node: node_path,
-                entry: mcp_entry,
-                ..Default::default()
-            },
-        )
-        .await;
+            node_path,
+            mcp_entry,
+        }) => {
+            return status(
+                path,
+                output,
+                setup_mcp::Options {
+                    node: node_path,
+                    entry: mcp_entry,
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        None => {}
     }
     let context = SetupContext {
         config_path: path.to_path_buf(),
