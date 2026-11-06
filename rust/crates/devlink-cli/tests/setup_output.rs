@@ -1,6 +1,10 @@
+use devlink_broker::{
+    sessions::ToolType,
+    tool_discovery::{DetectionStatus, HostExecutable, SelectedTool, ToolDetection},
+};
 use devlink_cli::setup::{
-    Completion, ErrorCode, ErrorLocation, Outcome, ProgressEvent, RunResult, RunStatus, SetupError,
-    Stage, StageStatus, Step,
+    AgentChoice, Completion, ErrorCode, ErrorLocation, Outcome, ProgressEvent, RunResult,
+    RunStatus, SetupError, Stage, StageStatus, Step,
     terminal::{OutputFormat, Renderer},
 };
 use serde::{Serialize, Serializer};
@@ -79,6 +83,77 @@ fn jsonl_keeps_each_progress_and_final_result_in_a_separate_record() {
     assert_eq!(records[0]["type"], "progress");
     assert_eq!(records[1]["type"], "result");
     assert_eq!(records[0]["runId"], records[1]["runId"]);
+}
+
+#[test]
+fn human_paths_and_choices_are_readable_and_escape_terminal_controls() {
+    #[cfg(windows)]
+    let (internal, display) = (r"\\?\C:\DevLink\config.json", r"C:\DevLink\config.json");
+    #[cfg(not(windows))]
+    let (internal, display) = ("/DevLink/config.json", "/DevLink/config.json");
+    let mut failure = result(());
+    failure.status = RunStatus::Failed;
+    failure.exit_code = 5;
+    let mut error = SetupError::new(ErrorCode::UnsafeFile, Step::Validate, Outcome::NotApplied);
+    error.location = Some(ErrorLocation {
+        file: internal.into(),
+        field: Some("localPort"),
+    });
+    error.tools.push(ToolDetection {
+        tool_type: ToolType::Codex,
+        status: DetectionStatus::Available,
+        selected: Some(SelectedTool {
+            tool_type: ToolType::Codex,
+            executable: HostExecutable {
+                command: internal.into(),
+                args: vec![],
+            },
+            version: "0.166.0".into(),
+        }),
+        install_url: "https://example.test",
+        mcp_automatic_supported: true,
+    });
+    error.agent_choices.push(AgentChoice {
+        id: "201".into(),
+        name: "Agent \"이름\"\n\u{001b}".into(),
+        project_name: "프로젝트\u{202e}".into(),
+        tool_type: ToolType::Codex,
+    });
+    failure.completion = Completion::Failure {
+        error: Box::new(error),
+    };
+    let mut output = Vec::new();
+    Renderer::new(&mut output, OutputFormat::Human)
+        .result(&failure)
+        .unwrap();
+    let human = String::from_utf8(output).unwrap();
+    assert!(
+        human
+            .lines()
+            .any(|line| line == format!("Location: {display} (localPort)"))
+    );
+    assert!(
+        human
+            .lines()
+            .any(|line| line == format!("  codex 0.166.0 ({display})"))
+    );
+    assert!(
+        human
+            .lines()
+            .any(|line| line == "  201  Agent \"이름\"\\u000a\\u001b (프로젝트\\u202e)")
+    );
+    assert!(!human.contains('\u{001b}'));
+
+    let mut output = Vec::new();
+    Renderer::new(&mut output, OutputFormat::Json)
+        .result(&failure)
+        .unwrap();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["error"]["location"]["file"], internal);
+    assert_eq!(
+        json["error"]["agentChoices"][0]["name"],
+        "Agent \"이름\"\n\u{001b}"
+    );
 }
 
 struct Disconnected;

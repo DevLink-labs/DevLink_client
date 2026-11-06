@@ -123,13 +123,83 @@
               "status"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "eventId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "TASK_QUESTION_CREATED",
+                  "TASK_ANSWER_CREATED"
+                ]
+              },
+              "direction": {
+                "type": "string",
+                "const": "received"
+              },
+              "taskId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "sequence": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              }
+            },
+            "required": [
+              "eventId",
+              "kind",
+              "direction",
+              "taskId",
+              "sequence"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "eventId": {
+                "type": "string",
+                "pattern": "^overdue:[1-9][0-9]{0,18}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "TASK_OVERDUE"
+              },
+              "direction": {
+                "type": "string",
+                "const": "sent"
+              },
+              "taskId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "minutes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10080
+              }
+            },
+            "required": [
+              "eventId",
+              "kind",
+              "direction",
+              "taskId",
+              "minutes"
+            ],
+            "additionalProperties": false
           }
         ]
       }
     },
     "nextCursor": {
       "type": "string",
-      "pattern": "^v1\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})\\.[0-9a-f]{32}$"
+      "pattern": "^(v1\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})|v2\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})|v3\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9})\\.(0|[1-9][0-9]{0,9}))\\.[0-9a-f]{32}$"
     },
     "hasMore": {
       "type": "boolean"

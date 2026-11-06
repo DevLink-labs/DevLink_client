@@ -1,5 +1,7 @@
 //! Project-only Host configuration provider for setup/v1. The CLI owns orchestration.
+//! `hooks` is the exception: it installs the user-level Host prompt hooks.
 mod format;
+pub mod hooks;
 mod permissions;
 mod storage;
 #[cfg(test)]
@@ -8,7 +10,7 @@ pub use crate::sessions::ToolType;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 pub const CODEX_VERSION: &str = "0.166.0";
@@ -116,8 +118,10 @@ pub struct ConfigConflict {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigError {
+    #[serde(skip)]
+    pub path: Option<Box<PathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recovery_directory: Option<PathBuf>,
+    pub recovery_directory: Option<Box<PathBuf>>,
     pub code: &'static str,
     pub outcome: &'static str,
     pub rollback: &'static str,
@@ -134,9 +138,25 @@ impl ConfigError {
             rollback: "not_needed",
             backup_path: None,
             recovery_directory: None,
+            path: None,
             conflict: None,
         }
     }
+    pub(crate) fn at(mut self, path: &Path) -> Self {
+        self.path = Some(Box::new(path.to_path_buf()));
+        self
+    }
+
+    pub(crate) fn unsafe_at(path: &Path, error: anyhow::Error) -> Self {
+        #[cfg(windows)]
+        let path = error
+            .downcast_ref::<crate::credentials::UnsafeWindowsPermissions>()
+            .map_or(path, |error| error.0.as_path());
+        #[cfg(not(windows))]
+        let _ = error;
+        Self::new("SETUP_UNSAFE_FILE").at(path)
+    }
+
     pub(crate) fn uncertain(rollback: &'static str, backup: Option<PathBuf>) -> Self {
         Self {
             code: "SETUP_MCP_CONFIG_WRITE_FAILED",
@@ -144,6 +164,7 @@ impl ConfigError {
             rollback,
             backup_path: backup,
             recovery_directory: None,
+            path: None,
             conflict: None,
         }
     }
@@ -171,6 +192,19 @@ pub fn project_target(tool: ToolType, project: &std::path::Path) -> PathBuf {
         ToolType::Codex => ".codex/config.toml",
         ToolType::ClaudeCode => ".mcp.json",
     })
+}
+
+/// Check the setup paths that do not depend on the selected Node executable.
+pub(crate) fn preflight_paths(
+    tool: ToolType,
+    project: &std::path::Path,
+    target: &std::path::Path,
+    broker_file: &std::path::Path,
+    entry: &std::path::Path,
+) -> Result<()> {
+    storage::normalize_locations(tool, project, target, broker_file)?;
+    storage::normalize_entry(entry)?;
+    Ok(())
 }
 
 /// Read-only validation before Agent/token creation. The future credential path
@@ -219,7 +253,7 @@ pub fn manual_config(input: PlanInput) -> Result<ManualConfig> {
 }
 
 /// Use the same Windows path spelling as the generated Host entry.
-pub(crate) fn launch_path(path: &std::path::Path) -> String {
+pub fn host_path(path: &Path) -> String {
     storage::host_path(path)
 }
 
@@ -298,6 +332,53 @@ impl McpConfig {
     }
     pub fn inspect(&self, input: InspectionInput) -> Result<ConfigInspection> {
         Self::inspect_for(self.host.tool, input)
+    }
+
+    /// Status can recover the configured launch paths without running the entry.
+    /// Normalize and compare the whole entry against the current profile afterward.
+    pub(crate) fn inspect_configured(
+        tool: ToolType,
+        project: &Path,
+        target: &Path,
+        broker_file: &Path,
+        node: Option<&Path>,
+        entry: Option<&Path>,
+    ) -> Result<InspectionStatus> {
+        let (_, target, _) = storage::normalize_locations(tool, project, target, broker_file)?;
+        let Some(bytes) = storage::read(&target)? else {
+            return Ok(InspectionStatus::Missing);
+        };
+        let Some(configured) = format::configured_entry(tool, &bytes)? else {
+            return Ok(InspectionStatus::Missing);
+        };
+        let Some(command) = configured["command"].as_str() else {
+            return Ok(InspectionStatus::Conflict);
+        };
+        let Some(script) = configured["args"]
+            .get(0)
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(InspectionStatus::Conflict);
+        };
+        let node = node.unwrap_or_else(|| Path::new(command));
+        let script = entry.unwrap_or_else(|| Path::new(script));
+        let inspection = Self::inspect_for(
+            tool,
+            InspectionInput {
+                tool_type: tool,
+                target_path: target,
+                broker_file: broker_file.into(),
+                executable: Executable {
+                    command: node.into(),
+                    args: vec![
+                        storage::host_path(script),
+                        "--transport".into(),
+                        "stdio".into(),
+                    ],
+                },
+            },
+        )?;
+        Ok(inspection.status)
     }
 
     /// Read-only comparison is independent of the Host version's apply support.
@@ -472,6 +553,7 @@ impl McpConfig {
             rollback: "restored",
             backup_path: backup,
             recovery_directory: None,
+            path: None,
             conflict: None,
         }
     }

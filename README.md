@@ -6,7 +6,8 @@
 
 ## MCP 서버
 
-S15P31D108-59 실행 기반, -60 브로커 호출·세션 복구, -61 공통 도구 등록과 7개 업무 도구의 실행 방법 및 검증 절차는 [MCP 서버 문서](packages/mcp-server/README.md)를 참고합니다. 로컬 HTTP·도구 JSON은 MCP 측 v0.1 초안이며 실제 Rust 브로커와의 상호 검증은 남아 있습니다.
+S15P31D108-59 실행 기반, -60 브로커 호출·세션 복구, -61 공통 도구 등록과 7개 업무 도구의 실행 방법 및 검증 절차는 [MCP 서버 문서](packages/mcp-server/README.md)를 참고합니다. 로컬 HTTP·도구 
+JSON은 MCP 측 v0.1 초안이며 실제 Rust 브로커와의 상호 검증은 남아 있습니다.
 
 사용자는 [Agent 요청·수락·결과 등록 지침](packages/mcp-server/docs/agent-workflow.md)에서 수신자 지정부터 사용자 수락, Host의 로컬 수정·검증, 완료·실패 조회까지 확인할 수 있습니다.
 
@@ -19,13 +20,13 @@ Notion 문서에 혼용된 `main`과 `master`는 이 저장소의 운영 브랜�
 
 ### 브랜치 역할
 
-| 브랜치 | 역할 |
-| --- | --- |
-| `master` | 배포 가능한 운영 버전 |
-| `develop` | 다음 배포를 위한 개발 통합 |
-| `feature/*` | 기능 개발 |
-| `release/*` | 배포 준비 및 최종 수정 |
-| `hotfix/*` | 운영 환경 긴급 수정 |
+| 브랜치      | 역할                       |
+| ----------- | -------------------------- |
+| `master`    | 배포 가능한 운영 버전      |
+| `develop`   | 다음 배포를 위한 개발 통합 |
+| `feature/*` | 기능 개발                  |
+| `release/*` | 배포 준비 및 최종 수정     |
+| `hotfix/*`  | 운영 환경 긴급 수정        |
 
 - `master`, `develop`에는 직접 푸시하지 않고 Pull Request(PR)를 통해 반영합니다.
 - `feature/*`는 `develop`에서 분기하고, 하나의 기능이 완성되면 `develop`으로 PR을 생성합니다.
@@ -42,17 +43,17 @@ Notion 문서에 혼용된 `main`과 `master`는 이 저장소의 운영 브랜�
 - `scope`: 아래 작업 영역 표를 사용합니다.
 - 배포 브랜치는 `release/{version}` 형식을 사용합니다.
 
-| Scope | 대상 |
-| --- | --- |
-| `front` | Frontend |
-| `back` | Backend |
-| `ai` | AI / ML |
-| `data` | 데이터 수집 / 전처리 / ETL |
-| `bigdata` | 대용량 데이터 처리 |
-| `spark` | Spark / 분산 처리 |
-| `kafka` | Kafka / 분산 처리 |
-| `infra` | Docker / 서버 / 배포 환경 |
-| `common` | 공통 작업 |
+| Scope     | 대상                       |
+| --------- | -------------------------- |
+| `front`   | Frontend                   |
+| `back`    | Backend                    |
+| `ai`      | AI / ML                    |
+| `data`    | 데이터 수집 / 전처리 / ETL |
+| `bigdata` | 대용량 데이터 처리         |
+| `spark`   | Spark / 분산 처리          |
+| `kafka`   | Kafka / 분산 처리          |
+| `infra`   | Docker / 서버 / 배포 환경  |
+| `common`  | 공통 작업                  |
 
 ```text
 feature/front/login
@@ -70,17 +71,17 @@ type(scope): message
 
 커밋의 `scope`는 브랜치 명명 규칙의 작업 영역과 동일하게 사용합니다.
 
-| Type | 설명 |
-| --- | --- |
-| `feat` | 기능 추가 |
-| `fix` | 버그 수정 |
-| `refactor` | 코드 구조 개선 |
-| `perf` | 성능 개선 |
-| `docs` | 문서 수정 |
-| `test` | 테스트 추가 / 수정 |
-| `style` | 동작에 영향을 주지 않는 코드 수정 |
-| `chore` | 설정 / 패키지 / 빌드 / 기타 작업 |
-| `data` | 데이터셋 / 전처리 변경 |
+| Type       | 설명                              |
+| ---------- | --------------------------------- |
+| `feat`     | 기능 추가                         |
+| `fix`      | 버그 수정                         |
+| `refactor` | 코드 구조 개선                    |
+| `perf`     | 성능 개선                         |
+| `docs`     | 문서 수정                         |
+| `test`     | 테스트 추가 / 수정                |
+| `style`    | 동작에 영향을 주지 않는 코드 수정 |
+| `chore`    | 설정 / 패키지 / 빌드 / 기타 작업  |
+| `data`     | 데이터셋 / 전처리 변경            |
 
 ### Pull Request 규칙
 

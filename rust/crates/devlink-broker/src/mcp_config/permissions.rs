@@ -17,20 +17,21 @@ pub(super) fn create_private_directory(path: &Path) -> std::io::Result<()> {
 }
 /// A stable alias is rendered to the Host, so its parent must also resist replacement.
 pub(super) fn source_alias(path: &Path) -> Result<()> {
-    let info = fs::symlink_metadata(path).map_err(|_| unsafe_file())?;
+    let info = fs::symlink_metadata(path).map_err(|_| unsafe_file().at(path))?;
     if !info.is_file() && !info.is_symlink() {
-        return Err(unsafe_file());
+        return Err(unsafe_file().at(path));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let uid = unsafe { libc::getuid() };
         if info.uid() != uid && info.uid() != 0 {
-            return Err(unsafe_file());
+            return Err(unsafe_file().at(path));
         }
     }
-    credentials::verify_state_directory_permissions(path.parent().ok_or_else(unsafe_file)?)
-        .map_err(|_| unsafe_file())
+    let parent = path.parent().ok_or_else(|| unsafe_file().at(path))?;
+    credentials::verify_state_directory_permissions(parent)
+        .map_err(|e| ConfigError::unsafe_at(parent, e))
 }
 #[cfg(unix)]
 pub(super) fn copy_host_permissions(source: &Path, target: &Path) -> Result<()> {

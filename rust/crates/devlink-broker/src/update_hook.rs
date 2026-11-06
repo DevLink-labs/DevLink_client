@@ -6,6 +6,7 @@ use crate::{
     agent_profile,
     config::{self, Config},
     private_file,
+    protocol::TaskMessageType,
     sessions::{Identifier, IdentityError, Principal},
     task_operations::TaskStatus,
     updates::{Cursor, Feed, Update},
@@ -117,6 +118,10 @@ fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
     let mut received = Vec::new();
     // Latest retained status per sent task, in first-seen order.
     let mut sent: Vec<(u64, u64, TaskStatus)> = Vec::new();
+    // New question/answer counts per task, in first-seen order. Never the message text.
+    let mut conversations: Vec<(u64, usize, usize)> = Vec::new();
+    // Sent tasks with no final status after the configured minutes, in first-seen order.
+    let mut overdue: Vec<(u64, u64)> = Vec::new();
     for update in updates {
         match update {
             Update::Received(message) => received.push(format!(
@@ -137,9 +142,37 @@ fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
                     sent.push((task, latest.version(), latest.status()));
                 }
             }
+            Update::Message(message) => {
+                let index = match conversations
+                    .iter()
+                    .position(|(id, ..)| *id == message.task_id)
+                {
+                    Some(index) => index,
+                    None => {
+                        conversations.push((message.task_id, 0, 0));
+                        conversations.len() - 1
+                    }
+                };
+                match message.event_type {
+                    TaskMessageType::Question => conversations[index].1 += 1,
+                    TaskMessageType::Answer => conversations[index].2 += 1,
+                }
+            }
+            Update::Overdue(event) => {
+                // A final status that arrived after the advisory makes it moot.
+                let finished = feed.latest_sent(event.task_id).is_some_and(|latest| {
+                    matches!(
+                        latest.status(),
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Rejected
+                    )
+                });
+                if !finished && !overdue.iter().any(|(id, _)| *id == event.task_id) {
+                    overdue.push((event.task_id, event.minutes));
+                }
+            }
         }
     }
-    if received.is_empty() && sent.is_empty() {
+    if received.is_empty() && sent.is_empty() && conversations.is_empty() && overdue.is_empty() {
         return None;
     }
     let mut lines =
@@ -168,12 +201,53 @@ fn render(feed: &Feed, updates: &[Update<'_>], reset: bool) -> Option<String> {
             listed(&statuses)
         ));
     }
+    if !conversations.is_empty() {
+        let counts: Vec<String> = conversations
+            .iter()
+            .map(|(task, questions, answers)| {
+                let mut parts = Vec::new();
+                if *questions > 0 {
+                    parts.push(plural(*questions, "question"));
+                }
+                if *answers > 0 {
+                    parts.push(plural(*answers, "answer"));
+                }
+                format!("#{task} ({})", parts.join(", "))
+            })
+            .collect();
+        lines.push(format!(
+            "- New questions/answers from the other agent on {} task(s): {}. \
+             Read them with get_task_result; answer only when the user wants you to.",
+            counts.len(),
+            listed(&counts)
+        ));
+    }
+    if !overdue.is_empty() {
+        let tasks: Vec<String> = overdue
+            .iter()
+            .map(|(task, minutes)| format!("#{task} ({minutes} min)"))
+            .collect();
+        lines.push(format!(
+            "- No result yet on {} sent task(s) after the set time: {}. \
+             The task is not cancelled; check get_task_result before following up.",
+            tasks.len(),
+            listed(&tasks)
+        ));
+    }
     lines.push(
         "Use DevLink get_task_result or get_tasks to verify details before acting; \
          local updates may be incomplete."
             .to_owned(),
     );
     Some(lines.join("\n"))
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 fn listed(items: &[String]) -> String {

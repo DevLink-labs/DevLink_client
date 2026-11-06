@@ -144,7 +144,7 @@ async fn missing_and_file_paths_fail_before_config_creation_or_any_central_reque
             &["--project", invalid.to_str().unwrap()],
             2,
         );
-        assert_eq!(value["error"]["code"], "SETUP_PROJECT_PATH_INVALID");
+        assert_eq!(value["error"]["code"], "SETUP_PROJECT_INVALID");
         assert_eq!(value["error"]["step"], "validate");
         assert_eq!(value["error"]["location"]["field"], "project.path");
         assert_eq!(fs::read(&f.path).unwrap(), before);
@@ -166,7 +166,7 @@ async fn missing_and_file_paths_fail_before_config_creation_or_any_central_reque
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "SETUP_PROJECT_PATH_INVALID");
+    assert_eq!(value["error"]["code"], "SETUP_PROJECT_INVALID");
     assert!(!new_config.parent().unwrap().exists());
     assert!(f.state.calls.lock().unwrap().is_empty());
     assert_eq!(fs::read_to_string(file).unwrap(), "preserved");

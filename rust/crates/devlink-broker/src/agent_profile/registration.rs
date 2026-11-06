@@ -531,6 +531,8 @@ pub(super) fn require_mutation(
     let broker = config::try_lock(&lock)
         .map_err(|_| failure(FailureKind::Storage))?
         .ok_or_else(|| failure(FailureKind::BrokerBusy))?;
-    let owner = owner_lock(origin, user).map_err(|_| failure(FailureKind::ConfigBusy))?;
+    let owner = try_owner_lock(origin, user)
+        .map_err(|_| failure(FailureKind::Storage))?
+        .ok_or_else(|| failure(FailureKind::BrokerBusy))?;
     Ok((broker, owner))
 }

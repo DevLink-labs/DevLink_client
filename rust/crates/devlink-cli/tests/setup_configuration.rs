@@ -85,6 +85,8 @@ fn fresh_setup_creates_private_defaults_and_preserves_them_on_second_run() {
     assert_eq!(value["error"]["step"], "authenticate");
     let config = Config::load(&path).unwrap();
     assert_eq!(config.server_url, Config::default().server_url);
+    assert_eq!(config.local_port, 0);
+    assert!(config.local_port_pending);
     credentials::verify_private_permissions(&path).unwrap();
     let before = fs::read(&path).unwrap();
     let modified = fs::metadata(&path).unwrap().modified().unwrap();

@@ -313,7 +313,7 @@ export class BrokerClient {
       const taskId = safeIdentifier(input.taskId);
       if (taskId && !['create_task', 'register_agent'].includes(operation)) trace.taskId = taskId;
       const callerKey = safeIdentifier(input.requestKey);
-      if (callerKey && callerKey.length <= 64 && ['update_task_status', 'complete_task', 'get_task_result'].includes(operation)) trace.requestKey = callerKey;
+      if (callerKey && callerKey.length <= 64 && ['create_task', 'update_task_status', 'complete_task', 'get_task_result', 'ask_question', 'answer_question'].includes(operation)) trace.requestKey = callerKey;
       if (actorFields.some((field) => Object.hasOwn(input, field))) throw new BrokerFault('CALLER_CONTEXT_OVERRIDE', requestId);
       const run = () => this.perform(operation, input, requestId, callOptions, budget, trace);
       let result: BrokerResult;

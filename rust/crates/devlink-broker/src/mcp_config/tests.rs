@@ -485,7 +485,10 @@ fn final_digest_fence_and_backup_capacity_preserve_external_content() {
     }
     let full = storage::backup(&input, Some(b"another")).unwrap_err();
     assert_eq!(full.outcome, "not_applied");
-    assert_eq!(full.recovery_directory.as_deref(), backup.parent());
+    assert_eq!(
+        full.recovery_directory.as_deref().map(PathBuf::as_path),
+        backup.parent()
+    );
     assert!(full.backup_path.is_none());
     assert_eq!(fs::read(&input.target).unwrap(), outside(tool));
 }

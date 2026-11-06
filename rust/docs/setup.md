@@ -27,14 +27,26 @@ devlink setup --tool codex --agent-id 34 --issue-token
 # 비대화형에서 이번 계획의 프로젝트 MCP 설정 적용을 허용
 devlink setup --tool codex --agent-id 34 --apply-mcp
 # 자동 발견이 안 되면 Node와 빌드된 MCP 진입점을 절대 경로로 지정
-devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "C:\DevLink\mcp-server\dist\index.js" --apply-mcp
+devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "$HOME\DevLink\mcp-server\dist\index.js" --apply-mcp
 # Host 파일은 쓰지 않고 DevLink 설정 예시와 적용 위치를 반환
 devlink setup --mcp-mode manual
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
 
-현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 `--issue-token`이 있어야 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--non-interactive --input <FILE>`로 v1 입력 파일을 사용한 비대화형 실행을 제공한다.
+setup으로 새로 만든 프로필은 첫 기동에 실제로 바인딩한 루프백 포트를 `localPort`에 저장하고, 이후 같은 포트를 사용한다. Windows·Linux·macOS에서는 현재 IPv4 임시 포트 범위를 읽어 후보에서 제외한다. `43127–49151`을 우선 확인하고, 필요하면 `43126`부터 `1024`까지 내려가며 점유됐거나 바인딩이 거부된 포트를 건너뛴다. 범위를 읽을 수 없거나 사용 가능한 후보가 없으면 고정 포트를 명시하도록 안내한다.
+
+기존 고정 포트가 점유됐거나 OS가 바인딩을 거부하면 `devlink --config <FILE> config set localPort <FREE_PORT>`로 사용 가능한 고정 포트를 지정한다. 기존 자동 포트 프로필을 고정할 때도 같은 명령을 사용한다. 실행 중인 브로커는 설정 변경 후 재시작하며, 주소가 바뀌면 Host도 다시 연다.
+
+### Windows paths
+
+`SETUP_UNSAFE_FILE`의 `location.file`에 표시된 경로를 `icacls "<경로>"`로 확인한다. 프로젝트 설정, 프로필, Node 실행 파일, MCP 진입점과 각 파일의 직계 상위 디렉터리는 다른 사용자가 내용을 쓰거나 교체할 수 없도록 보호되어야 한다. 검사 대상 폴더에 `BUILTIN\Users`의 수정 권한이나 다른 계정의 쓰기 권한이 상속되어 있으면 기본 경로에서도 설치가 중단될 수 있다.
+
+조직에서 관리하는 Desktop이나 AppData의 ACL을 수정할 수 없다면 `$HOME` 바로 아래에 현재 사용자 전용 디렉터리를 만든다. 오류가 난 대상에 맞춰 프로젝트는 `--project`, 별도 프로필은 `--config`, 실행 파일은 `--node-path`, 빌드한 MCP는 `--mcp-entry`로 새 경로를 지정한다. MCP는 `dist`와 함께 `package.json`, `node_modules`를 포함한 런타임을 통째로 복사한다. 완료 후 `devlink setup status`는 프로젝트 설정에서 적용된 런타임 경로를 읽는다.
+
+Codex에서 해당 프로젝트를 열고 신뢰 여부를 묻는 메시지가 표시되면 신뢰를 승인해야 `.codex/config.toml`을 읽는다. 대화형 setup은 Agent 이름이 충돌하면 새 이름을 묻고, 기존 Agent에 토큰이 필요하면 확인한 Agent ID를 보여 주고 발급 동의를 받는다.
+
+현재 구현은 **명령 진입점·공통 흐름·출력·설정 준비·로그인·팀/프로젝트/도구 선택·Agent 등록/재사용·토큰 검증/발급·공통 브로커 제어·프로젝트 MCP 설정**이다. 08 등록 provider는 Agent만 준비하고, setup의 register_agent 어댑터가 09 토큰 provider를 이어 호출한다. 정상 토큰은 실신원을 확인해 재사용한다. 새로 확인한 생성은 최초 발급 1회까지 포함하며, 기존 Agent의 누락/인증 거부 토큰은 터미널에서 발급을 승인하거나 `--issue-token`을 지정하면 발급한다. 결과 불명은 알려진 ID를 보존하고 SETUP_TOKEN_REQUIRED/종료 3으로 멈춘다. 최종 연결 검증과 읽기 전용 `setup status`를 제공한다. `--non-interactive --input <FILE>`로 v1 입력 파일을 사용한 비대화형 실행을 제공한다.
 
 기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤 verify_connection에서 브로커·중앙·Agent 신원·자격·MCP 설정을 확인한다. 검증 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
@@ -382,7 +394,7 @@ validate는 설정 생성·로그인·팀 조회 전에 경로만 검사한다. 
 
 bind_project는 프로필·Agent/MCP 자격을 쓰거나 토큰을 발급/회전하지 않는다. 성공은 `outcome:not_applied`이며 기존 프로젝트를 재사용하면 `reused:true`다. 결과는 `SetupStages::project()`의 PreparedProject에 보관해 후속 도구·등록 단계에서 사용한다. 실제 프로필 저장은 후속 register_agent의 역할이다. 로컬 root를 가진 PreparedProject는 Serialize를 구현하지 않고, AgentMetadata는 이름·프로젝트 표시명·역할만 직렬화한다. 기존 create 요청도 이 공개 필드와 toolType만 중앙에 보내고 projectRoot는 로컬 비공개 프로필에만 저장한다.
 
-없는 경로/파일은 `SETUP_PROJECT_PATH_INVALID`/종료 2, 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`/종료 5다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 작업 06 종료 당시에는 select_tool에서 종료 3이었으며 작업 07에서 도구 선택을 연결했다.
+없는 경로 또는 디렉터리가 아닌 경로는 `SETUP_PROJECT_INVALID`와 종료 2를 반환한다. 프로젝트 바인딩 충돌은 종료 6, 손상된 프로필 읽기는 `SETUP_PROJECT_STORAGE_FAILED`와 종료 5를 반환한다. control.lock 경합은 기존 `SETUP_CONFIG_BUSY`/종료 6을 사용한다. 기존 단계가 손상된 Agent 파일을 먼저 발견하면 기존 설정/팀 오류를 유지한다. 복구 안내는 고정 문구이며 자격 원문은 출력하지 않는다. 작업 06 종료 당시에는 select_tool에서 종료 3이었으며 작업 07에서 도구 선택을 연결했다.
 
 ### 작업 06 검증 결과
 
@@ -450,7 +462,7 @@ stop은 control.lock 안에서 health를 인증한 뒤 같은 control token으�
 
 프로필 변경·중앙 Agent 토큰 발급·계정 전환 전의 기존 agent_profile::stopped는 이제 require_stopped를 공유한다. control.lock과 broker.lock을 모두 잡아 변경이 끝날 때까지 유지하며 runtime 발행 전 기동 중인 브로커도 차단한다. 기존 AuthFault 분류와 복구 안내를 보존한다. 실행 중인 브로커를 setup이 자동 중지하지 않으며 devlink stop을 명시적으로 실행하도록 안내한다. 사용자가 정상 중지한 뒤 변경을 재시도하면 같은 잠금 검사를 다시 수행한다. 기존 MCP 자격 회전의 중지 요구 정책도 유지한다.
 
-setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStages::broker()에 보관한다. 신규 기동은 applied/reused:false, 재사용은 not_applied/reused:true다. 공통 실행부의 시작/신원 검증 실패는 SETUP_BROKER_START_FAILED/종료 5·inspect_broker_then_retry로, 설정/잠금/자격 실패는 기존 setup 코드로 매핑한다. broker.lock은 잡혀 있지만 runtime.json이 아직 발행되지 않은 기동 중 브로커(BrokerStarting)는 잠시 뒤 다시 시도하면 풀리므로 SETUP_UNSAFE_FILE 대신 재시도 가능한 SETUP_BROKER_BUSY/종료 6으로 보고한다. runtime.json이 있으나 읽을 수 없는 경우만 Storage/SETUP_UNSAFE_FILE이다. 작업 08~10의 Agent 등록 흐름을 대신 구현하거나 건너뛰지는 않는다. 현재 일반 setup은 register_agent에서 종료 3이며 어댑터 통합 검사는 이미 등록된 합성 프로필에서 StartBroker를 호출해 검증한다.
+setup StartBroker 어댑터는 같은 start를 호출하고 결과를 SetupStages::broker()에 보관한다. 신규 기동은 applied/reused:false, 재사용은 not_applied/reused:true다. 공통 실행부의 시작 또는 신원 검증 실패는 `SETUP_BROKER_START_FAILED`, 종료 7, `inspect_local_broker`로 보고한다. 설정·잠금·자격 실패에는 각각의 setup 오류 코드를 적용한다. broker.lock이 잡혀 있고 runtime.json이 아직 발행되지 않은 기동 중 브로커(BrokerStarting)는 재시도 가능한 `SETUP_BROKER_BUSY`와 종료 6으로 보고한다. runtime.json이 있으나 읽을 수 없는 경우는 Storage/`SETUP_UNSAFE_FILE`이다. 작업 11 검증 당시에는 일반 setup이 register_agent에서 종료 3으로 멈췄고, 통합 검사는 이미 등록된 합성 프로필에서 StartBroker를 호출했다.
 
 ### 작업 11 검증 결과
 
@@ -617,7 +629,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 도구가 기존 선택/대화형 선택으로 나중에 결정되면 `register_agent` 진입 시 같은 검사를 수행한다. 명시한 도구도 등록 직전에 다시 검사해 validate 이후의 파일 변경을 거절한다. Host 형식 검사는 기존 제공자의 normalize/merge를 사용한다. manual 모드는 실행 경로를 검사하되 직접 적용하지 않는 기존 항목의 병합 충돌은 차단 조건으로 삼지 않는다.
 
-`--tool`만 지정하고 저장된 도구 선택이 있으면, 인증 후 `select_tool`에서 바인딩과 실행 경로를 확인하고 `register_agent` 진입 시 MCP 사전 검사를 수행한다. `--tool-path`로 설치를 지정하면 `validate`에서 해당 경로를 먼저 검사한다.
+`--tool`만 지정하고 저장된 도구 선택이 있으면, `validate`에서 Host와 무관한 MCP 경로를 검사한다. 인증 후 `select_tool`에서 바인딩과 실행 경로를 확인하고 `register_agent` 진입 시 선택한 런타임으로 사전 검사를 수행한다. `--tool-path`로 설치를 지정하면 `validate`에서 해당 경로를 먼저 검사한다.
 
 사전 검사는 적용 허용이나 최종 계획을 저장하지 않는다. 기존 configure_mcp의 계획·동일 digest 확인, Agent/브로커/실행 파일 재검증, 백업·적용 후 검사·롤백은 그대로 수행한다. 사전 검사 이후에 발생한 변경과 쓰기 실패도 기존 오류·부분 적용 규칙에 따라 처리한다.
 
@@ -709,13 +721,13 @@ devlink setup --non-interactive --input .\setup-v1.json --output jsonl
 
 `user.mode=session`은 저장된 세션을 확인한다. `user.mode=login`은 `--password-stdin`으로 비밀번호 한 줄을 받아 새로 로그인한다. `serverUrl`은 새 프로필의 서버 주소로 사용하며, 이미 설정된 프로필에서는 같은 origin인지 확인한다. 다른 서버를 대상으로 할 때는 해당 서버용 `--config`를 선택한다.
 
-인증과 팀 확인 후 같은 서버·사용자·팀·프로젝트에 저장된 `tool.type`의 Host를 재검사한다. PATH 밖의 경로도 유효하면 재사용한다. 해당 선택이 없을 때만 PATH와 기본 설치 디렉터리를 탐색한다. 저장된 Host를 사용할 수 없으면 `SETUP_TOOL_UNAVAILABLE`과 복구 안내를 반환한다. 설치를 복구하거나 대화형 `setup --tool <TYPE> --tool-path <FILE>`로 교체 경로를 명시한다. Agent 생성·토큰 발급 전에 선택한 Host와 MCP 설정을 확인한다.
+인증과 팀 확인 후 같은 서버·사용자·팀·프로젝트에 저장된 `tool.type`의 Host를 재검사한다. PATH 밖의 경로도 유효하면 재사용한다. 해당 선택이 없을 때만 PATH와 기본 설치 디렉터리를 탐색한다. 저장된 Host를 사용할 수 없으면 `SETUP_TOOL_UNAVAILABLE`과 복구 안내를 반환한다. 설치를 복구하거나 대화형 `setup --tool <TYPE> --tool-path <FILE>`로 교체 경로를 명시한다. 저장된 Host가 있어도 MCP 진입점과 프로젝트 설정 대상 경로는 PATH의 Node 유무와 관계없이 로그인 전에 검사한다. `--node-path`를 명시하면 해당 Node로 진입점 초기화도 검사한다. Node를 생략하면 저장된 Host를 확인한 뒤 실제 사용할 Node를 선택하고, Agent 생성·토큰 발급 전에 초기화를 검증한다.
 
 `timeoutMs`는 입력 읽기와 검증부터 최종 결과까지 적용된다. 기본값은 60초다. 제한시간이 지나면 이후 단계는 건너뛰고 이미 완료한 단계와 확인한 Agent ID를 결과에 남긴다. 이미 시작한 로컬 설정 쓰기는 제한시간이 지나도 저장 또는 롤백을 마친다. 등록이나 발급 요청이 진행 중이었다면 `register_agent`를 `outcome:unknown`으로 표시한다.
 
 ## 작업 14 (S15P31D108-116) 중단 후 재실행
 
-대화형과 비대화형 `setup` 모두 Ctrl+C를 받으면 `SETUP_CANCELLED`와 종료 코드 130을 반환한다. JSON과 JSONL은 최종 결과 한 건에 취소된 단계, 완료한 단계, 확인한 ID를 남긴다. 이미 시작한 설정 파일 쓰기는 저장 또는 롤백 결과를 확인한 후 종료한다. 강제 종료 시에는 최종 결과가 누락될 수 있으므로 재실행 전에 `devlink setup status`로 로컬 상태를 확인한다.
+대화형과 비대화형 `setup` 모두 Ctrl+C를 받으면 `SETUP_CANCELLED`와 종료 코드 130을 반환한다. JSON과 JSONL은 최종 결과 한 건에 취소된 단계, 완료한 단계, 확인한 ID를 남긴다. 이미 시작한 설정 파일 쓰기는 저장 또는 롤백 결과를 확인한 후 종료한다. 기다리는 범위는 그 쓰기까지이며, 잠금 획득 직후 이어지는 비밀번호 입력이나 네트워크 응답은 기다리지 않는다. 강제 종료 시에는 최종 결과가 누락될 수 있으므로 재실행 전에 `devlink setup status`로 로컬 상태를 확인한다.
 
 - Agent 생성 응답을 확인하지 못했다면 `devlink agent list`에서 생성 여부와 본인 Agent ID를 확인한 뒤 `devlink setup --agent-id <ID>`로 복구한다. 기존 생성 대기 상태가 남아 있으면 `--create-agent`를 다시 주어도 생성 요청은 반복되지 않는다.
 - 토큰 발급 응답을 확인하지 못했다면 저장된 Agent ID를 확인한 뒤 새 발급이 필요할 때 `devlink setup --issue-token`을 명시한다. 일반 재실행은 같은 Agent를 유지하며 토큰 발급을 반복하지 않는다.

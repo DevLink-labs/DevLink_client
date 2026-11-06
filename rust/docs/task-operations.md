@@ -80,7 +80,33 @@ items는 taskId/teamId/requesterAgent/receiverAgent/status/createdAt/startedAt/c
 {"taskId":"101","requestKey":"known-create-key"}
 ```
 
-응답은 taskId/teamId/requesterAgent/receiverAgent/prompt/status/version/resultText/failureReason/rejectionReason/partiallyModified/taskFiles/events/createdAt/startedAt/completedAt이다. 파일의 fileId·relativePath·changeType·diffText, 이벤트의 eventType·message·createdAt을 보존한다. 아직 미완료인 작업도 중앙 상세 그대로 조회한다. 팀 접근 허용 여부는 중앙 조회 정책을 따른다.
+응답은 taskId/teamId/requesterAgent/receiverAgent/prompt/status/version/resultText/failureReason/rejectionReason/partiallyModified/taskFiles/events/createdAt/startedAt/completedAt이다. 파일의 fileId·relativePath·changeType·diffText, 이벤트의 eventType·message·createdAt을 보존한다. 이벤트의 eventId·sequence·questionEventId(정규 양의 Long 십진 문자열)와 authorAgent도 중앙이 보낸 경우에만 보존한다. 없는 필드는 만들지 않으며, 형식이 틀리면 프로토콜 오류다. 아직 미완료인 작업도 중앙 상세 그대로 조회한다. 팀 접근 허용 여부는 중앙 조회 정책을 따른다.
+
+## 질문·답변 (S15P31D108-166)
+
+중앙 `POST /api/v1/tasks/{taskId}/questions`·`/answers`를 같은 공통 envelope·세션 검증·예산으로 중계한다. 로컬 경로는 `/v1/tasks/questions`(`ask_question`)와 `/v1/tasks/answers`(`answer_question`)다.
+
+```json
+{"taskId":"101","message":"로그인 API는 v2 기준인가요?","requestKey":"question-key"}
+```
+
+```json
+{"taskId":"101","questionEventId":"501","message":"네, v2 기준입니다.","requestKey":"answer-key"}
+```
+
+- **requestKey는 필수다.** 중앙 멱등 키(taskId + 작성 Agent + requestKey)로 그대로 보낸다. 공통 식별자 규칙(공백·제어 문자 없음)을 따르며 최대 64 UTF-16 코드 단위다. MCP는 호출자가 키를 주지 않으면 UUID를 발급해 넣는다. 로컬에는 저장하지 않는다.
+- **중앙 전 검증:** 본문은 공백만이면 안 되고 최대 8,000 코드포인트이며 NUL을 넣을 수 없다. questionEventId는 정규 양의 Long 문자열이다. 위반이나 알 수 없는 필드는 400이며 중앙을 호출하지 않는다.
+- **중앙 본문:** `{requestKey, message}`, 답변은 `questionEventId`(문자열)를 더한다. 작성자·팀은 넣지 않는다.
+- **응답:** 신규는 201, 같은 키의 replay는 200을 받는다. eventId·taskId·sequence·eventType·authorAgent·message·questionEventId·createdAt·replayed를 확인해 반환한다. 다음 중 하나라도 어긋나면 CENTRAL_PROTOCOL_ERROR(unknown)다.
+  - taskId·eventType·작성 Agent(현재 세션 Agent)·본문·questionEventId가 요청과 다를 때
+  - HTTP 201/200과 replayed가 맞지 않을 때
+- **오류:**
+  - 409 `TASK_CONVERSATION_UNAVAILABLE`(요청자와 수신자가 같은 Agent): rejected
+  - 400 `INVALID_QUESTION_REFERENCE`(같은 Task의 상대 질문이 아님): rejected
+  - 409 `TASK_STATE_CONFLICT`(IN_PROGRESS 아님): rejected
+  - 중앙 403: `FORBIDDEN`
+  - `REQUEST_KEY_CONFLICT`: 생성과 같이 unknown
+- **범위 밖:** 질문·답변 WebSocket 알림(`TASK_QUESTION_CREATED`/`TASK_ANSWER_CREATED`)과 `/api/v1/agents/me/task-messages` 동기화는 아직 처리하지 않는다. 브로커는 알 수 없는 WebSocket 유형을 무시하므로 연결에는 영향이 없다.
 
 ## 오류·결과 불명
 

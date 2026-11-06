@@ -3,6 +3,7 @@ use std::{
     future::{Future, pending},
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
 };
 use tokio::time::{Instant, sleep_until};
 
@@ -59,12 +60,19 @@ impl RunControl {
                 value = &mut work => return Attempt::Done(value),
             };
             // A bounded, already-submitted local write must finish its atomic
-            // publish/rollback before the process exits. Network and input wait
-            // futures are dropped instead and no following stage is started.
-            let completed = if local_write.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                Some(work.await)
-            } else {
-                None
+            // publish/rollback before the process exits. Drive the stage only
+            // while that write is active: once it settles, the rest of the stage
+            // (input, network) is dropped and no following stage is started.
+            let completed = match local_write {
+                Some(flag) if flag.load(Ordering::Acquire) => {
+                    std::future::poll_fn(|cx| match work.as_mut().poll(cx) {
+                        Poll::Ready(value) => Poll::Ready(Some(value)),
+                        Poll::Pending if flag.load(Ordering::Acquire) => Poll::Pending,
+                        Poll::Pending => Poll::Ready(None),
+                    })
+                    .await
+                }
+                _ => None,
             };
             (reason, completed)
         };
@@ -129,5 +137,37 @@ mod tests {
             }
         ));
         assert!(!write_active.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_wait_for_input_after_the_write_settles() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let write_active = AtomicBool::new(false);
+        let mut control = RunControl::new(async move {
+            receive.await.unwrap();
+            ErrorCode::Cancelled
+        });
+        // Mirrors validate: a short guarded write, then an unguarded input wait.
+        let operation = async {
+            write_active.store(true, Ordering::Release);
+            send.send(()).unwrap();
+            tokio::task::yield_now().await;
+            write_active.store(false, Ordering::Release);
+            pending::<()>().await;
+        };
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            control.attempt(operation, Some(&write_active)),
+        )
+        .await
+        .expect("cancellation must not wait for input after the write settles");
+        assert!(matches!(
+            attempt,
+            Attempt::Interrupted {
+                reason: ErrorCode::Cancelled,
+                started: true,
+                completed: None,
+            }
+        ));
     }
 }

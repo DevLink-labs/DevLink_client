@@ -177,7 +177,7 @@ async fn setup_start_preserves_a_live_broker_when_identity_cannot_be_verified() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn setup_start_failure_reports_unknown_side_effects_without_exposing_credentials() {
+async fn setup_start_reports_port_conflict_without_exposing_credentials() {
     let f = Fixture::new().await;
     selected(&f);
     data(create(&f));
@@ -204,7 +204,13 @@ async fn setup_start_failure_reports_unknown_side_effects_without_exposing_crede
         panic!("occupied port started")
     };
     assert_eq!(error.code, ErrorCode::BrokerStartFailed);
-    assert_eq!(error.outcome, Outcome::Unknown);
+    assert_eq!(error.outcome, Outcome::NotApplied);
+    assert_eq!(error.location.as_ref().unwrap().field, Some("localPort"));
+    assert!(
+        error
+            .message()
+            .contains("port is in use or the OS denied the bind")
+    );
     assert!(
         !serde_json::to_string(&error)
             .unwrap()

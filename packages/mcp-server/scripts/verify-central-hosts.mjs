@@ -77,7 +77,8 @@ import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import {captureHost} from '../test/helpers/host-process.mjs';
 import {hostTools} from '../test/helpers/host-transcript.mjs';
-import {centralHostTranscript,hostRanPassingTests,verifyIncomingFlow,verifyOutgoingFlow,normalizeDiff,hostEditedSource,rejectCounterpartAccess,unexpectedProjectFiles,verifyTwoHostExchange} from '../test/helpers/central-host-proof.mjs';
+import {centralHostTranscript,hostRanPassingTests,verifyIncomingFlow,verifyOutgoingFlow,normalizeDiff,hostEditedSource,assertEditsFollowAcceptance,assertReadOnlyBeforeAcceptance,rejectCounterpartAccess,unexpectedProjectFiles,verifyTwoHostExchange} from '../test/helpers/central-host-proof.mjs';
+import {projectSnapshot,watchUnchangedWhilePending,assertWatchEvidence} from '../test/helpers/pending-watch.mjs';
 const execute=promisify(execFile);
 const hostResults=[],hostPromises=[],abort=new AbortController();
 const exchangeProofs=[];let exchanges=[];
@@ -151,6 +152,10 @@ async function hostRun(host,p,prompt){
 function beginHost(host,p,prompt){
  const promise=hostRun(host,p,prompt).then(value=>({value}),error=>{abort.abort();return{error};});hostPromises.push(promise);return promise;
 }
+async function receivedStatuses(p,teamId){
+ const r=await fetch(new URL(`/api/v1/teams/${teamId}/tasks?scope=mine&direction=received&page=0&size=50`,base),{headers:{Authorization:'Bearer '+p.token},signal:AbortSignal.timeout(5000)});
+ assert(r.ok,'Central list rejected: '+r.status);const value=await r.json();assert(value.success);return value.data.items.map(item=>item.status);
+}
 function prompt(p,other,nonceAB,nonceBA){
  const localRequest=p.label==='A'?'slug: collapse all whitespace runs into one hyphen, trim outer whitespace, lowercase while preserving non-whitespace unicode':'invoice: totalCents must multiply unitCents by quantity for every line; a zero quantity contributes zero';
  const remoteRequest=p.label==='A'?'invoice totalCents must multiply unitCents by quantity; zero quantity contributes zero':'slug must trim outer whitespace, lowercase and collapse every whitespace run (including tabs) into one hyphen, preserving unicode';
@@ -168,10 +173,13 @@ try {
  const team=await run(a,['team','create','--name','Central66 '+randomUUID()]);await raw(a,['team','select','--id',String(team.teamId)]);await raw(b,['team','join','--code-stdin'],team.inviteCode+'\n');await raw(b,['team','select','--id',String(team.teamId)]);
  await agent(a);await agent(b);await startBroker(a);await startBroker(b);
  const nonceAB=randomUUID(),nonceBA=randomUUID();
+ for(const p of [a,b])p.watch=watchUnchangedWhilePending({folder:p.folder,initial:await projectSnapshot(p.folder),receivedStatuses:()=>receivedStatuses(p,team.teamId)});
  const claude=beginHost('claude',b,prompt(b,a,nonceAB,nonceBA));
  await until(()=>central(b,'/api/v1/agents/me'),x=>x.status==='ONLINE','Claude Host registration',120000);
  const codex=beginHost('codex',a,prompt(a,b,nonceAB,nonceBA));
- const results=await Promise.all([claude,codex]);for(const r of results)if(r.error)throw r.error;
+ const results=await Promise.all([claude,codex]);
+ for(const p of [a,b])p.watched=await p.watch.stop();
+ for(const r of results)if(r.error)throw r.error;
  for(const h of hostResults){
   const check={host:h.host,passed:false};checks.push(check);
   const p=h.p,other=p===a?b:a,calls=h.parsed.calls;
@@ -180,7 +188,11 @@ try {
   try { outgoing=verifyOutgoingFlow(calls,options);Object.assign(check,{outgoingId:outgoing.outgoingId,requesterReadCompletedResult:true}); }
   catch(error) { check.outgoingError=error.message;failure??=error; }
   try {
-  const {completed:done,incomingId}=verifyIncomingFlow(calls,options);
+  const {completed:done,accepted,incomingId}=verifyIncomingFlow(calls,options);
+  assertEditsFollowAcceptance(h.host,h.events,p.folder,accepted);
+  assertWatchEvidence(p.watched);
+  const earlyCommands=assertReadOnlyBeforeAcceptance(h.host,h.events,accepted);
+  Object.assign(check,{noEditBeforeAcceptance:true,readOnlyCommandsBeforeAcceptance:earlyCommands,pendingFileWatch:p.watched});
   rejectCounterpartAccess(h.host,h.events,p.folder,other.folder);
   assert(hostEditedSource(h.host,h.events,p.folder,p.file),'Receiving Host has no successful edit evidence for its own source');
   assert.equal(await readFile(join(p.folder,'test/task.test.mjs'),'utf8'),p.tests,'Host modified tests');
@@ -202,6 +214,7 @@ try {
  if(!failure)exchanges=verifyTwoHostExchange(exchangeProofs);
 } catch(error){failure=error;} finally {
  abort.abort();await Promise.allSettled(hostPromises);
+ for(const p of profiles)if(p.watch&&!p.watched)p.watched=await p.watch.stop().catch(()=>null);
  for(const p of profiles)if(p.started)try{await raw(p,['stop']);p.started=false;}catch{cleanupFailed=true;}
  if(!cleanupFailed){assert.equal(dirname(resolve(root)),resolve(tmpdir()));assert(basename(root).startsWith('devlink-central66-'));await rm(root,{recursive:true,force:true});}
  else failure??=Error('Owned broker cleanup failed; test profiles retained');

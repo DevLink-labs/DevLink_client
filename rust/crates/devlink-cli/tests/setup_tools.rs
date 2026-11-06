@@ -20,10 +20,18 @@ use std::{
     time::Duration,
 };
 
+/// These tests assert detection results, not timing; the deadline itself is covered
+/// by `probe_deadline_terminates_a_stalled_host`. Each test launches freshly copied
+/// executables. On a Windows machine with third-party real-time scanning on, such a
+/// child was seen sitting unstarted for minutes while this binary took 111-181s, and
+/// assertions expecting `Available` failed under the 5s production default (#69).
+/// The generous bound turns that slowness back into the result under test.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(300);
+
 fn search(directory: &Path) -> ToolSearch {
     ToolSearch {
         directories: vec![directory.to_path_buf()],
-        timeout: ToolSearch::default().timeout,
+        timeout: PROBE_TIMEOUT,
     }
 }
 async fn fixture() -> Fixture {
@@ -111,7 +119,12 @@ async fn probe_deadline_terminates_a_stalled_host() {
     let mut deadline = search(root.path());
     // Only this deliberately stalled process uses a short deadline.
     deadline.timeout = Duration::from_millis(800);
-    let reports = deadline.detect(None, Some((ToolType::Codex, &exe))).await;
+    let reports = tokio::time::timeout(
+        Duration::from_secs(3),
+        deadline.detect(None, Some((ToolType::Codex, &exe))),
+    )
+    .await
+    .expect("A stalled version probe must return after bounded cleanup");
     assert_eq!(reports[0].status, DetectionStatus::TimedOut);
 }
 

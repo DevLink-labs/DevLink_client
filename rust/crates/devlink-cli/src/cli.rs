@@ -105,9 +105,41 @@ pub enum Commands {
         #[arg(long)]
         event: String,
     },
+    /// Install, inspect or remove the user-level Host hooks that run updates-hook
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
     Broker,
+}
+
+#[derive(Subcommand)]
+pub enum HooksCommand {
+    /// Show whether this Host's user-level hooks run updates-hook
+    Status {
+        #[arg(long, value_parser = ["codex", "claude-code"])]
+        host: String,
+    },
+    /// Plan adding SessionStart/UserPromptSubmit hooks; writes only with --yes
+    Install {
+        #[arg(long, value_parser = ["codex", "claude-code"])]
+        host: String,
+        /// Apply the planned change (without it, only the plan is printed)
+        #[arg(long)]
+        yes: bool,
+        /// Replace existing DevLink updates-hook entries that use another path or profile
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Plan removing only DevLink's updates-hook entries; writes only with --yes
+    Uninstall {
+        #[arg(long, value_parser = ["codex", "claude-code"])]
+        host: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -268,6 +300,118 @@ fn updates_hook(config_path: Option<PathBuf>, host: &str, event: &str) {
     }));
 }
 
+/// Turn a hook provider error into a message that names the problem and the file.
+fn hook_error(error: devlink_broker::mcp_config::ConfigError) -> anyhow::Error {
+    let at = error
+        .path
+        .as_deref()
+        .map(|p| format!(" ({})", p.display()))
+        .unwrap_or_default();
+    let hint = match error.code {
+        "HOOKS_PATH_UNSUPPORTED" => {
+            "the devlink or config path has spaces or shell characters and cannot be written unquoted; add the hook by hand as in the DevLink update-hook guide"
+        }
+        "HOOKS_CONFIG_INVALID" => {
+            "the Host file is not valid JSON, has duplicate keys or an unexpected hooks shape, or the result would exceed 1 MiB; nothing was written"
+        }
+        "SETUP_MCP_CONFIG_CONFLICT" => {
+            "the file changed while planning or is being changed by another process; rerun"
+        }
+        "SETUP_UNSAFE_FILE" => {
+            "the Host file or its folder failed the safety check (link, owner or permissions)"
+        }
+        "SETUP_INPUT_INVALID" => "a path is not absolute",
+        _ => "",
+    };
+    match error.backup_path.as_deref() {
+        Some(backup) => {
+            anyhow::anyhow!("{}{at}: {hint} (backup: {})", error.code, backup.display())
+        }
+        None => anyhow::anyhow!("{}{at}: {hint}", error.code),
+    }
+}
+
+fn hooks_command(config_path: &std::path::Path, command: HooksCommand) -> Result<()> {
+    use devlink_broker::mcp_config::hooks::{self, HookChange, HookTarget};
+    use devlink_broker::sessions::ToolType;
+    let tool = |host: &str| match host {
+        "codex" => ToolType::Codex,
+        _ => ToolType::ClaudeCode,
+    };
+    // Canonical paths keep the command identical however the profile was named.
+    let wanted = |tool: ToolType| -> Result<_> {
+        let config = config_path.canonicalize().with_context(|| {
+            format!(
+                "No DevLink configuration at {}. Run devlink setup (or pass --config) first.",
+                config_path.display()
+            )
+        })?;
+        let devlink = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .context("Cannot locate the devlink executable")?;
+        hooks::wanted(tool, &devlink, &config).map_err(hook_error)
+    };
+    let (tool, plan, yes) = match command {
+        HooksCommand::Status { host } => {
+            let tool = tool(&host);
+            let target = HookTarget::user(tool).map_err(hook_error)?;
+            // Without a profile, report presence only; with one, also detect stale entries.
+            // Paths that need a hand-made hook cannot be compared; check presence only.
+            let expected = if config_path.is_file() {
+                match wanted(tool) {
+                    Ok(wanted) => Some(wanted),
+                    Err(error) if error.to_string().starts_with("HOOKS_PATH_UNSUPPORTED") => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            let status = hooks::status(&target, expected.as_ref()).map_err(hook_error)?;
+            return print_json(&serde_json::to_value(status)?);
+        }
+        HooksCommand::Install { host, yes, replace } => {
+            let tool = tool(&host);
+            let wanted = wanted(tool)?;
+            let target = HookTarget::user(tool).map_err(hook_error)?;
+            let plan = hooks::plan_install(&target, wanted, replace).map_err(hook_error)?;
+            (tool, plan, yes)
+        }
+        HooksCommand::Uninstall { host, yes } => {
+            let tool = tool(&host);
+            let target = HookTarget::user(tool).map_err(hook_error)?;
+            (
+                tool,
+                hooks::plan_uninstall(&target).map_err(hook_error)?,
+                yes,
+            )
+        }
+    };
+    if plan.change == HookChange::Conflict {
+        print_json(&serde_json::json!({"plan": plan, "applied": false}))?;
+        anyhow::bail!(
+            "SETUP_MCP_CONFIG_CONFLICT: another DevLink updates-hook entry exists for this Host. Review it, then rerun with --replace."
+        );
+    }
+    if !yes && plan.change != HookChange::Unchanged {
+        print_json(&serde_json::json!({"plan": plan, "applied": false}))?;
+        eprintln!("Review the plan, then rerun with --yes to write it.");
+        return Ok(());
+    }
+    let target = HookTarget::user(tool).map_err(hook_error)?;
+    let result = hooks::apply(&target, &plan).map_err(hook_error)?;
+    let mut next = Vec::new();
+    if result.status == "applied" {
+        if tool == ToolType::Codex && plan.change != HookChange::Remove {
+            next.push("trust_codex_hooks");
+            eprintln!(
+                "Codex runs new or changed hooks only after you trust them once: open Codex and approve them in /hooks."
+            );
+        }
+        next.push("restart_host");
+    }
+    print_json(&serde_json::json!({"plan": plan, "result": result, "nextActions": next}))
+}
+
 fn password_input(from_stdin: bool) -> Result<String> {
     secret_input("Password", 72, from_stdin)
 }
@@ -287,6 +431,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
+        Commands::Hooks { command } => hooks_command(&path, command)?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
             if clear {
@@ -296,6 +441,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 let _broker = config::lock(&directory.join("broker.lock"))
                     .context("Stop the broker before clearing notifications")?;
                 devlink_broker::notifications::Notifications::clear_config(&path)?;
+                // Question/answer arrivals are local notices too; their central cursor is kept.
+                devlink_broker::task_messages::TaskMessages::clear_config(&path)?;
+                // Overdue advisories and their sent-task ledger are local only as well.
+                devlink_broker::sent_tasks::clear_config(&path)?;
                 print_json(&serde_json::json!({"cleared":true,"centralTasksChanged":false}))?;
                 return Ok(());
             }
@@ -480,6 +629,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                     println!(
                         "Inbox rejects : {} (last: {:?})",
                         inbox.rejected_events, inbox.last_error
+                    );
+                }
+                if let Some(sync) = health.task_messages
+                    && (sync.rejected_events > 0 || sync.failed_pulls > 0)
+                {
+                    println!(
+                        "Question/answer sync: {} rejected, {} failed pulls (last: {}); verify with get_task_result",
+                        sync.rejected_events,
+                        sync.failed_pulls,
+                        sync.last_error.as_deref().unwrap_or("none")
                     );
                 }
                 if let Some(count) = health.notification_rejections {
