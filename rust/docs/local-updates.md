@@ -61,6 +61,7 @@ JSON Schema는 [updates.schema.json](../../contracts/local-broker/v1/updates.sch
 - 브로커는 `create_task`가 성공하면 `sent-tasks.json`(비공개)에 origin·요청 Agent·팀·taskId·로컬 생성 시각을 기록한다.
   - 같은 requestKey로 replay된 같은 작업은 다시 기록하지 않는다. 보관 한도 때문에 기록이 지워진 뒤에 replay돼도, 이미 지연 알림이 있으면 다시 알리지 않는다.
   - 기록은 응답과 분리된 최선 노력이다. 생성 응답은 기록을 기다리지 않고, 기록에 실패해도 생성 결과는 바뀌지 않는다.
+  - 원장에는 세대 번호가 있고 `notifications --clear`마다 바뀐다. 브로커는 시작할 때 읽은 세대에만 기록한다. 따라서 브로커가 멈추기 직전에 큐에 남은 기록이 정리 뒤에 실행돼도 원장을 되살리지 않는다(#80). 정리 뒤 새로 시작한 브로커는 새 세대에 정상 기록한다.
   - `taskOverdueMinutes`가 0이면 기록하지 않는다. 그래서 나중에 기능을 켜도 그 전의 작업이 한꺼번에 지연으로 나오지 않는다. 설정 변경은 브로커를 다시 시작해야 적용된다.
 - 브로커가 실행 중일 때 1분마다 기록을 확인한다. 생성 후 `taskOverdueMinutes`(기본 30, 0이면 끔, 최대 10080)가 지났는데 `notifications.json`에 그 작업의 COMPLETED·FAILED·REJECTED가 없으면 `{"eventId":"overdue:<taskId>","kind":"TASK_OVERDUE","direction":"sent","taskId":"...","minutes":30}`를 작업당 한 번 추가한다. 이미 최종 상태가 있으면 알림 없이 판정만 끝낸다.
 - 로컬 알림일 뿐이다. 중앙 상태는 바꾸지 않고, 작업을 취소하거나 재시도하지도 않는다. 중앙 알림을 놓친 경우에는 이미 끝난 작업이 지연으로 보일 수 있으므로 `get_task_result`로 확인한다. 브로커가 꺼져 있는 동안은 판정하지 않고, 다시 켜진 뒤 판정한다.

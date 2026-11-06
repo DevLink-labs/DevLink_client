@@ -60,6 +60,10 @@ pub struct OverdueEvent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Snapshot {
     schema_version: u32,
+    /// Changed by every clear. A broker records only into the generation it started
+    /// with, so a create still queued when a clear ran cannot restore the ledger (#80).
+    #[serde(default)]
+    generation: u64,
     tasks: Vec<SentTask>,
     events: Vec<OverdueEvent>,
 }
@@ -133,27 +137,42 @@ fn now_ms() -> u64 {
 pub struct Ledger {
     config_path: Arc<PathBuf>,
     origin: Arc<String>,
+    /// Ledger generation when the broker started; `None` if it could not be read, in
+    /// which case recording fails on the same unreadable file anyway.
+    generation: Option<u64>,
 }
 impl Ledger {
     pub fn new(config_path: &Path, server_url: &str) -> Result<Self> {
         Ok(Self {
             config_path: Arc::new(config_path.to_path_buf()),
             origin: Arc::new(endpoint_url(server_url)?.to_string()),
+            generation: read(&path(config_path)).ok().map(|s| s.generation),
         })
+    }
+    /// The synchronous write behind `created`, exposed for ordering tests.
+    pub fn record_now(
+        &self,
+        requester_agent_id: u64,
+        team_id: u64,
+        task_id: u64,
+        created_at_ms: u64,
+    ) -> Result<()> {
+        record_in(
+            &self.config_path,
+            &self.origin,
+            requester_agent_id,
+            team_id,
+            task_id,
+            created_at_ms,
+            self.generation,
+        )
     }
     /// Best effort and detached: the create response never waits for this local write,
     /// and a failed write never changes the create result.
     pub fn created(&self, requester_agent_id: u64, team_id: u64, task_id: u64) {
         let ledger = self.clone();
         drop(tokio::task::spawn_blocking(move || {
-            record(
-                &ledger.config_path,
-                &ledger.origin,
-                requester_agent_id,
-                team_id,
-                task_id,
-                now_ms(),
-            )
+            ledger.record_now(requester_agent_id, team_id, task_id, now_ms())
         }));
     }
 }
@@ -167,6 +186,26 @@ pub fn record(
     task_id: u64,
     created_at_ms: u64,
 ) -> Result<()> {
+    record_in(
+        config_path,
+        origin,
+        requester_agent_id,
+        team_id,
+        task_id,
+        created_at_ms,
+        None,
+    )
+}
+/// As `record`, but refused when the ledger was cleared after `generation` was read.
+fn record_in(
+    config_path: &Path,
+    origin: &str,
+    requester_agent_id: u64,
+    team_id: u64,
+    task_id: u64,
+    created_at_ms: u64,
+    generation: Option<u64>,
+) -> Result<()> {
     ensure!(
         valid_id(requester_agent_id) && valid_id(team_id) && valid_id(task_id),
         "Invalid sent task"
@@ -175,6 +214,10 @@ pub fn record(
     let path = path(config_path);
     let _guard = locked(&path)?;
     let mut snapshot = read(&path)?;
+    ensure!(
+        generation.is_none_or(|g| g == snapshot.generation),
+        "Sent task ledger was cleared after this broker started"
+    );
     if snapshot.tasks.iter().any(|t| {
         t.origin == origin && t.requester_agent_id == requester_agent_id && t.task_id == task_id
     }) {
@@ -284,10 +327,13 @@ pub(crate) fn events_config(
 pub fn clear_config(config_path: &Path) -> Result<()> {
     let path = path(config_path);
     let _guard = locked(&path)?;
+    // A new generation even when the old file is unreadable, so no older record matches.
+    let previous = read(&path).map(|s| s.generation).unwrap_or_default();
     private_file::write(
         &path,
         &Snapshot {
             schema_version: 1,
+            generation: previous.saturating_add(1).max(now_ms()),
             ..Snapshot::default()
         },
         MAX_BYTES,
@@ -422,6 +468,43 @@ mod tests {
     }
 
     #[test]
+    fn a_record_queued_before_a_clear_does_not_restore_the_ledger() {
+        let (_dir, config) = profile();
+        // A broker started (and read the generation), then a create was queued.
+        let ledger = Ledger::new(&config, ORIGIN).unwrap();
+        ledger.record_now(7, 3, 10, 0).unwrap();
+        // The broker stopped and the operator cleared local notifications.
+        clear_config(&config).unwrap();
+        // The queued write runs only now: it is refused and the ledger stays empty.
+        assert!(ledger.record_now(7, 3, 11, 0).is_err());
+        assert!(read(&path(&config)).unwrap().tasks.is_empty());
+        // A broker started after the clear records normally, and a second clear moves on.
+        let restarted = Ledger::new(&config, ORIGIN).unwrap();
+        restarted.record_now(7, 3, 12, 0).unwrap();
+        assert_eq!(read(&path(&config)).unwrap().tasks.len(), 1);
+        let before = read(&path(&config)).unwrap().generation;
+        clear_config(&config).unwrap();
+        assert!(read(&path(&config)).unwrap().generation > before);
+        assert!(restarted.record_now(7, 3, 13, 0).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_create_still_queued_in_the_blocking_pool_is_dropped_after_a_clear() {
+        let (_dir, config) = profile();
+        let ledger = Ledger::new(&config, ORIGIN).unwrap();
+        // Hold the only writer lock so the detached record waits, as a busy pool would.
+        let held = WRITER.lock().unwrap();
+        ledger.created(7, 3, 20);
+        // Clear runs first once the lock is free; the queued write must lose.
+        drop(held);
+        clear_config(&config).unwrap();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(read(&path(&config)).unwrap().tasks.is_empty());
+    }
+
+    #[test]
     fn concurrent_records_and_scans_are_all_kept() {
         let (_dir, config) = profile();
         std::thread::scope(|scope| {
@@ -452,6 +535,7 @@ mod tests {
             .collect();
         let full = Snapshot {
             schema_version: 1,
+            generation: 0,
             tasks,
             events: Vec::new(),
         };
