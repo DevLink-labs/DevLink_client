@@ -1,6 +1,6 @@
 //! -94 provider DTOs. No local task state, file access, or mutation retries.
 use crate::{
-    sessions::Principal,
+    sessions::{Identifier, Principal},
     task_client::{TaskClient, TaskError, central_error, numeric_id},
 };
 use reqwest::Method;
@@ -116,6 +116,47 @@ pub struct ResultArgs {
     #[serde(default)]
     pub request_key: Option<String>,
 }
+/// Central TaskMessageService limit for question and answer bodies.
+const MAX_MESSAGE_CHARS: usize = 8_000;
+
+/// S15P31D108-166: a question on a task this Agent takes part in.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuestionArgs {
+    pub task_id: String,
+    pub message: String,
+    /// Central idempotency key (task + author + key). Required; MCP issues one when omitted.
+    pub request_key: String,
+}
+/// S15P31D108-166: an answer to the other participant's question on the same task.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnswerArgs {
+    pub task_id: String,
+    pub question_event_id: String,
+    pub message: String,
+    pub request_key: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageKind {
+    Question,
+    Answer,
+}
+impl MessageKind {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Question => "questions",
+            Self::Answer => "answers",
+        }
+    }
+    fn event_type(self) -> &'static str {
+        match self {
+            Self::Question => "QUESTION",
+            Self::Answer => "ANSWER",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListArgs {
@@ -159,10 +200,21 @@ pub enum Operation {
         team: u64,
     },
     List(ListQuery),
+    Message {
+        id: u64,
+        kind: MessageKind,
+        author: u64,
+        message: String,
+        question: Option<u64>,
+        body: Value,
+    },
 }
 impl Operation {
     pub fn mutation(&self) -> bool {
-        matches!(self, Self::Status { .. } | Self::Complete { .. })
+        matches!(
+            self,
+            Self::Status { .. } | Self::Complete { .. } | Self::Message { .. }
+        )
     }
     pub async fn execute(&self, client: &TaskClient) -> Result<Value, TaskError> {
         let (method, path, query, body) = match self {
@@ -179,6 +231,12 @@ impl Operation {
                 Some(body.clone()),
             ),
             Self::Result { id, .. } => (Method::GET, format!("/api/v1/tasks/{id}"), vec![], None),
+            Self::Message { id, kind, body, .. } => (
+                Method::POST,
+                format!("/api/v1/tasks/{id}/{}", kind.path()),
+                vec![],
+                Some(body.clone()),
+            ),
             Self::List(q) => {
                 let mut params = vec![
                     ("scope".into(), "mine".into()),
@@ -205,7 +263,9 @@ impl Operation {
             }
         };
         let (status, envelope) = client.request_http(method, &path, &query, body).await?;
-        if status != 200 || !envelope.success {
+        // Central answers a new question/answer with 201 and a key replay with 200.
+        let accepted = status == 200 || (status == 201 && matches!(self, Self::Message { .. }));
+        if !accepted || !envelope.success {
             return Err(central_error(status, envelope.code.as_deref()));
         }
         let data = envelope.data.ok_or_else(protocol)?;
@@ -228,6 +288,27 @@ impl Operation {
                     || data.status != TaskStatus::Completed
                     || data.version.0 <= version.0
                     || data.completed_at.is_empty()
+                {
+                    return Err(protocol());
+                }
+                encode(data)
+            }
+            Self::Message {
+                id,
+                kind,
+                author,
+                message,
+                question,
+                ..
+            } => {
+                let data: MessageData = decode(data)?;
+                if data.task_id.0 != *id
+                    || data.event_type != kind.event_type()
+                    || data.author_agent.agent_id.0 != *author
+                    || data.message != *message
+                    || data.question_event_id.map(|q| q.0) != *question
+                    || data.created_at.is_empty()
+                    || data.replayed == (status == 201)
                 {
                     return Err(protocol());
                 }
@@ -287,6 +368,86 @@ pub trait Arguments: serde::de::DeserializeOwned {
 }
 fn key_valid(key: Option<&str>) -> bool {
     key.is_none_or(|key| !key.trim().is_empty() && key.encode_utf16().count() <= 64)
+}
+/// Conversation keys reach central, so they use the shared identifier rules.
+fn conversation_key(key: &str) -> bool {
+    Identifier::parse(key).is_ok() && key.encode_utf16().count() <= 64
+}
+fn message_operation(
+    actor: &Principal,
+    task_id: &str,
+    kind: MessageKind,
+    message: &str,
+    question: Option<&str>,
+    key: &str,
+) -> Result<Operation, TaskError> {
+    let id = numeric_id(task_id).ok_or_else(validation)?;
+    let author = actor
+        .agent_id
+        .as_ref()
+        .and_then(|id| numeric_id(id.as_str()))
+        .ok_or_else(validation)?;
+    // Mirrors central: non-blank, at most 8,000 code points, no NUL.
+    if message.trim().is_empty()
+        || message.chars().count() > MAX_MESSAGE_CHARS
+        || message.contains('\0')
+        || !conversation_key(key)
+    {
+        return Err(validation());
+    }
+    let question = question
+        .map(|value| numeric_id(value).ok_or_else(validation))
+        .transpose()?;
+    let mut body = json!({"requestKey":key,"message":message});
+    if let Some(question) = question {
+        body["questionEventId"] = json!(question.to_string());
+    }
+    Ok(Operation::Message {
+        id,
+        kind,
+        author,
+        message: message.into(),
+        question,
+        body,
+    })
+}
+impl Arguments for QuestionArgs {
+    const NAME: &'static str = "ask_question";
+    fn task_id(&self) -> Option<u64> {
+        numeric_id(&self.task_id)
+    }
+    fn request_key(&self) -> Option<&str> {
+        Some(&self.request_key)
+    }
+    fn prepare(&self, actor: &Principal, _: &str) -> Result<Operation, TaskError> {
+        message_operation(
+            actor,
+            &self.task_id,
+            MessageKind::Question,
+            &self.message,
+            None,
+            &self.request_key,
+        )
+    }
+}
+impl Arguments for AnswerArgs {
+    const NAME: &'static str = "answer_question";
+    fn task_id(&self) -> Option<u64> {
+        numeric_id(&self.task_id)
+    }
+    fn request_key(&self) -> Option<&str> {
+        Some(&self.request_key)
+    }
+    fn prepare(&self, actor: &Principal, _: &str) -> Result<Operation, TaskError> {
+        message_operation(
+            actor,
+            &self.task_id,
+            MessageKind::Answer,
+            &self.message,
+            Some(&self.question_event_id),
+            &self.request_key,
+        )
+    }
 }
 impl Arguments for StatusArgs {
     const NAME: &'static str = "update_task_status";
@@ -525,12 +686,50 @@ struct FileData {
     change_type: ChangeType,
     diff_text: Option<String>,
 }
+/// Central sends event IDs as canonical positive decimal strings.
+#[derive(Clone, Copy, Debug)]
+struct TextId(u64);
+impl<'de> Deserialize<'de> for TextId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        numeric_id(&text)
+            .map(Self)
+            .ok_or_else(|| D::Error::custom("invalid event ID"))
+    }
+}
+impl Serialize for TextId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0.to_string())
+    }
+}
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EventData {
     event_type: String,
     message: Option<String>,
     created_at: String,
+    // Kept so an Agent can find a question's eventId to answer (S15P31D108-166).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_id: Option<TextId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence: Option<TextId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author_agent: Option<AgentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    question_event_id: Option<TextId>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageData {
+    event_id: TextId,
+    task_id: Id,
+    sequence: TextId,
+    event_type: String,
+    author_agent: AgentRef,
+    message: String,
+    question_event_id: Option<TextId>,
+    created_at: String,
+    replayed: bool,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

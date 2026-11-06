@@ -4,7 +4,9 @@ use crate::{
     session_api,
     sessions::SessionManager,
     task_client::{TaskClient, TaskError},
-    task_operations::{Arguments, CompleteArgs, ListArgs, ResultArgs, StatusArgs},
+    task_operations::{
+        AnswerArgs, Arguments, CompleteArgs, ListArgs, QuestionArgs, ResultArgs, StatusArgs,
+    },
 };
 use axum::{
     Router,
@@ -34,6 +36,8 @@ pub fn router(
         .route("/v1/tasks/complete", post(complete))
         .route("/v1/tasks/list", post(list))
         .route("/v1/tasks/result", post(result))
+        .route("/v1/tasks/questions", post(question))
+        .route("/v1/tasks/answers", post(answer))
         .with_state(Api {
             token,
             sessions,
@@ -52,6 +56,12 @@ async fn list(State(api): State<Api>, req: Request) -> Response {
 }
 async fn result(State(api): State<Api>, req: Request) -> Response {
     handle::<ResultArgs>(api, req).await
+}
+async fn question(State(api): State<Api>, req: Request) -> Response {
+    handle::<QuestionArgs>(api, req).await
+}
+async fn answer(State(api): State<Api>, req: Request) -> Response {
+    handle::<AnswerArgs>(api, req).await
 }
 async fn handle<T: Arguments>(api: Api, request: Request) -> Response {
     let deadline = Instant::now() + LOCAL_BUDGET;

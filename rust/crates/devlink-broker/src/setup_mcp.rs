@@ -129,6 +129,8 @@ pub struct Preparation {
     plan: Option<ConfigPlan>,
     manual: ManualConfig,
     fingerprint: Fingerprint,
+    /// The devlink executable, for comparing installed Host hooks with this profile.
+    devlink: PathBuf,
 }
 impl Preparation {
     pub fn plan(&self) -> Option<&ConfigPlan> {
@@ -172,11 +174,46 @@ impl Preparation {
             } else {
                 "open_host_then_register_agent"
             };
+            let mut next_actions = Vec::new();
+            let tool = prepared.context.tool.tool_type;
+            if tool == crate::sessions::ToolType::Codex {
+                next_actions.push("trust_codex_project");
+            }
+            // Read-only: setup never writes user-level Host files. Without the hooks the
+            // Host learns about new tasks only when it calls get_updates or get_tasks.
+            // Compared with this profile's commands, so hooks for another devlink path or
+            // profile are reported as missing too.
+            let hooked = mcp_config::hooks::HookTarget::user(tool)
+                .and_then(|target| {
+                    let devlink = prepared
+                        .devlink
+                        .canonicalize()
+                        .unwrap_or(prepared.devlink.clone());
+                    let config = prepared
+                        .context
+                        .config_path
+                        .canonicalize()
+                        .unwrap_or(prepared.context.config_path.clone());
+                    // Paths that cannot be written unquoted need a hand-made hook; then
+                    // only the presence of a DevLink entry can be checked.
+                    match mcp_config::hooks::wanted(tool, &devlink, &config) {
+                        Ok(wanted) => mcp_config::hooks::status(&target, Some(&wanted)),
+                        Err(error) if error.code == "HOOKS_PATH_UNSUPPORTED" => {
+                            mcp_config::hooks::status(&target, None)
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+                .is_ok_and(|status| status.status == "installed");
+            if !hooked {
+                next_actions.push("install_host_hooks");
+            }
+            next_actions.push(next);
             Ok(ConfigurationResult {
                 config: applied,
                 runtime_verified: true,
                 host_session: "not_checked",
-                next_actions: vec![next],
+                next_actions,
             })
         })
         .await
@@ -191,18 +228,20 @@ fn error(code: &'static str) -> ConfigError {
 // During version/stdio probes and user input they are released and checked again.
 fn check_context(context: &Context) -> Result<(File, File)> {
     let state = config::state_directory(&context.config_path);
-    let account = config::try_lock(&state.join("account.lock"))
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?
+    let account_path = state.join("account.lock");
+    let account = config::try_lock(&account_path)
+        .map_err(|e| ConfigError::unsafe_at(&account_path, e))?
         .ok_or_else(|| error("SETUP_AUTH_BUSY"))?;
-    let control = config::try_lock(&state.join("control.lock"))
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?
+    let control_path = state.join("control.lock");
+    let control = config::try_lock(&control_path)
+        .map_err(|e| ConfigError::unsafe_at(&control_path, e))?
         .ok_or_else(|| error("SETUP_CONFIG_BUSY"))?;
     let binding = agent_profile::inspection_binding(&context.config_path)
         .map_err(|_| error("SETUP_PROFILE_CONFLICT"))?
         .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
     let current = config::Config::load(&context.config_path)
         .and_then(|c| user_auth::origin(&c))
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+        .map_err(|e| ConfigError::unsafe_at(&context.config_path, e))?;
     if current.as_str() != context.origin
         || binding.origin != context.origin
         || binding.user_id != context.user_id
@@ -228,14 +267,18 @@ fn check_context(context: &Context) -> Result<(File, File)> {
     if selected.preferred() != Some(&context.tool) {
         return Err(error("SETUP_PROFILE_CONFLICT"));
     }
-    if !local::running(&context.config_path).map_err(|_| error("SETUP_UNSAFE_FILE"))? {
+    if !local::running(&context.config_path)
+        .map_err(|e| ConfigError::unsafe_at(&state.join("broker.lock"), e))?
+    {
         return Err(error("SETUP_BROKER_START_FAILED"));
     }
     let runtime = local::Runtime::load(&context.config_path)
         .map_err(|_| error("SETUP_BROKER_START_FAILED"))?;
-    let descriptor =
-        credentials::load(&context.config_path).map_err(|_| error("SETUP_UNSAFE_FILE"))?;
-    let url = url::Url::parse(&descriptor.broker_url).map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+    let descriptor_path = credentials::path(&context.config_path);
+    let descriptor = credentials::load(&context.config_path)
+        .map_err(|e| ConfigError::unsafe_at(&descriptor_path, e))?;
+    let url = url::Url::parse(&descriptor.broker_url)
+        .map_err(|_| error("SETUP_UNSAFE_FILE").at(&descriptor_path))?;
     if runtime.pid != context.broker_pid
         || runtime.instance_id != context.broker_instance
         || url.scheme() != "http"
@@ -247,13 +290,13 @@ fn check_context(context: &Context) -> Result<(File, File)> {
     Ok((account, control))
 }
 fn file_hash(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+    let mut file = File::open(path).map_err(|_| error("SETUP_UNSAFE_FILE").at(path))?;
     let mut digest = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
         let n = file
             .read(&mut buffer)
-            .map_err(|_| error("SETUP_UNSAFE_FILE"))?;
+            .map_err(|_| error("SETUP_UNSAFE_FILE").at(path))?;
         if n == 0 {
             break;
         }
@@ -262,15 +305,15 @@ fn file_hash(path: &Path) -> Result<[u8; 32]> {
     Ok(digest.finalize().into())
 }
 fn fingerprints(context: &Context, input: &PlanInput) -> Result<Fingerprint> {
-    let profile = private_file::read_bytes(&agent_profile::path(&context.config_path), 16_384)
-        .map_err(|_| error("SETUP_UNSAFE_FILE"))?
+    let profile_path = agent_profile::path(&context.config_path);
+    let profile = private_file::read_bytes(&profile_path, 16_384)
+        .map_err(|e| ConfigError::unsafe_at(&profile_path, e))?
         .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
-    let credentials = private_file::read_bytes(
-        &credentials::path(&context.config_path),
-        credentials::MAX_CREDENTIALS_SIZE as usize,
-    )
-    .map_err(|_| error("SETUP_UNSAFE_FILE"))?
-    .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
+    let descriptor_path = credentials::path(&context.config_path);
+    let credentials =
+        private_file::read_bytes(&descriptor_path, credentials::MAX_CREDENTIALS_SIZE as usize)
+            .map_err(|e| ConfigError::unsafe_at(&descriptor_path, e))?
+            .ok_or_else(|| error("SETUP_PROFILE_CONFLICT"))?;
     Ok(Fingerprint {
         profile: Sha256::digest(profile).into(),
         credentials: Sha256::digest(credentials).into(),
@@ -278,39 +321,22 @@ fn fingerprints(context: &Context, input: &PlanInput) -> Result<Fingerprint> {
         entry: file_hash(Path::new(&input.executable.args[0]))?,
     })
 }
-pub(crate) fn runtime_input(
-    context: &PreflightContext,
-    options: &Options,
-    executable: &Path,
-) -> Result<PlanInput> {
-    options.validate()?;
-    let node = options
-        .node
-        .clone()
-        .or_else(|| {
-            let launcher = context.host_launcher.as_ref()?;
-            let name = launcher.file_name()?.to_str()?;
-            ["node", "nodejs", "node.exe"]
-                .iter()
-                .any(|n| name.eq_ignore_ascii_case(n))
-                .then(|| launcher.clone())
-        })
-        .or_else(|| {
-            std::env::var_os("PATH").and_then(|path| {
-                std::env::split_paths(&path)
-                    .filter(|p| p.is_absolute())
-                    .flat_map(|p| {
-                        if cfg!(windows) {
-                            vec![p.join("node.exe")]
-                        } else {
-                            vec![p.join("node"), p.join("nodejs")]
-                        }
-                    })
-                    .find(|p| p.is_file())
+fn path_node() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .filter(|p| p.is_absolute())
+            .flat_map(|p| {
+                if cfg!(windows) {
+                    vec![p.join("node.exe")]
+                } else {
+                    vec![p.join("node"), p.join("nodejs")]
+                }
             })
-        })
-        .ok_or_else(|| error("SETUP_TOOL_UNAVAILABLE"))?;
-    let entry = options
+            .find(|p| p.is_file())
+    })
+}
+fn runtime_entry(options: &Options, executable: &Path) -> Result<PathBuf> {
+    options
         .entry
         .clone()
         .or_else(|| {
@@ -329,14 +355,40 @@ pub(crate) fn runtime_input(
                 })
             })
         })
+        .ok_or_else(|| error("SETUP_TOOL_UNAVAILABLE"))
+}
+
+fn runtime_target(context: &PreflightContext, options: &Options) -> PathBuf {
+    options
+        .target
+        .clone()
+        .unwrap_or_else(|| mcp_config::project_target(context.tool_type, &context.project))
+}
+
+pub(crate) fn runtime_input(
+    context: &PreflightContext,
+    options: &Options,
+    executable: &Path,
+) -> Result<PlanInput> {
+    options.validate()?;
+    let node = options
+        .node
+        .clone()
+        .or_else(|| {
+            let launcher = context.host_launcher.as_ref()?;
+            let name = launcher.file_name()?.to_str()?;
+            ["node", "nodejs", "node.exe"]
+                .iter()
+                .any(|n| name.eq_ignore_ascii_case(n))
+                .then(|| launcher.clone())
+        })
+        .or_else(path_node)
         .ok_or_else(|| error("SETUP_TOOL_UNAVAILABLE"))?;
+    let entry = runtime_entry(options, executable)?;
     Ok(PlanInput {
         tool_type: context.tool_type,
         project_path: context.project.clone(),
-        target_path: options
-            .target
-            .clone()
-            .unwrap_or_else(|| mcp_config::project_target(context.tool_type, &context.project)),
+        target_path: runtime_target(context, options),
         broker_file: credentials::path(&context.config_path),
         executable: Executable {
             command: node,
@@ -374,6 +426,32 @@ pub async fn preflight(
         .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
 }
 
+/// Check paths before authentication, when the saved Host is not yet scoped.
+/// Only an explicit Node can be probed now. A saved Host may supply a different
+/// Node than PATH, so probe the selected runtime after scoping the saved Host.
+pub async fn preflight_runtime(
+    mut context: PreflightContext,
+    options: Options,
+    executable: PathBuf,
+) -> Result<()> {
+    if options.node.is_some() {
+        context.mcp_automatic_supported = false;
+        return preflight(context, options, executable).await;
+    }
+    tokio::task::spawn_blocking(move || {
+        options.validate()?;
+        mcp_config::preflight_paths(
+            context.tool_type,
+            &context.project,
+            &runtime_target(&context, &options),
+            &credentials::path(&context.config_path),
+            &runtime_entry(&options, &executable)?,
+        )
+    })
+    .await
+    .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
+}
+
 /// ACL/path validation precedes subprocess execution. Runtime discovery only initializes
 /// a credential-free MCP process: no business tool, claim, bind or AI Host is called.
 pub async fn prepare(
@@ -398,6 +476,7 @@ pub async fn prepare(
             plan: None,
             manual,
             fingerprint,
+            devlink: executable,
         })
     })
     .await
@@ -446,6 +525,14 @@ fn command(executable: &Executable) -> tokio::process::Command {
     }
     command
 }
+/// Termination may be delayed by the OS or security software, so the reap after a
+/// failed probe is bounded as well as the probe itself. kill_on_drop stays as a backstop.
+/// If the bound passes, a child still exiting can keep the probe's temporary working
+/// directory in use on Windows; that empty directory is then left behind.
+async fn terminate(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(crate::tool_discovery::REAP_TIMEOUT, child.wait()).await;
+}
 async fn probe_runtime(executable: &Executable) -> Result<()> {
     let cwd = tempfile::tempdir().map_err(|_| error("SETUP_TOOL_UNAVAILABLE"))?;
     let mut version = command(executable)
@@ -484,13 +571,12 @@ async fn probe_runtime(executable: &Executable) -> Result<()> {
         _ => false,
     };
     if !valid {
-        let _ = version.kill().await;
-        let _ = version.wait().await;
+        terminate(&mut version).await;
         return Err(error("SETUP_TOOL_UNAVAILABLE"));
     }
     let mut child = command(executable)
         .args([
-            mcp_config::launch_path(Path::new(&executable.args[0])),
+            mcp_config::host_path(Path::new(&executable.args[0])),
             "--transport".into(),
             "stdio".into(),
         ])
@@ -529,8 +615,7 @@ async fn probe_runtime(executable: &Executable) -> Result<()> {
         Ok::<_, std::io::Error>(valid? && err.is_ok())
     }).await;
     if !matches!(checked, Ok(Ok(true))) {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        terminate(&mut child).await;
         return Err(error("SETUP_TOOL_UNAVAILABLE"));
     }
     Ok(())

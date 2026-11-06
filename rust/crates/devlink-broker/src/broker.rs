@@ -20,11 +20,13 @@ use axum::{
 };
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    net::TcpListener,
     sync::RwLock,
     time::{Instant, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
+
+mod ports;
+pub use ports::PortFailure;
 
 /// 로컬 HTTP API 핸들러에서 공유하는 상태
 #[derive(Clone)]
@@ -43,6 +45,12 @@ struct ApiState {
 struct RuntimeGuard(std::path::PathBuf);
 struct InboxGuard(crate::inbox::Inbox);
 struct NotificationGuard(crate::notifications::Notifications);
+struct TaskMessageGuard(crate::task_messages::TaskMessages);
+impl Drop for TaskMessageGuard {
+    fn drop(&mut self) {
+        self.0.stop_accepting();
+    }
+}
 impl Drop for NotificationGuard {
     fn drop(&mut self) {
         self.0.stop_accepting();
@@ -75,9 +83,7 @@ pub async fn run(path: &Path) -> Result<()> {
     };
 
     // 로컬 제어용 루프백(127.0.0.1) TCP 포트 바인딩
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.local_port))
-        .await
-        .context("Cannot bind broker loopback port; check for a port conflict")?;
+    let listener = ports::bind(&config).await?;
     let bound_port = listener.local_addr()?.port();
     let broker_url = format!("http://127.0.0.1:{bound_port}");
 
@@ -88,6 +94,8 @@ pub async fn run(path: &Path) -> Result<()> {
     let inbox_guard = InboxGuard(inbox.clone());
     let notifications = crate::notifications::Notifications::open(path)?;
     let notification_guard = NotificationGuard(notifications.clone());
+    let task_messages = crate::task_messages::TaskMessages::open(path)?;
+    let task_message_guard = TaskMessageGuard(task_messages.clone());
     // 작업 생성 요청 영속화 및 멱등성 로그 초기화
     let task_requests = crate::task_requests::TaskRequests::open(path)?;
     // 중앙 서버 Task API 전송을 위한 HTTP 클라이언트 초기화 (중앙 토큰 주입)
@@ -110,6 +118,7 @@ pub async fn run(path: &Path) -> Result<()> {
     let central_state = CentralState::new(status)
         .with_inbox(inbox)
         .with_notifications(notifications)
+        .with_task_messages(task_messages.clone())
         .with_context_client(crate::agent_context::ContextClient::new(
             &config.server_url,
             &token,
@@ -133,6 +142,27 @@ pub async fn run(path: &Path) -> Result<()> {
         &config.server_url,
         cancel.clone(),
     )?;
+
+    // 질문·답변 도착 정보 pull 동기화 (READY·알림 신호와 안전망 주기)
+    let message_sync = tokio::spawn(crate::task_messages::run(
+        task_messages,
+        central_state.clone(),
+        task_client.clone(),
+        config.server_url.clone(),
+        Duration::from_millis(config.task_message_sync_interval_ms),
+        cancel.clone(),
+    ));
+
+    // 보낸 작업의 로컬 지연 알림 판정 (taskOverdueMinutes, 0이면 끔)
+    // Off (0) records nothing, so enabling it later does not flag old tasks at once.
+    let sent_tasks = (config.task_overdue_minutes > 0)
+        .then(|| crate::sent_tasks::Ledger::new(path, &config.server_url))
+        .transpose()?;
+    tokio::spawn(crate::sent_tasks::run(
+        path.to_path_buf(),
+        config.task_overdue_minutes,
+        cancel.clone(),
+    ));
 
     // 중앙 서버와 통신하는 비동기 태스크 시작
     let central = tokio::spawn(central::run_with_state(
@@ -187,6 +217,7 @@ pub async fn run(path: &Path) -> Result<()> {
             task_client.clone(),
             task_requests,
             cancel.clone(),
+            sent_tasks,
         ))
         .merge(crate::task_routes::router(
             mcp_token,
@@ -222,6 +253,11 @@ pub async fn run(path: &Path) -> Result<()> {
     cancel.cancel();
     inbox_guard.0.stop_accepting();
     notification_guard.0.stop_accepting();
+    task_message_guard.0.stop_accepting();
+    let abort_sync = message_sync.abort_handle();
+    if timeout(Duration::from_secs(1), message_sync).await.is_err() {
+        abort_sync.abort();
+    }
     let abort = central.abort_handle();
     if timeout(Duration::from_secs(2), central).await.is_err() {
         abort.abort();
@@ -319,6 +355,7 @@ async fn health(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     Json(Health {
         notification_rejections: state.central.notification_rejections(),
         inbox: state.central.inbox_diagnostics(),
+        task_messages: state.central.task_message_diagnostics(),
         service: SERVICE.into(),
         api_version: API_VERSION,
         pid: state.runtime.pid,

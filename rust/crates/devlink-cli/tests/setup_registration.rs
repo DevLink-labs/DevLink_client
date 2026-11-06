@@ -662,6 +662,81 @@ async fn setup_reports_required_input_known_ids_and_token_boundary_without_start
     assert_eq!(counts(&f), (1, 0));
 }
 
+struct InteractiveRecovery;
+impl AgentInput for InteractiveRecovery {
+    fn available(&self) -> bool {
+        true
+    }
+    fn interactive(&self) -> bool {
+        true
+    }
+    async fn request(&mut self, _: &[setup::AgentChoice]) -> Result<Selection, AgentInputError> {
+        Err(AgentInputError::Unavailable)
+    }
+    async fn rename(&mut self) -> Result<String, AgentInputError> {
+        Ok("Distinct Agent".into())
+    }
+    async fn confirm_issue(&mut self, id: u64) -> Result<(), AgentInputError> {
+        assert_eq!(id, 201);
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_registration_retries_a_confirmed_name_conflict_with_a_new_name() {
+    let (f, stages, expected) = fixture().await;
+    seed_pr37_agent(&f, &expected, 302, 88, "CODEX");
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages = stages
+        .with_agent_input(InteractiveRecovery)
+        .with_agent(Some(Selection::Create));
+    let StepResult::InputRequired(required) = stages.execute(Step::RegisterAgent, &context).await
+    else {
+        panic!("expected a prompt to rename the Agent");
+    };
+    assert_eq!(required.code, setup::ErrorCode::AgentAlreadyExists);
+    assert_eq!(counts(&f), (1, 0));
+    stages.resolve_input(&required).await.unwrap();
+    assert!(matches!(
+        stages.execute(Step::RegisterAgent, &context).await,
+        StepResult::Complete { .. }
+    ));
+    assert_eq!(counts(&f), (2, 1));
+    assert_eq!(
+        stages.project().unwrap().metadata.agent_name,
+        "Distinct Agent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_token_prompt_issues_only_after_confirming_the_existing_agent_id() {
+    let (f, stages, expected) = fixture().await;
+    registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let mut stages = stages
+        .with_agent_input(InteractiveRecovery)
+        .with_agent(Some(Selection::Use(201)));
+    let StepResult::InputRequired(required) = stages.execute(Step::RegisterAgent, &context).await
+    else {
+        panic!("expected a token issuance prompt");
+    };
+    assert_eq!(required.code, setup::ErrorCode::TokenRequired);
+    assert_eq!(required.known.agent_id.as_deref(), Some("201"));
+    assert_eq!(counts(&f), (1, 0));
+    stages.resolve_input(&required).await.unwrap();
+    assert!(matches!(
+        stages.execute(Step::RegisterAgent, &context).await,
+        StepResult::Complete { .. }
+    ));
+    assert_eq!(counts(&f), (1, 1));
+}
+
 struct ExplicitCreate;
 impl AgentInput for ExplicitCreate {
     fn available(&self) -> bool {

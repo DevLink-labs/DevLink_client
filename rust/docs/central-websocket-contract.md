@@ -138,6 +138,8 @@ Rust는 상태 보고에 `agent_id`, 사용자·팀 식별자, 클라이언트 �
 
 TASK_CREATED는 인증된 수신자·팀·필드를 검사하고 디스크 저장을 완료한 뒤 정확한 event_id/task_id로 ACK한다. 파싱할 수 없는 TASK_CREATED는 ProtocolViolation, 기록 실패는 InboxFailed로 끝나며 성공 ACK를 보내지 않는다. 중복·재시작·오래된 generation·CLI 조회/정리·실제 중앙 시험은 [수신함](task-inbox.md)에 둔다. AGENT_PRESENCE에 ACK가 없다는 규칙을 업무 ACK에 적용하지 않는다.
 
+`TASK_QUESTION_CREATED`·`TASK_ANSWER_CREATED`는 본문 없는 pull 신호다. READY 이후 수신 Agent·형식을 검사해 task-messages 조회만 요청하며 ACK·저장·연결 종료를 하지 않는다. 잘못된 알림은 진단 카운터로만 센다. 상세는 [질문·답변 도착 동기화](task-messages.md)다.
+
 ## 8. 후속 검증
 
 현재 구현·검증과 남은 작업은 [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 따른다. 상태·결과 알림(-96), 누락 복구 정책, MCP 최종 DTO(-97), 전체 통합(-52), 실제 Host 양방향(-66), 운영 설정·Ubuntu 실행을 개별 범위로 확인한다.

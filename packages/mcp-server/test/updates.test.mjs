@@ -8,14 +8,17 @@ import { createServer } from '../dist/server.js';
 import { fakeBroker } from './helpers/fake-broker.mjs';
 
 const silent = { debug() {}, info() {}, error() {} };
-const cursor = (r, s) => `v1.${r}.${s}.${'a'.repeat(32)}`;
+const cursor = (r, s, m, o) => `v3.${r}.${s}.${m}.${o}.${'a'.repeat(32)}`;
 const feed = {
   updates: [
     { eventId: 'created-1', kind: 'TASK_CREATED', direction: 'received', taskId: '101', requesterAgentId: '11' },
     { eventId: 'status-1', kind: 'TASK_STATUS_CHANGED', direction: 'sent', taskId: '201', taskVersion: '1', status: 'REJECTED' },
     { eventId: 'done-1', kind: 'TASK_COMPLETED', direction: 'sent', taskId: '201', taskVersion: '2', status: 'COMPLETED' },
+    { eventId: '502', kind: 'TASK_QUESTION_CREATED', direction: 'received', taskId: '300', sequence: '13' },
+    { eventId: '503', kind: 'TASK_ANSWER_CREATED', direction: 'received', taskId: '300', sequence: '14' },
+    { eventId: 'overdue:204', kind: 'TASK_OVERDUE', direction: 'sent', taskId: '204', minutes: 30 },
   ],
-  nextCursor: cursor(1, 2), hasMore: false, cursorReset: false, coverage: 'local',
+  nextCursor: cursor(1, 2, 2, 1), hasMore: false, cursorReset: false, coverage: 'local',
 };
 
 async function connected(t) {
@@ -35,7 +38,8 @@ test('get_updates is published read-only and forwards only cursor and limit', as
   const tool = (await client.listTools()).tools.find(({ name }) => name === 'get_updates');
   assert.equal(tool.annotations.readOnlyHint, true);
   assert.equal(tool.annotations.destructiveHint, false);
-  assert.match(tool.description, /never accepts, acknowledges, marks read or changes a task/);
+  assert.match(tool.description, /never accepts, acknowledges, answers, marks read or changes a task/);
+  assert.match(tool.description, /not the user's approval to start work or to answer a question/);
   broker.setBusinessHook(({ path, send }) => path === operationRoutes.get_updates && (send({ data: feed }), true));
   const first = await client.callTool({ name: 'get_updates', arguments: {} });
   assert.equal(first.isError, undefined);
@@ -55,7 +59,17 @@ test('provider feeds that leak bodies or break the contract become protocol erro
   const wrongState = structuredClone(feed); wrongState.updates[2].status = 'FAILED';
   const notLocal = { ...feed, coverage: 'complete' };
   const badCursor = { ...feed, nextCursor: 'v1.0.0.short' };
-  for (const data of [leaked, wrongState, notLocal, badCursor]) {
+  const leakedQuestion = structuredClone(feed); leakedQuestion.updates[3].message = 'secret prompt text';
+  const sentQuestion = structuredClone(feed); sentQuestion.updates[3].direction = 'sent';
+  const badSequence = structuredClone(feed); badSequence.updates[4].sequence = '0';
+  const v2WithoutMessages = { ...feed, nextCursor: `v2.1.2.${'a'.repeat(32)}` };
+  const v3WithoutOverdue = { ...feed, nextCursor: `v3.1.2.2.${'a'.repeat(32)}` };
+  const receivedOverdue = structuredClone(feed); receivedOverdue.updates[5].direction = 'received';
+  const overdueWithBody = structuredClone(feed); overdueWithBody.updates[5].prompt = 'secret prompt text';
+  const forgedOverdueId = structuredClone(feed); forgedOverdueId.updates[5].eventId = 'overdue:x';
+  const otherTaskOverdue = structuredClone(feed); otherTaskOverdue.updates[5].eventId = 'overdue:205';
+  for (const data of [leaked, wrongState, notLocal, badCursor, leakedQuestion, sentQuestion, badSequence, v2WithoutMessages,
+    v3WithoutOverdue, receivedOverdue, overdueWithBody, forgedOverdueId, otherTaskOverdue]) {
     broker.setBusinessHook(({ send }) => (send({ data }), true));
     const result = await client.callTool({ name: 'get_updates', arguments: {} });
     assert.equal(result.isError, true);
@@ -72,4 +86,13 @@ test('an unreadable local store maps to its own rejected domain fault', async (t
   assert.equal(result.structuredContent.error.code, 'LOCAL_UPDATES_UNAVAILABLE');
   assert.equal(result.structuredContent.error.outcome, 'rejected');
   assert.match(result.structuredContent.error.message, /get_tasks or get_task_result/);
+});
+
+test('a v1 cursor from an older broker is still a valid page cursor', async (t) => {
+  const { broker, client } = await connected(t);
+  const legacy = { ...feed, updates: feed.updates.slice(0, 3), nextCursor: `v1.1.2.${'b'.repeat(32)}` };
+  broker.setBusinessHook(({ send }) => (send({ data: legacy }), true));
+  const result = await client.callTool({ name: 'get_updates', arguments: { cursor: legacy.nextCursor } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent.data, legacy);
 });

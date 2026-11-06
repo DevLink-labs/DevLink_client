@@ -255,6 +255,7 @@ async fn verify_unattended_login_and_reuse(runtime: Option<(PathBuf, PathBuf)>) 
     assert!(app.login().status.success());
     let bin = project.join("test-bin");
     let saved_host = tool_fixture::host(&bin, "codex", "codex-cli 0.166.0");
+    let synthetic_runtime = runtime.is_none();
     let (node, entry) = runtime.unwrap_or_else(|| tool_fixture::mcp_runtime(&bin));
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
@@ -295,6 +296,44 @@ async fn verify_unattended_login_and_reuse(runtime: Option<(PathBuf, PathBuf)>) 
         .unwrap();
     let login = child.wait_with_output().unwrap();
     assert_eq!(login.status.code(), Some(3), "{}", text(&login));
+    let logins = || {
+        app.state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.as_str() == "login")
+            .count()
+    };
+
+    // The Host is now saved, so its full MCP check waits for sign-in. An entry
+    // that is already known locally to be broken must still stop before login.
+    if synthetic_runtime {
+        let before = logins();
+        let mode = node.with_extension("mcp-mode");
+        fs::write(&mode, "invalid").unwrap();
+        let mut child = run(&plan, "json")
+            .arg("--password-stdin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Validation may fail before stdin is read; a closed pipe is expected then.
+        let _ = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{PASSWORD}\n").as_bytes());
+        let broken = child.wait_with_output().unwrap();
+        fs::remove_file(&mode).unwrap();
+        assert_eq!(broken.status.code(), Some(5), "{}", text(&broken));
+        assert_no_secrets(&broken);
+        let error: Value = serde_json::from_slice(&broken.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "SETUP_TOOL_UNAVAILABLE");
+        assert_eq!(error["error"]["step"], "validate");
+        assert_eq!(logins(), before);
+    }
 
     // The saved installation will now be outside PATH, with a different valid
     // installation available under the same command name.

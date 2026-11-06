@@ -30,6 +30,8 @@ struct Api {
     central: TaskClient,
     requests: TaskRequests,
     cancel: CancellationToken,
+    /// Records successful creates for the local "no result yet" advisory.
+    sent: Option<crate::sent_tasks::Ledger>,
 }
 
 /// 작업 생성 API 라우터 생성 (`POST /v1/tasks/create`)
@@ -39,6 +41,7 @@ pub fn router(
     central: TaskClient,
     requests: TaskRequests,
     cancel: CancellationToken,
+    sent: Option<crate::sent_tasks::Ledger>,
 ) -> Router {
     Router::new()
         .route("/v1/tasks/create", post(create))
@@ -48,6 +51,7 @@ pub fn router(
             central,
             requests,
             cancel,
+            sent,
         })
 }
 
@@ -66,6 +70,8 @@ enum CreateArguments {
 struct CanonicalArguments {
     receiver_agent_id: String,
     prompt: String,
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    request_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +82,9 @@ struct LegacyArguments {
     description: String,
     #[serde(default, deserialize_with = "crate::sessions::present")]
     task_context: Option<String>,
+    /// Caller idempotency key: a key returned earlier or one the caller chose.
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    request_key: Option<String>,
 }
 
 /// 중앙 서버로 전송할 프롬프트 JSON 페이로드
@@ -90,11 +99,19 @@ struct Prompt<'a> {
 
 impl CreateArguments {
     fn command(&self, principal: &Principal) -> Result<CreateTaskCommand, TaskError> {
+        let key = match self {
+            Self::Legacy(args) => &args.request_key,
+            Self::Canonical(args) => &args.request_key,
+        };
+        // An empty request_key means "broker mints one", so an explicit "" is invalid.
+        if key.as_deref().is_some_and(str::is_empty) {
+            return Err(validation());
+        }
         match self {
             Self::Legacy(args) => args.command(principal),
             Self::Canonical(args) => {
                 let command = CreateTaskCommand {
-                    request_key: String::new(),
+                    request_key: args.request_key.clone().unwrap_or_default(),
                     requester_agent_id: principal
                         .agent_id
                         .as_ref()
@@ -128,7 +145,7 @@ impl LegacyArguments {
             return Err(validation());
         }
         let command = CreateTaskCommand {
-            request_key: String::new(),
+            request_key: self.request_key.clone().unwrap_or_default(),
             requester_agent_id: principal
                 .agent_id
                 .as_ref()
@@ -219,7 +236,17 @@ async fn process(
         .authorize(&body.context.session_id, &actor)
         .await
         .map_err(session_error)?;
-    api.central.create(team_id, &prepared.command).await
+    let created = api.central.create(team_id, &prepared.command).await;
+    // A replayed requestKey returns the same task; the ledger keeps the first record.
+    if let (Ok(value), Some(sent)) = (&created, &api.sent)
+        && let Some(task_id) = value
+            .get("taskId")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse::<u64>().ok())
+    {
+        sent.created(prepared.command.requester_agent_id, team_id, task_id);
+    }
+    created
 }
 
 /// 입력 검증 실패 시 400 에러 생성 헬퍼

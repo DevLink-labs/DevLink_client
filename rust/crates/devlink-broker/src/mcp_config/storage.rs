@@ -12,6 +12,9 @@ fn invalid() -> ConfigError {
 fn unsafe_file() -> ConfigError {
     ConfigError::new("SETUP_UNSAFE_FILE")
 }
+fn unsafe_at(path: &Path) -> ConfigError {
+    unsafe_file().at(path)
+}
 fn write_error() -> ConfigError {
     ConfigError::new("SETUP_MCP_CONFIG_WRITE_FAILED")
 }
@@ -57,10 +60,10 @@ pub(super) fn global_target(target: &Path, global_home: Option<&Path>) -> Result
                 suffix.push(ancestor.file_name().ok_or_else(invalid)?.to_owned());
                 ancestor = ancestor.parent().ok_or_else(invalid)?;
             }
-            Err(_) => return Err(unsafe_file()),
+            Err(_) => return Err(unsafe_at(ancestor)),
         }
     }
-    let mut resolved = ancestor.canonicalize().map_err(|_| unsafe_file())?;
+    let mut resolved = ancestor.canonicalize().map_err(|_| unsafe_at(ancestor))?;
     for part in suffix.into_iter().rev() {
         resolved.push(part);
     }
@@ -82,17 +85,19 @@ pub(super) fn project_from_target(tool: ToolType, target: &Path) -> Result<PathB
         _ => Err(invalid()),
     }
 }
-pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> {
-    if host != input.tool_type {
-        return Err(invalid());
-    }
-    absolute(&input.project_path)?;
-    let root = input
-        .project_path
+pub(super) fn normalize_locations(
+    host: ToolType,
+    project: &Path,
+    target_path: &Path,
+    broker_file: &Path,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    absolute(project)?;
+    let root = project
         .canonicalize()
-        .map_err(|_| ConfigError::new("SETUP_PROJECT_INVALID"))?;
+        .map_err(|_| ConfigError::new("SETUP_PROJECT_INVALID").at(project))?;
     absolute(&root)?;
-    credentials::verify_directory_permissions(&root).map_err(|_| unsafe_file())?;
+    credentials::verify_directory_permissions(&root)
+        .map_err(|e| ConfigError::unsafe_at(&root, e))?;
     if root.parent().is_none() {
         return Err(invalid());
     }
@@ -103,7 +108,7 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(invalid());
     }
-    if project_from_target(host, &input.target_path)?
+    if project_from_target(host, target_path)?
         .canonicalize()
         .map_err(|_| invalid())?
         != root
@@ -118,15 +123,30 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     }
     let parent = target.parent().ok_or_else(invalid)?;
     match fs::symlink_metadata(parent) {
-        Ok(_) => credentials::verify_directory_permissions(parent).map_err(|_| unsafe_file())?,
+        Ok(_) => credentials::verify_directory_permissions(parent)
+            .map_err(|e| ConfigError::unsafe_at(parent, e))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(unsafe_file()),
+        Err(_) => return Err(unsafe_at(parent)),
     }
-    credentials::ensure_safe_target_if_exists(&target).map_err(|_| unsafe_file())?;
-    let broker = credential_path(&input.broker_file)?;
+    credentials::ensure_safe_target_if_exists(&target)
+        .map_err(|e| ConfigError::unsafe_at(&target, e))?;
+    let broker = credential_path(broker_file)?;
     if host_path(&broker).eq_ignore_ascii_case(&host_path(&target)) {
         return Err(invalid());
     }
+    Ok((root, target, broker))
+}
+
+pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> {
+    if host != input.tool_type {
+        return Err(invalid());
+    }
+    let (root, target, broker) = normalize_locations(
+        host,
+        &input.project_path,
+        &input.target_path,
+        &input.broker_file,
+    )?;
     // v1 adapter is the tested Node stdio runtime only, never a shell command or token argv.
     absolute(&input.executable.command)?;
     let command = input
@@ -148,10 +168,24 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
     }
-    let supplied_script = PathBuf::from(&input.executable.args[0]);
-    let script = supplied_script.clone();
-    absolute(&script)?;
-    let script = script
+    let canonical_script = normalize_entry(Path::new(&input.executable.args[0]))?;
+    credentials::verify_public_file_permissions(&command, true)
+        .map_err(|e| ConfigError::unsafe_at(&command, e))?;
+    super::permissions::source_alias(&input.executable.command)?;
+    Ok(Normalized {
+        tool: host,
+        root,
+        target,
+        broker,
+        canonical_command: command,
+        canonical_script,
+        executable: input.executable,
+    })
+}
+
+pub(super) fn normalize_entry(entry: &Path) -> Result<PathBuf> {
+    absolute(entry)?;
+    let script = entry
         .canonicalize()
         .map_err(|_| ConfigError::new("SETUP_TOOL_UNAVAILABLE"))?;
     absolute(&script)?;
@@ -163,25 +197,10 @@ pub(super) fn normalize(host: ToolType, input: PlanInput) -> Result<Normalized> 
     {
         return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
     }
-    credentials::verify_public_file_permissions(&command, true).map_err(|_| unsafe_file())?;
-    credentials::verify_public_file_permissions(&script, true).map_err(|_| unsafe_file())?;
-    super::permissions::source_alias(&input.executable.command)?;
-    super::permissions::source_alias(&supplied_script)?;
-    let canonical_command = command;
-    let canonical_script = script;
-    let script = supplied_script.to_str().ok_or_else(invalid)?.to_owned();
-    Ok(Normalized {
-        tool: host,
-        root,
-        target,
-        broker,
-        canonical_command,
-        canonical_script,
-        executable: Executable {
-            command: input.executable.command,
-            args: vec![script, "--transport".into(), "stdio".into()],
-        },
-    })
+    credentials::verify_public_file_permissions(&script, true)
+        .map_err(|e| ConfigError::unsafe_at(&script, e))?;
+    super::permissions::source_alias(entry)?;
+    Ok(script)
 }
 fn credential_path(path: &Path) -> Result<PathBuf> {
     absolute(path)?;
@@ -194,27 +213,28 @@ fn credential_path(path: &Path) -> Result<PathBuf> {
                 suffix.push(ancestor.file_name().ok_or_else(invalid)?.to_owned());
                 ancestor = ancestor.parent().ok_or_else(invalid)?;
             }
-            Err(_) => return Err(unsafe_file()),
+            Err(_) => return Err(unsafe_at(ancestor)),
         }
     }
-    credentials::verify_directory_permissions(ancestor).map_err(|_| unsafe_file())?;
-    let mut canonical = ancestor.canonicalize().map_err(|_| unsafe_file())?;
+    credentials::verify_directory_permissions(ancestor)
+        .map_err(|e| ConfigError::unsafe_at(ancestor, e))?;
+    let mut canonical = ancestor.canonicalize().map_err(|_| unsafe_at(ancestor))?;
     for part in suffix.into_iter().rev() {
         canonical.push(part);
     }
     canonical.push(path.file_name().ok_or_else(invalid)?);
     if let Some(value) = private_file::read::<credentials::McpCredentials>(&canonical, 16384)
-        .map_err(|_| unsafe_file())?
+        .map_err(|e| ConfigError::unsafe_at(&canonical, e))?
     {
-        credentials::validate(&value).map_err(|_| unsafe_file())?;
+        credentials::validate(&value).map_err(|e| ConfigError::unsafe_at(&canonical, e))?;
     }
     Ok(canonical)
 }
 pub(super) fn require_credentials(path: &Path) -> Result<()> {
     let value = private_file::read::<credentials::McpCredentials>(path, 16384)
-        .map_err(|_| unsafe_file())?
+        .map_err(|e| ConfigError::unsafe_at(path, e))?
         .ok_or_else(invalid)?;
-    credentials::validate(&value).map_err(|_| unsafe_file())
+    credentials::validate(&value).map_err(|e| ConfigError::unsafe_at(path, e))
 }
 pub(super) fn revalidate(input: &Normalized) -> Result<()> {
     let current = normalize(
@@ -240,23 +260,26 @@ pub(super) fn revalidate(input: &Normalized) -> Result<()> {
     Ok(())
 }
 pub(super) fn read(path: &Path) -> Result<Option<Vec<u8>>> {
-    if !credentials::ensure_safe_target_if_exists(path).map_err(|_| unsafe_file())? {
+    if !credentials::ensure_safe_target_if_exists(path)
+        .map_err(|e| ConfigError::unsafe_at(path, e))?
+    {
         return Ok(None);
     }
     credentials::verify_parent_safety(path.parent().ok_or_else(invalid)?)
         .map_err(|_| unsafe_file())?;
-    credentials::verify_public_file_permissions(path, false).map_err(|_| unsafe_file())?;
-    let file = fs::File::open(path).map_err(|_| unsafe_file())?;
-    let meta = file.metadata().map_err(|_| unsafe_file())?;
+    credentials::verify_public_file_permissions(path, false)
+        .map_err(|e| ConfigError::unsafe_at(path, e))?;
+    let file = fs::File::open(path).map_err(|_| unsafe_at(path))?;
+    let meta = file.metadata().map_err(|_| unsafe_at(path))?;
     if !meta.is_file() || meta.len() > LIMIT as u64 {
-        return Err(unsafe_file());
+        return Err(unsafe_at(path));
     }
     let mut bytes = Vec::new();
     file.take(LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| unsafe_file())?;
+        .map_err(|_| unsafe_at(path))?;
     if bytes.len() > LIMIT {
-        return Err(unsafe_file());
+        return Err(unsafe_at(path));
     }
     Ok(Some(bytes))
 }
@@ -289,10 +312,17 @@ fn state(input: &Normalized) -> Result<PathBuf> {
         .ok_or_else(invalid)?
         .join("mcp-provider-state");
     #[cfg(not(test))]
-    let root = dirs::home_dir()
+    let root = state_root()?;
+    state_at(&root, &input.target)
+}
+/// Private per-target state (apply lock, exact backups) under the user's home.
+pub(super) fn state_root() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
         .ok_or_else(unsafe_file)?
-        .join(".devlink-mcp-config");
-    let key = host_path(&input.target);
+        .join(".devlink-mcp-config"))
+}
+pub(super) fn state_at(root: &Path, target: &Path) -> Result<PathBuf> {
+    let key = host_path(target);
     #[cfg(windows)]
     let key = key.to_ascii_lowercase();
     let path = root.join(format!("{:x}", Sha256::digest(key.as_bytes())));
@@ -300,17 +330,22 @@ fn state(input: &Normalized) -> Result<PathBuf> {
     Ok(path)
 }
 pub(super) fn lock(input: &Normalized) -> Result<std::fs::File> {
-    let parent = input.target.parent().ok_or_else(invalid)?;
+    lock_at(&input.target, state(input)?)
+}
+pub(super) fn lock_at(target: &Path, state: PathBuf) -> Result<std::fs::File> {
+    let parent = target.parent().ok_or_else(invalid)?;
     match fs::symlink_metadata(parent) {
-        Ok(_) => credentials::verify_directory_permissions(parent).map_err(|_| unsafe_file())?,
+        Ok(_) => credentials::verify_directory_permissions(parent)
+            .map_err(|e| ConfigError::unsafe_at(parent, e))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             super::permissions::create_private_directory(parent).map_err(|_| write_error())?;
             credentials::set_private_permissions(parent).map_err(|_| unsafe_file())?;
-            credentials::verify_directory_permissions(parent).map_err(|_| unsafe_file())?;
+            credentials::verify_directory_permissions(parent)
+                .map_err(|e| ConfigError::unsafe_at(parent, e))?;
         }
         Err(_) => return Err(unsafe_file()),
     }
-    let path = state(input)?.join("apply.lock");
+    let path = state.join("apply.lock");
     if credentials::ensure_safe_target_if_exists(&path).map_err(|_| unsafe_file())? {
         credentials::verify_private_permissions(&path).map_err(|_| unsafe_file())?;
     }
@@ -322,7 +357,10 @@ pub(super) fn lock(input: &Normalized) -> Result<std::fs::File> {
 }
 pub(super) fn backup(input: &Normalized, bytes: Option<&[u8]>) -> Result<Option<PathBuf>> {
     let Some(bytes) = bytes else { return Ok(None) };
-    let parent = state(input)?.join("backups");
+    backup_at(state(input)?, bytes).map(Some)
+}
+pub(super) fn backup_at(state: PathBuf, bytes: &[u8]) -> Result<PathBuf> {
+    let parent = state.join("backups");
     private_dir(&parent)?;
     // Retain exact recovery files, never silently prune them. A full store requires manual review.
     if fs::read_dir(&parent)
@@ -332,7 +370,7 @@ pub(super) fn backup(input: &Normalized, bytes: Option<&[u8]>) -> Result<Option<
         >= 64
     {
         let mut error = write_error();
-        error.recovery_directory = Some(parent);
+        error.recovery_directory = Some(Box::new(parent));
         return Err(error);
     }
     let path = parent.join(format!("config-{}.bak", uuid::Uuid::new_v4()));
@@ -345,7 +383,7 @@ pub(super) fn backup(input: &Normalized, bytes: Option<&[u8]>) -> Result<Option<
         e.outcome = "not_applied";
         e
     })?;
-    Ok(Some(path))
+    Ok(path)
 }
 pub(super) fn write(path: &Path, bytes: &[u8], create: bool) -> Result<()> {
     let expected = if create {
@@ -362,9 +400,13 @@ pub(super) fn write_version(
     expected: Option<&str>,
 ) -> Result<()> {
     let parent = path.parent().ok_or_else(invalid)?;
-    credentials::verify_directory_permissions(parent).map_err(|_| unsafe_file())?;
-    if credentials::ensure_safe_target_if_exists(path).map_err(|_| unsafe_file())? {
-        credentials::verify_public_file_permissions(path, false).map_err(|_| unsafe_file())?;
+    credentials::verify_directory_permissions(parent)
+        .map_err(|e| ConfigError::unsafe_at(parent, e))?;
+    if credentials::ensure_safe_target_if_exists(path)
+        .map_err(|e| ConfigError::unsafe_at(path, e))?
+    {
+        credentials::verify_public_file_permissions(path, false)
+            .map_err(|e| ConfigError::unsafe_at(path, e))?;
     }
     let mut temp = tempfile::Builder::new()
         .prefix(".devlink-mcp-")

@@ -1,6 +1,8 @@
 # MVP 실제 통합 검증 — S15P31D108-66
 
-## 현재 판정 (2026-10-28, Asia/Seoul)
+## 과거 판정 (2026-10-28, Asia/Seoul)
+
+> 아래 판정과 표는 2026-10-28 당시 기록이다. 최신 관측은 아래 "수용 기준과 증거 양식"의 2026-11-06 표와 [실제 두 Host 수용 검증](central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)을 따른다.
 
 **실제 MVP 수용 기준은 미검증이며 스토리를 완료로 처리하지 않는다.** 별도 통합 환경이 없어 이번 변경은 준비 상태 검사, 실제 Rust 재현, 후속 검증 절차를 제공한다. 기존 가짜 브로커 기반 Host 테스트(-64·-65)는 실제 중앙 서버·두 사용자 프로젝트의 결과를 대신하지 않는다.
 
@@ -70,11 +72,23 @@ node packages/mcp-server/scripts/verify-rust-readiness.mjs --cli $integrationCli
 4. 각 Host에 [수락·결과 등록 지침](agent-workflow.md)과 실제 개인 프로필을 적용한다. 사용자가 선택한 수신자를 `list_agents`로 확인하고, 업무 요청에 실제 프로젝트의 작은 변경(예: 함수 추가와 해당 테스트)을 명시한다. MCP는 직접 파일을 고치지 않으며 수신 Host가 명시적 사용자 수락 후 수행한다.
 5. A→B에서 `create_task` 응답의 requestId/requestKey/taskId와 저장·전달 결과를 기록한다. B의 수신 목록/detail에 PENDING이 보이며 수락 전 파일 diff가 없는지 확인한다. B 사용자가 수락한 뒤 `update_task_status(IN_PROGRESS)`를 호출하고 실제 프로젝트에서 편집·테스트한 후 `complete_task`에 실제 변경 파일·요약·검증 결과를 등록한다. A에서 `get_tasks`, `get_task_result`로 동일 taskId의 COMPLETED와 실제 diff/테스트 결과가 일치하는지 확인한다.
 6. B→A도 별도 taskId로 수행한다. 각 프로젝트의 변경 전후 커밋 또는 diff, 실행 명령·종료 코드·관측값을 보존한다. 미실행 테스트를 통과로 기록하지 않는다. 실패·부분 수정 시 FAILED 전이에 failureReason/partiallyModified를 기록하고 발신자 조회까지 확인한다.
-7. 아래 부정 시나리오는 전용 테스트 데이터·제어 가능한 지연/전달 장애로 실행한다. MCP `create_task`는 caller 지정 requestKey를 노출하지 않고 `get_tasks`도 requestId/requestKey 검색을 지원하지 않는다. 중복 재현은 중앙/브로커 담당자가 같은 키를 재사용할 수 있는 통합 시험 계층과 DB 확인 수단을 제공해야 한다. 재시도에 새 키가 생성되는 Host 호출을 중복 검증으로 세지 않는다.
+7. 아래 부정 시나리오는 전용 테스트 데이터·제어 가능한 지연/전달 장애로 실행한다. MCP `create_task`는 선택 requestKey를 받는다(S15P31D108-165). 같은 키·같은 인자 재호출은 같은 taskId와 `replayed: true`를, 같은 키·다른 인자는 REQUEST_KEY_CONFLICT를 확인한다. `get_tasks`는 requestId/requestKey 검색을 지원하지 않으므로 중앙 저장 건수는 DB 확인 수단으로 대조한다. requestKey 없이 재시도한 Host 호출은 새 요청이므로 중복 검증으로 세지 않는다.
 
 ## 수용 기준과 증거 양식
 
-모든 행의 현재 관측은 **NOT_RUN / 선행 API·실제 환경 부재**다. 실제 실행 후에만 PASS/FAIL로 바꾸고 원문 토큰·개인 정보는 제거한다. 정상 두 방향은 각각 독립된 증거를 남긴다.
+실제 실행 후에만 PASS/FAIL로 바꾸고 원문 토큰·개인 정보는 제거한다. 정상 두 방향은 각각 독립된 증거를 남긴다.
+
+2026-11-06 기준 관측은 아래와 같다. 근거는 [실제 두 Host 수용 검증](central-host-acceptance.md#2026-11-06-재검증-develop-병합-후)과 같은 문서의 "AC2 실행과 AC3 판정 보강"이다. 실행 조합은 중앙 develop `34b2c15`와 PostgreSQL 17.11이다. client는 AC1이 develop `dfc28c7`, AC2·AC3 보강 실행이 develop `77f07c3`에 이 PR의 판정기·실행기를 더한 것이다. 이후 [AC7 독립 재실행](central-host-acceptance.md#2026-11-06-ac7-독립-재실행-codex-검토)에서는 PR #83의 `e126e93`을 직접 빌드해 사용했다.
+
+| ID | 관측 |
+| --- | --- |
+| AC1-A / AC1-B | PASS. 작성자 실행의 Codex→Claude task 1, Claude→Codex task 2에서 실제 diff·결과 조회 일치를 확인했다. AC7의 새 격리 DB에서는 task 2·3으로 재확인했고, report에 없는 requestId·requestKey도 transcript·DB로 보완했다 |
+| AC3 | PASS(2026-11-06 보강 실행, client develop `77f07c3` + 이 PR의 판정기). task 11·12·13 모두 수락 결과 이후에만 편집했다. 수락 전 셸 명령은 읽기 전용이었다. 약 250ms 간격 파일 감시에서 PENDING 동안 위반 0, 조회 오류 0이었다. 종료는 COMPLETED(12·13)와 FAILED(11) 두 경로를 확인했다. 감시 간격 등 한계는 [AC2 실행과 AC3 판정 보강](central-host-acceptance.md#2026-11-06-ac2-실행과-ac3-판정-보강)에 적었다 |
+| AC2 | PASS(같은 실행). Codex→Claude task 11. 일부만 수정한 뒤 Host 테스트 pass 1/fail 1, FAILED, `partiallyModified=true`, failureReason을 등록했고 Codex가 같은 사유를 조회했다. 부모 테스트 종료 코드는 1이고, 남은 diff는 `src/invoice.mjs` 한 줄이다. 실패는 fixture·프롬프트로 유도했다 |
+| AC4·AC5·AC6 | 두 Host로는 NOT_RUN. 근거는 중앙 `d06d239` 기준 통합 시험(-67 등, 575건)뿐이다 |
+| AC7 | PASS. 작성자와 분리된 Codex 리뷰 세션이 [재실행 절차](central-host-acceptance.md#제3자-재실행-절차-ac7)를 따라 새 중앙·DB·사용자·fixture에서 실패 및 양방향 성공 실행기를 각각 실행했다. 두 report의 passed·actualLlmHostsExecuted·ownedProcessesStopped가 모두 true이며 중앙·DB 정리도 확인했다. [실행 기록](central-host-acceptance.md#2026-11-06-ac7-독립-재실행-codex-검토) |
+
+아래 표는 각 ID의 정의다.
 
 | ID | 재현·예상 결과 | 필수 증거 |
 | --- | --- | --- |

@@ -38,6 +38,8 @@ struct Remote {
     mode: Arc<AtomicU8>,
     calls: Arc<Mutex<Vec<Value>>>,
     contexts: Arc<AtomicUsize>,
+    /// (taskId, requestKey) -> stored question/answer event
+    messages: Arc<Mutex<HashMap<(u64, String), Value>>>,
 }
 fn check(headers: &HeaderMap) {
     assert_eq!(headers["authorization"], format!("Bearer {AGENT}"));
@@ -62,7 +64,12 @@ fn detail(id: u64) -> Value {
     data["rejectionReason"] = Value::Null;
     data["partiallyModified"] = json!(false);
     data["taskFiles"] = json!([{"fileId":9223372036854775807_u64,"relativePath":"src/없는 파일.rs","changeType":"RENAMED","diffText":"- old\n+ new"}]);
-    data["events"] = json!([{"eventType":"STATUS_CHANGED","message":"원문 이력","createdAt":"2026-10-30T01:01:00"}]);
+    data["events"] = json!([
+        {"eventType":"STATUS_CHANGED","message":"원문 이력","createdAt":"2026-10-30T01:01:00"},
+        {"eventId":"9223372036854775807","sequence":"3","eventType":"QUESTION",
+         "authorAgent":{"agentId":13,"name":"Requester"},"message":"질문 원문",
+         "questionEventId":null,"createdAt":"2026-10-30T01:01:30"}
+    ]);
     data["unexpectedToken"] = json!(SECRET);
     data
 }
@@ -212,6 +219,7 @@ impl Fixture {
             mode: Arc::default(),
             calls: Arc::default(),
             contexts: Arc::default(),
+            messages: Arc::default(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -221,6 +229,8 @@ impl Fixture {
             .route("/api/v1/tasks/{id}", get(result))
             .route("/api/v1/tasks/{id}/status", patch(status))
             .route("/api/v1/tasks/{id}/complete", post(complete))
+            .route("/api/v1/tasks/{id}/questions", post(question))
+            .route("/api/v1/tasks/{id}/answers", post(answer))
             .with_state(remote.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
@@ -696,4 +706,259 @@ async fn completion_defaults_empty_files_but_never_silently_discards_extra_field
         .await;
     assert_eq!(status, 413, "{response}");
     assert_eq!(f.remote.calls.lock().await.len(), 3);
+}
+
+/// Mirrors central TaskMessageService replay and conflict rules for one author (Agent 12).
+async fn conversation(
+    kind: &'static str,
+    id: u64,
+    s: Remote,
+    headers: HeaderMap,
+    body: Value,
+) -> Response {
+    check(&headers);
+    assert!(body.get("agentId").is_none() && body.get("teamId").is_none());
+    s.calls
+        .lock()
+        .await
+        .push(json!({"operation":kind,"taskId":id,"body":body}));
+    let mode = s.mode.load(Ordering::SeqCst);
+    let failure = |status: StatusCode, code: &str| {
+        (
+            status,
+            Json(json!({"success":false,"code":code,"message":SECRET})),
+        )
+            .into_response()
+    };
+    match mode {
+        2 => return (StatusCode::FORBIDDEN, SECRET).into_response(),
+        20 => return failure(StatusCode::CONFLICT, "TASK_CONVERSATION_UNAVAILABLE"),
+        21 => return failure(StatusCode::BAD_REQUEST, "INVALID_QUESTION_REFERENCE"),
+        22 => return failure(StatusCode::CONFLICT, "TASK_STATE_CONFLICT"),
+        _ => {}
+    }
+    let key = body["requestKey"].as_str().unwrap().to_string();
+    let question = body.get("questionEventId").cloned().unwrap_or(Value::Null);
+    let event_type = if kind == "question" {
+        "QUESTION"
+    } else {
+        "ANSWER"
+    };
+    let mut messages = s.messages.lock().await;
+    let count = messages.len() as u64;
+    let (status, mut data) = match messages.get(&(id, key.clone())) {
+        Some(stored) => {
+            if stored["message"] != body["message"]
+                || stored["questionEventId"] != question
+                || stored["eventType"] != event_type
+            {
+                return failure(StatusCode::CONFLICT, "REQUEST_KEY_CONFLICT");
+            }
+            let mut replay = stored.clone();
+            replay["replayed"] = json!(true);
+            (StatusCode::OK, replay)
+        }
+        None => {
+            let event = json!({"eventId":(501 + count).to_string(),"taskId":id,
+                "sequence":(10 + count).to_string(),"eventType":event_type,
+                "authorAgent":{"agentId":12,"name":"Agent"},"message":body["message"],
+                "questionEventId":question,"createdAt":"2026-10-30T01:03:00Z","replayed":false});
+            messages.insert((id, key), event.clone());
+            (StatusCode::CREATED, event)
+        }
+    };
+    drop(messages);
+    match mode {
+        23 => data["authorAgent"]["agentId"] = json!(13),
+        24 => data["message"] = json!("changed by provider"),
+        25 => data["replayed"] = json!(true),
+        26 => data["questionEventId"] = json!("77"),
+        27 => data["eventId"] = json!(501),
+        _ => {}
+    }
+    (
+        status,
+        Json(json!({"success":true,"data":data,"message":SECRET})),
+    )
+        .into_response()
+}
+async fn question(
+    Path(id): Path<u64>,
+    State(s): State<Remote>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    conversation("question", id, s, headers, body).await
+}
+async fn answer(
+    Path(id): Path<u64>,
+    State(s): State<Remote>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    conversation("answer", id, s, headers, body).await
+}
+
+#[tokio::test]
+async fn questions_and_answers_relay_exact_bodies_replay_and_conflict() {
+    let f = Fixture::new(Duration::from_secs(1)).await;
+    let session = f.claim(true).await;
+    let message = "  질문\n원문 \"그대로\"  ";
+    let ask = json!({"taskId":"101","message":message,"requestKey":"question-key"});
+    let (status, created) = f
+        .post(
+            "/v1/tasks/questions",
+            &request(&session, "ask_question", ask.clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["requestKey"], "question-key");
+    assert_eq!(created["data"]["eventId"], "501");
+    assert_eq!(created["data"]["taskId"], "101");
+    assert_eq!(created["data"]["eventType"], "QUESTION");
+    assert_eq!(created["data"]["authorAgent"]["agentId"], "12");
+    assert_eq!(created["data"]["message"], message);
+    assert_eq!(created["data"]["questionEventId"], Value::Null);
+    assert_eq!(created["data"]["replayed"], false);
+    assert_eq!(
+        f.remote.calls.lock().await[0]["body"],
+        json!({"requestKey":"question-key","message":message})
+    );
+    // A retried tool call with the same key returns the stored event, not a new one.
+    let (status, replayed) = f
+        .post(
+            "/v1/tasks/questions",
+            &request(&session, "ask_question", ask.clone()),
+        )
+        .await;
+    assert_eq!(status, 200, "{replayed}");
+    assert_eq!(replayed["data"]["eventId"], "501");
+    assert_eq!(replayed["data"]["replayed"], true);
+    let mut changed = ask;
+    changed["message"] = json!("다른 질문");
+    let (status, conflict) = f
+        .post(
+            "/v1/tasks/questions",
+            &request(&session, "ask_question", changed),
+        )
+        .await;
+    assert_eq!(status, 409, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "REQUEST_KEY_CONFLICT");
+    assert_eq!(conflict["error"]["taskId"], "101");
+    assert_eq!(conflict["requestKey"], "question-key");
+    let answer = json!({"taskId":"101","questionEventId":"9223372036854775807",
+        "message":"가".repeat(8_000),"requestKey":"answer-key"});
+    let (status, answered) = f
+        .post(
+            "/v1/tasks/answers",
+            &request(&session, "answer_question", answer),
+        )
+        .await;
+    assert_eq!(status, 200, "{answered}");
+    assert_eq!(answered["data"]["eventType"], "ANSWER");
+    assert_eq!(answered["data"]["questionEventId"], "9223372036854775807");
+    assert_eq!(
+        f.remote.calls.lock().await[3]["body"]["questionEventId"],
+        "9223372036854775807"
+    );
+    // get_task_result keeps the IDs an Agent needs to answer; old events stay compatible.
+    let (status, detail) = f
+        .post(
+            "/v1/tasks/result",
+            &request(&session, "get_task_result", json!({"taskId":"101"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{detail}");
+    let events = detail["data"]["events"].as_array().unwrap();
+    assert_eq!(
+        events[0],
+        json!({"eventType":"STATUS_CHANGED","message":"원문 이력","createdAt":"2026-10-30T01:01:00"})
+    );
+    assert_eq!(events[1]["eventId"], "9223372036854775807");
+    assert_eq!(events[1]["sequence"], "3");
+    assert_eq!(events[1]["authorAgent"]["agentId"], "13");
+    assert!(events[1].get("questionEventId").is_none());
+}
+
+#[tokio::test]
+async fn invalid_conversation_inputs_never_reach_central() {
+    let f = Fixture::new(Duration::from_secs(1)).await;
+    let session = f.claim(true).await;
+    let ask = || json!({"taskId":"101","message":"질문","requestKey":"key"});
+    let answer = || json!({"taskId":"101","questionEventId":"5","message":"답","requestKey":"key"});
+    let mut cases = vec![];
+    for (field, value) in [
+        ("message", json!("   ")),
+        ("message", json!("")),
+        ("message", json!("가".repeat(8_001))),
+        ("message", json!("nul\u{0}inside")),
+        ("requestKey", json!("a b")),
+        ("requestKey", json!("")),
+        ("requestKey", json!("k".repeat(65))),
+        ("requestKey", json!(null)),
+        ("taskId", json!("0")),
+        ("taskId", json!("task")),
+        ("agentId", json!("12")),
+    ] {
+        let mut args = ask();
+        args[field] = value;
+        cases.push(("/v1/tasks/questions", "ask_question", args));
+    }
+    let mut missing = ask();
+    missing.as_object_mut().unwrap().remove("requestKey");
+    cases.push(("/v1/tasks/questions", "ask_question", missing));
+    cases.push(("/v1/tasks/questions", "ask_question", answer()));
+    for value in [
+        json!("0"),
+        json!("01"),
+        json!("question"),
+        json!(5),
+        json!("9223372036854775808"),
+    ] {
+        let mut args = answer();
+        args["questionEventId"] = value;
+        cases.push(("/v1/tasks/answers", "answer_question", args));
+    }
+    cases.push(("/v1/tasks/answers", "answer_question", ask()));
+    cases.push(("/v1/tasks/answers", "ask_question", answer()));
+    for (path, operation, args) in cases {
+        let (status, response) = f
+            .post(path, &request(&session, operation, args.clone()))
+            .await;
+        assert_eq!(status, 400, "{path} {args}: {response}");
+        assert_eq!(response["error"]["code"], "VALIDATION_FAILED");
+    }
+    assert!(f.remote.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_rule_errors_and_mismatched_responses_are_classified() {
+    let f = Fixture::new(Duration::from_secs(1)).await;
+    let session = f.claim(true).await;
+    for (mode, code, outcome) in [
+        (20, "TASK_CONVERSATION_UNAVAILABLE", "rejected"),
+        (21, "INVALID_QUESTION_REFERENCE", "rejected"),
+        (22, "TASK_STATE_CONFLICT", "rejected"),
+        (2, "FORBIDDEN", "rejected"),
+        (23, "CENTRAL_PROTOCOL_ERROR", "unknown"),
+        (24, "CENTRAL_PROTOCOL_ERROR", "unknown"),
+        (25, "CENTRAL_PROTOCOL_ERROR", "unknown"),
+        (26, "CENTRAL_PROTOCOL_ERROR", "unknown"),
+        (27, "CENTRAL_PROTOCOL_ERROR", "unknown"),
+    ] {
+        f.remote.mode.store(mode, Ordering::SeqCst);
+        let key = format!("key-{mode}");
+        let args = json!({"taskId":"101","questionEventId":"5","message":"답","requestKey":key});
+        let (status, response) = f
+            .post(
+                "/v1/tasks/answers",
+                &request(&session, "answer_question", args),
+            )
+            .await;
+        assert_ne!(status, 200, "mode {mode}: {response}");
+        assert_eq!(response["error"]["code"], code, "mode {mode}: {response}");
+        assert_eq!(response["error"]["outcome"], outcome, "mode {mode}");
+        assert_eq!(response["error"]["taskId"], "101");
+        assert_eq!(response["requestKey"], key);
+    }
 }

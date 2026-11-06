@@ -14,6 +14,15 @@ pub trait AgentInput: Send {
     fn interactive(&self) -> bool {
         false
     }
+    fn rename(&mut self) -> impl Future<Output = Result<String, AgentInputError>> + Send {
+        async { Err(AgentInputError::Unavailable) }
+    }
+    fn confirm_issue(
+        &mut self,
+        _id: u64,
+    ) -> impl Future<Output = Result<(), AgentInputError>> + Send {
+        async { Err(AgentInputError::Unavailable) }
+    }
     fn request(
         &mut self,
         choices: &[AgentChoice],

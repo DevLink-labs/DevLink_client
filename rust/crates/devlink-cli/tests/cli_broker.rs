@@ -37,7 +37,9 @@ async fn serve_context_request(stream: &mut tokio::net::TcpStream, agent: Option
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut head = [0; 4096];
     let count = stream.peek(&mut head).await.unwrap();
-    if !head[..count].starts_with(b"GET /api/v1/agents/me ") {
+    // The broker also pulls question/answer arrivals on the same origin after READY.
+    let messages = head[..count].starts_with(b"GET /api/v1/agents/me/task-messages?");
+    if !messages && !head[..count].starts_with(b"GET /api/v1/agents/me ") {
         return false;
     }
     let mut request = Vec::new();
@@ -55,6 +57,12 @@ async fn serve_context_request(stream: &mut tokio::net::TcpStream, agent: Option
     let headers = String::from_utf8(request).unwrap().to_lowercase();
     assert!(headers.contains(&format!("authorization: bearer {TOKEN}\r\n")));
     assert!(!headers.contains("cookie:") && !headers.contains("origin:"));
+    if messages {
+        let body = serde_json::json!({"success":true,"data":{"items":[],"nextCursor":"cli-fixture","hasNext":false}})
+            .to_string();
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        return true;
+    }
     let body = match agent {
         Some(id) => {
             serde_json::json!({"success":true,"data":{"agentId":id,"ownerUserId":3,"teamId":1,
@@ -199,7 +207,20 @@ async fn cli_persists_tasks_before_ack_and_deduplicates_after_restart() {
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         for attempt in 1..=2 {
-            let (stream, _) = listener.accept().await.unwrap();
+            // Skip only the broker's question/answer pulls; any other request still has to
+            // be the WebSocket upgrade this test expects.
+            let stream = loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let prefix = b"GET /api/v1/agents/me/task-messages?";
+                let mut head = [0; 64];
+                while stream.peek(&mut head).await.unwrap() < prefix.len() {
+                    sleep(Duration::from_millis(1)).await;
+                }
+                if !head.starts_with(prefix) {
+                    break stream;
+                }
+                assert!(serve_context_request(&mut stream, Some(12)).await);
+            };
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let event_id = format!("cli-task-{attempt}");
             for message in [
@@ -844,13 +865,26 @@ async fn crash_releases_os_lock_and_stale_runtime_is_recovered() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn occupied_port_fails_and_releases_lock() {
+    let other = Fixture::new();
+    other.ok(&["start"]);
+    let first = other.health().await;
     let f = Fixture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    f.configure(|config| config.local_port = listener.local_addr().unwrap().port());
-    assert!(!f.run(&["start"]).status.success());
+    let occupied = Runtime::load(&other.path).unwrap().port;
+    f.configure(|config| config.local_port = occupied);
+    let output = f.run(&["start"]);
+    assert!(!output.status.success());
+    assert!(
+        text(&output).contains("port is in use or the OS denied the bind"),
+        "{}",
+        text(&output)
+    );
+    assert!(text(&output).contains("config set localPort <FREE_PORT>"));
     assert!(!devlink_broker::local::running(&f.path).unwrap());
-    drop(listener);
+    f.ok(&["config", "set", "localPort", "0"]);
     f.ok(&["start"]);
+    assert_ne!(Runtime::load(&f.path).unwrap().port, occupied);
+    assert_eq!(Config::load(&f.path).unwrap().local_port, 0);
+    assert_eq!(other.health().await.instance_id, first.instance_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1858,17 +1892,28 @@ async fn unreachable_server_and_stop_during_backoff() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_local_token_survives_normal_restart() {
+async fn first_setup_port_and_mcp_local_token_survive_normal_restart() {
     // 1. 기존 테스트 fixture를 활용해 임시 설정을 만든다.
     let f = Fixture::new();
+    #[cfg(windows)]
+    let _default_port = match std::net::TcpListener::bind(("127.0.0.1", 43127)) {
+        Ok(listener) => Some(listener),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            None
+        }
+        Err(error) => panic!("Cannot verify the preferred Windows port: {error}"),
+    };
 
-    // 2. 사용 가능한 포트를 선택해 두 번의 실행에 동일하게 사용한다.
-    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reserved.local_addr().unwrap().port();
-    drop(reserved);
-
+    // 2. 새 setup 프로필처럼 첫 기동에서 바인딩한 포트를 저장하도록 한다.
+    devlink_broker::credentials::set_private_permissions(f.path.parent().unwrap()).unwrap();
     f.configure(|config| {
-        config.local_port = port;
+        config.local_port = 0;
+        config.local_port_pending = true;
     });
 
     // 3. 실제 CLI start로 브로커를 시작한다.
@@ -1881,6 +1926,27 @@ async fn mcp_local_token_survives_normal_restart() {
     let broker_url1 = creds1.broker_url;
 
     let runtime1 = Runtime::load(&f.path).unwrap();
+    let saved = Config::load(&f.path).unwrap();
+    assert_eq!(saved.local_port, runtime1.port);
+    assert_ne!(saved.local_port, 0);
+    #[cfg(windows)]
+    {
+        assert_ne!(saved.local_port, 43127);
+        assert!((1024..=49151).contains(&saved.local_port));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let configured = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+        let mut endpoints = configured
+            .split_whitespace()
+            .map(|port| port.parse::<u16>().unwrap());
+        let first = endpoints.next().unwrap();
+        let last = endpoints.next().unwrap();
+        assert!(!(first..=last).contains(&saved.local_port));
+    }
+    assert!(!saved.local_port_pending);
+    devlink_broker::credentials::verify_private_permissions(&f.path).unwrap();
+    let saved_bytes = std::fs::read(&f.path).unwrap();
     let instance_id1 = runtime1.instance_id;
 
     // 5. 실제 CLI stop으로 종료한다.
@@ -1915,6 +1981,8 @@ async fn mcp_local_token_survives_normal_restart() {
     );
     // - runtime instanceId 변경
     let runtime2 = Runtime::load(&f.path).unwrap();
+    assert_eq!(runtime2.port, runtime1.port);
+    assert_eq!(std::fs::read(&f.path).unwrap(), saved_bytes);
     assert!(
         runtime2.instance_id != instance_id1,
         "Runtime instanceId must change after restart"
