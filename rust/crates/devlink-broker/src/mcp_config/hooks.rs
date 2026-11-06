@@ -122,7 +122,8 @@ pub struct HookPlan {
     pub change: HookChange,
     /// Commands DevLink will own after the change, per Host event.
     pub wanted: IndexMap<String, String>,
-    /// Existing DevLink commands that differ from `wanted` (a conflict unless replaced).
+    /// Existing DevLink entries that differ from `wanted` (a conflict unless replaced).
+    /// Display labels: an entry in a conditional group reads `<command> [matcher: <m>]`.
     pub existing: IndexMap<String, Vec<String>>,
     #[serde(skip)]
     expected_digest: Option<String>,
@@ -146,8 +147,9 @@ pub struct HookStatus {
     /// exactly its expected command), `stale` (every event has DevLink entries but at
     /// least one is not the expected command, e.g. another devlink path or profile),
     /// `partial` or `missing`. Without expected commands, `installed` means every event
-    /// has some DevLink entry for this Host.
+    /// has a DevLink entry for this Host that runs unconditionally.
     pub status: &'static str,
+    /// Display labels per event, as in `HookPlan::existing`.
     pub commands: IndexMap<String, Vec<String>>,
 }
 
@@ -833,6 +835,75 @@ mod tests {
         assert_eq!(
             plan_install(&t, wanted, false).unwrap().change,
             HookChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn presence_only_status_uninstall_and_odd_matchers_follow_the_matcher_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let t = target(root.path(), ToolType::Codex);
+        let wanted = wanted_at(t.tool, root.path());
+        let entry = |command: &str| json!({"type": "command", "command": command});
+        // A non-string matcher is conditional; ""/"*" and UserPromptSubmit are not.
+        for (matcher, status_without) in [
+            (json!(null), "stale"),
+            (json!(["startup"]), "stale"),
+            (json!("*"), "installed"),
+        ] {
+            seed(
+                &t,
+                &serde_json::to_vec(&json!({"hooks": {
+                    "SessionStart": [{"matcher": matcher, "hooks": [entry(&wanted["SessionStart"]), entry("keep-me")]}],
+                    "UserPromptSubmit": [{"hooks": [entry(&wanted["UserPromptSubmit"])]}]
+                }}))
+                .unwrap(),
+            );
+            assert_eq!(
+                status(&t, None).unwrap().status,
+                status_without,
+                "{matcher}"
+            );
+        }
+        // Uninstall removes only the DevLink entry from a conditional group.
+        seed(
+            &t,
+            &serde_json::to_vec(&json!({"hooks": {
+                "SessionStart": [{"matcher": "^compact$", "hooks": [entry(&wanted["SessionStart"]), entry("keep-me")]}],
+                "UserPromptSubmit": [{"hooks": [entry(&wanted["UserPromptSubmit"])]}]
+            }}))
+            .unwrap(),
+        );
+        let plan = plan_uninstall(&t).unwrap();
+        assert_eq!(
+            plan.existing["SessionStart"],
+            [format!("{} [matcher: ^compact$]", wanted["SessionStart"])]
+        );
+        apply(&t, &plan).unwrap();
+        let value = json(&t);
+        assert_eq!(value["hooks"]["SessionStart"][0]["matcher"], "^compact$");
+        assert_eq!(
+            value["hooks"]["SessionStart"][0]["hooks"],
+            json!([entry("keep-me")])
+        );
+        assert!(value["hooks"].get("UserPromptSubmit").is_none());
+        // With both an unconditional and a conditional entry, presence-only status is
+        // installed, while the exact comparison (and install) still flag the extra one.
+        seed(
+            &t,
+            &serde_json::to_vec(&json!({"hooks": {
+                "SessionStart": [
+                    {"hooks": [entry(&wanted["SessionStart"])]},
+                    {"matcher": "resume", "hooks": [entry(&wanted["SessionStart"])]}
+                ],
+                "UserPromptSubmit": [{"hooks": [entry(&wanted["UserPromptSubmit"])]}]
+            }}))
+            .unwrap(),
+        );
+        assert_eq!(status(&t, None).unwrap().status, "installed");
+        assert_eq!(status(&t, Some(&wanted)).unwrap().status, "stale");
+        assert_eq!(
+            plan_install(&t, wanted, false).unwrap().change,
+            HookChange::Conflict
         );
     }
 }

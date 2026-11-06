@@ -72,7 +72,7 @@ devlink [--config FILE] hooks uninstall --host codex|claude-code [--yes]
 - 병합 규칙:
   - 다른 키와 다른 훅, 다른 Host의 DevLink 항목은 그대로 둔다. 중복 키나 형식이 맞지 않는 파일은 고치지 않고 거부한다.
   - DevLink 항목은 command에 `updates-hook --host <host>`가 들어 있는 것으로만 식별한다. 시작 래퍼처럼 이 문구가 없는 명령은 DevLink 항목으로 보지 않는다.
-  - SessionStart 그룹의 `matcher`는 시작 원인(startup·resume·clear·compact 등)을 거른다. 이런 조건부 그룹 안의 DevLink 항목은 모든 시작에서 실행되지 않으므로 설치 완료로 세지 않는다(#79). 이 항목은 `<명령> [matcher: <값>]`으로 표시되고, `status`는 `stale`, `install`은 충돌로 판정한다. `--replace`는 조건부 그룹에서 DevLink 항목만 빼고 matcher와 그룹의 다른 훅은 남긴 뒤, matcher 없는 DevLink 그룹을 추가한다. matcher가 없거나 `""`·`*`이면 항상 실행되는 것으로 본다. UserPromptSubmit은 matcher 의미가 없어 matcher가 있어도 항상 실행되는 것으로 본다.
+  - SessionStart 그룹의 `matcher`는 시작 원인(startup·resume·clear·compact 등)을 거른다. 이런 조건부 그룹 안의 DevLink 항목은 모든 시작에서 실행되지 않으므로 설치 완료로 세지 않는다(#79). 이 항목은 `<명령> [matcher: <값>]`으로 표시되고, `status`는 `stale`, `install`은 충돌로 판정한다. `--replace`는 조건부 그룹에서 DevLink 항목만 빼고 matcher와 그룹의 다른 훅은 남긴 뒤, matcher 없는 DevLink 그룹을 추가한다. matcher가 없거나 `""`·`*`일 때만 항상 실행되는 것으로 본다. 모든 시작을 실제로 포함하는 정규식(예: `.*`, `startup|resume|clear|compact`)이나 문자열이 아닌 matcher도 조건부로 보므로, 이때는 `--replace`로 정리한다. UserPromptSubmit은 matcher 의미가 없어 matcher가 있어도 항상 실행되는 것으로 본다. `status.commands`·`plan.existing`의 값은 이 규칙을 반영한 표시용 라벨이며, 그대로 실행할 명령이 아니다.
   - 같은 명령이 이미 있으면 `unchanged`다. 경로나 프로필이 다른 DevLink 항목이 있으면 충돌로 멈추고, `plan.existing`에 기존 명령을 보여준다. `--replace`를 줄 때만 바꾼다.
   - `uninstall`은 해당 Host의 DevLink 항목만 지우고, 비게 된 그룹·이벤트만 정리한다.
   - 바꿀 필요가 없는 이벤트와 다른 키는 원래 JSON 텍스트를 그대로 둔다. 다시 쓰는 이벤트 배열 안에서는 다른 그룹·훅의 값이 보존되지만, 키 순서와 숫자 표기는 정규화될 수 있다.
