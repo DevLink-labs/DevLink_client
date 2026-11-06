@@ -170,7 +170,7 @@ fn toml_json(item: &toml_edit::Item) -> Option<Value> {
 
 // serde_json::Value ordinarily accepts duplicate keys and discards earlier data.
 // Reject duplicates recursively so merging cannot silently erase another server.
-struct Unique(Value);
+pub(super) struct Unique(pub(super) Value);
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,

@@ -129,6 +129,8 @@ pub struct Preparation {
     plan: Option<ConfigPlan>,
     manual: ManualConfig,
     fingerprint: Fingerprint,
+    /// The devlink executable, for comparing installed Host hooks with this profile.
+    devlink: PathBuf,
 }
 impl Preparation {
     pub fn plan(&self) -> Option<&ConfigPlan> {
@@ -173,8 +175,38 @@ impl Preparation {
                 "open_host_then_register_agent"
             };
             let mut next_actions = Vec::new();
-            if prepared.context.tool.tool_type == crate::sessions::ToolType::Codex {
+            let tool = prepared.context.tool.tool_type;
+            if tool == crate::sessions::ToolType::Codex {
                 next_actions.push("trust_codex_project");
+            }
+            // Read-only: setup never writes user-level Host files. Without the hooks the
+            // Host learns about new tasks only when it calls get_updates or get_tasks.
+            // Compared with this profile's commands, so hooks for another devlink path or
+            // profile are reported as missing too.
+            let hooked = mcp_config::hooks::HookTarget::user(tool)
+                .and_then(|target| {
+                    let devlink = prepared
+                        .devlink
+                        .canonicalize()
+                        .unwrap_or(prepared.devlink.clone());
+                    let config = prepared
+                        .context
+                        .config_path
+                        .canonicalize()
+                        .unwrap_or(prepared.context.config_path.clone());
+                    // Paths that cannot be written unquoted need a hand-made hook; then
+                    // only the presence of a DevLink entry can be checked.
+                    match mcp_config::hooks::wanted(tool, &devlink, &config) {
+                        Ok(wanted) => mcp_config::hooks::status(&target, Some(&wanted)),
+                        Err(error) if error.code == "HOOKS_PATH_UNSUPPORTED" => {
+                            mcp_config::hooks::status(&target, None)
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+                .is_ok_and(|status| status.status == "installed");
+            if !hooked {
+                next_actions.push("install_host_hooks");
             }
             next_actions.push(next);
             Ok(ConfigurationResult {
@@ -444,6 +476,7 @@ pub async fn prepare(
             plan: None,
             manual,
             fingerprint,
+            devlink: executable,
         })
     })
     .await

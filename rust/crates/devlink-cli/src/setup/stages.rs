@@ -2058,6 +2058,11 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
                         &mut report.next_actions,
                         &applied.next_actions,
                     );
+                } else if applied.next_actions.contains(&"install_host_hooks")
+                    && !report.next_actions.contains(&"install_host_hooks")
+                {
+                    // Missing hooks matter even when the MCP config was reused unchanged.
+                    report.next_actions.push("install_host_hooks");
                 }
                 report.mcp_config = Some(applied.clone());
                 self.mcp.connection = Some(report);

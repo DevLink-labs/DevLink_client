@@ -374,6 +374,10 @@ fn render_connection_result<W: Write>(
                 writeln!(output.writer, "Open the project in Codex and trust it if prompted so Codex loads the project config.")
                     .map_err(|_| SetupExit(1))?;
             }
+            if data.next_actions.contains(&"install_host_hooks") {
+                writeln!(output.writer, "To see new DevLink tasks at session start and on each prompt, run: devlink hooks install --host <codex|claude-code> --yes (add the hook by hand if a path contains spaces)")
+                    .map_err(|_| SetupExit(1))?;
+            }
             writeln!(
                 output.writer,
                 "Next actions: {}",

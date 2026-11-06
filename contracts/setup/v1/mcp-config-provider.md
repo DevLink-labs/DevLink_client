@@ -69,7 +69,12 @@ operation; it must not run on the CLI's asynchronous event loop.
 
 Only `<canonical project>/.codex/config.toml` or `<canonical project>/.mcp.json`
 is writable. Home/global targets, path traversal, linked targets/parents, wrong
-ownership and unsafe write permissions are rejected. Existing Host files may be readable by others (Unix 0644), but other-user writes
+ownership and unsafe write permissions are rejected. The one exception is
+`mcp_config::hooks` (`devlink hooks`, S15P31D108-176). It writes only the
+`hooks.SessionStart`/`hooks.UserPromptSubmit` entries for `devlink updates-hook`
+into the user-level Host file (`~/.claude/settings.json`, `~/.codex/hooks.json`).
+It reuses the same lock, backup and digest-fenced write, and it never touches
+`mcpServers`/`mcp_servers`. Setup only reads that file. Existing Host files may be readable by others (Unix 0644), but other-user writes
 and group-writable projects (including Unix 0775/0664) require a manual safe path.
 The module does not chmod existing projects. New config/lock/backup files are
 private. Merge and restore preserve the existing Host file mode/group/read ACL; backup

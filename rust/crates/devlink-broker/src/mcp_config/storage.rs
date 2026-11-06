@@ -312,10 +312,17 @@ fn state(input: &Normalized) -> Result<PathBuf> {
         .ok_or_else(invalid)?
         .join("mcp-provider-state");
     #[cfg(not(test))]
-    let root = dirs::home_dir()
+    let root = state_root()?;
+    state_at(&root, &input.target)
+}
+/// Private per-target state (apply lock, exact backups) under the user's home.
+pub(super) fn state_root() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
         .ok_or_else(unsafe_file)?
-        .join(".devlink-mcp-config");
-    let key = host_path(&input.target);
+        .join(".devlink-mcp-config"))
+}
+pub(super) fn state_at(root: &Path, target: &Path) -> Result<PathBuf> {
+    let key = host_path(target);
     #[cfg(windows)]
     let key = key.to_ascii_lowercase();
     let path = root.join(format!("{:x}", Sha256::digest(key.as_bytes())));
@@ -323,7 +330,10 @@ fn state(input: &Normalized) -> Result<PathBuf> {
     Ok(path)
 }
 pub(super) fn lock(input: &Normalized) -> Result<std::fs::File> {
-    let parent = input.target.parent().ok_or_else(invalid)?;
+    lock_at(&input.target, state(input)?)
+}
+pub(super) fn lock_at(target: &Path, state: PathBuf) -> Result<std::fs::File> {
+    let parent = target.parent().ok_or_else(invalid)?;
     match fs::symlink_metadata(parent) {
         Ok(_) => credentials::verify_directory_permissions(parent)
             .map_err(|e| ConfigError::unsafe_at(parent, e))?,
@@ -335,7 +345,7 @@ pub(super) fn lock(input: &Normalized) -> Result<std::fs::File> {
         }
         Err(_) => return Err(unsafe_file()),
     }
-    let path = state(input)?.join("apply.lock");
+    let path = state.join("apply.lock");
     if credentials::ensure_safe_target_if_exists(&path).map_err(|_| unsafe_file())? {
         credentials::verify_private_permissions(&path).map_err(|_| unsafe_file())?;
     }
@@ -347,7 +357,10 @@ pub(super) fn lock(input: &Normalized) -> Result<std::fs::File> {
 }
 pub(super) fn backup(input: &Normalized, bytes: Option<&[u8]>) -> Result<Option<PathBuf>> {
     let Some(bytes) = bytes else { return Ok(None) };
-    let parent = state(input)?.join("backups");
+    backup_at(state(input)?, bytes).map(Some)
+}
+pub(super) fn backup_at(state: PathBuf, bytes: &[u8]) -> Result<PathBuf> {
+    let parent = state.join("backups");
     private_dir(&parent)?;
     // Retain exact recovery files, never silently prune them. A full store requires manual review.
     if fs::read_dir(&parent)
@@ -370,7 +383,7 @@ pub(super) fn backup(input: &Normalized, bytes: Option<&[u8]>) -> Result<Option<
         e.outcome = "not_applied";
         e
     })?;
-    Ok(Some(path))
+    Ok(path)
 }
 pub(super) fn write(path: &Path, bytes: &[u8], create: bool) -> Result<()> {
     let expected = if create {

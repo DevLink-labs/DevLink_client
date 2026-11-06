@@ -1,5 +1,7 @@
 //! Project-only Host configuration provider for setup/v1. The CLI owns orchestration.
+//! `hooks` is the exception: it installs the user-level Host prompt hooks.
 mod format;
+pub mod hooks;
 mod permissions;
 mod storage;
 #[cfg(test)]
