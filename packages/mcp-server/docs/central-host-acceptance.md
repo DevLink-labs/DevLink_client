@@ -38,6 +38,8 @@ node packages/mcp-server/scripts/verify-central-hosts.mjs
 - 명시적으로 제공한 MCP entry와 native CLI를 사용하고, 두 client 커밋·중앙 커밋·CLI/entry/전체 MCP dist의 SHA256을 실행별 출처 기록에 보관한다.
 - 양쪽이 모두 통과하고 소유 프로세스 정리까지 끝난 경우에만 최종 report의 passed가 true가 된다. 실행별 하위 폴더에 JSONL·프롬프트·stderr·report를 보관한다.
 
+부분 수정 뒤 FAILED 경로(AC2)는 별도 실행기 `scripts/verify-central-failure.mjs`가 같은 환경 변수로 검증한다. 아래 "2026-11-06 AC2 실행과 AC3 판정 보강"을 따른다.
+
 `node --test test/central-host-proof.test.mjs`는 성공 오인 방지 판정기를 검증한다. 실제 Host·중앙 실행을 대신하는 시험은 아니다.
 
 ## 2026-11-02 첫 시도와 재개
@@ -106,6 +108,147 @@ node packages/mcp-server/scripts/verify-central-hosts.mjs
   - 프롬프트·JSONL·stderr 원본(`run-0710922e-c4ea-416d-8635-15f3fdfc6bfc`)은 실행 세션의 임시 작업 폴더에만 있어 영구 보관되지 않는다.
   - 자격 파일과 토큰은 기록하지 않았다.
 - **아직 하지 않은 것**
-  - AC2(부분 수정 뒤 FAILED)와 AC7(제3자 재실행)은 여전히 실행하지 않았다.
+  - AC2(부분 수정 뒤 FAILED)와 AC7(제3자 재실행)은 이 실행에서 하지 않았다. AC2는 아래 "AC2 실행과 AC3 판정 보강"에서 실행했다.
   - 교차 팀·offline·전달 실패·중복 요청은 이번에도 Host로 직접 재현하지 않았다. 근거는 위에 적은 중앙 `d06d239` 기준 통합 시험이다.
   - 실행기 report는 taskId만 남기고 requestId·requestKey는 기록하지 않는다.
+
+## 2026-11-06 AC2 실행과 AC3 판정 보강
+
+AC2(부분 수정 → 테스트 실패 → FAILED → 요청자 조회)를 실제 두 Host로 처음 실행했다. 같은 날 AC3 판정기도 보강했다. 이전 판정기는 호출 순서만 봤고, 수락 전에 파일이 바뀌지 않았는지는 확인하지 않았다.
+
+### 실패 경로 실행기 `scripts/verify-central-failure.mjs`
+
+환경 변수와 선행 환경은 위 성공 실행기와 같다. Codex가 요청하고 Claude Code가 받는다.
+
+- **실패를 일으키는 fixture**
+  - `src/invoice.mjs`의 합계가 수량을 곱하지 않는다.
+  - 고정 테스트 2개 중 하나는 수량 곱셈을 요구한다. 다른 하나는 `src/format.mjs`를 import한다.
+  - 수신 프롬프트는 새 파일 생성을 금지한다. 그래서 수신 Host는 첫 테스트만 고칠 수 있고, 남은 테스트는 실패한다.
+  - 즉 실패는 실행기가 의도해서 유도한 것이다. Host가 스스로 실패 상황을 판단했다는 증거로 확대하지 않는다.
+- **판정**
+  - 수신자는 PENDING 조회 → 명시적 IN_PROGRESS → 편집 → 실패한 `node --test` → FAILED 순서여야 한다.
+  - FAILED는 정확히 한 번이어야 하고, `complete_task`는 없어야 한다. failureReason은 비어 있으면 안 되고, `partiallyModified=true`여야 한다.
+  - 테스트 실패는 node test runner 요약 줄(`ℹ pass 1`, `ℹ fail 1`)로 판단한다. 종료 코드는 쓰지 않는다. Host가 `node --test 2>&1; echo exit=$?`처럼 명령을 이어 붙이면 도구 결과가 성공으로 보이기 때문이다.
+  - 실패한 테스트 실행은 마지막 편집 뒤에 있어야 하고, FAILED 호출은 그 실패 실행 뒤에 있어야 한다.
+  - 고정 테스트와 Git index는 바뀌면 안 된다. 수정 범위는 `src/invoice.mjs`뿐이고, 추적되지 않는 새 파일도 없어야 한다.
+  - 부모가 같은 테스트를 따로 실행해 종료 코드 1과 pass 1/fail 1을 확인한다. 남은 diff와 테스트 출력은 `receiver-remaining.diff`, `parent-node-test.txt`로 보관한다.
+  - 중앙 `GET /api/v1/tasks/{id}`가 FAILED, `partiallyModified=true`, 같은 failureReason을 돌려줘야 한다.
+  - 요청자 Codex는 `create_task`(PENDING) 뒤 `get_task_result`로 FAILED, failureReason, `partiallyModified=true`를 실제로 읽어야 한다.
+
+### AC3 판정 보강 (성공·실패 실행기 공통)
+
+- **편집 위치**
+  - 받는 Host의 성공한 프로젝트 편집은 **도구 호출이 나간 위치**로 판정한다.
+  - 수락은 `update_task_status(IN_PROGRESS)` **결과가 돌아온 위치**로 판정한다. 같은 턴에 병렬로 낸 편집이 수락보다 먼저 실행될 수 있기 때문이다.
+  - 첫 편집이 수락 결과보다 앞서면 실패다.
+- **수락 전 셸 명령**
+  - 수락 결과 이전의 셸 명령은 읽기 전용 허용 목록에 있어야 한다. 허용하는 것은 `sleep`, `cat`, `ls`, `git diff/status/log/show`, `node --test` 등이다.
+  - pwsh·cmd 래퍼는 벗겨서 본다. `>` 리다이렉트, `tee`, `sed -i`, `rm`, `Set-Content`, `git checkout` 같은 쓰기 표지가 있으면 실패다.
+  - 목록에 없는 명령(예: `node fix.mjs`, `python ...`)도 실패로 본다.
+- **파일 감시**
+  - 실행기가 nonce를 정한 뒤부터 수신 프로젝트의 snapshot(경로·SHA256)을 약 250ms 간격으로 다시 계산한다. 간격은 표본 사이의 대기 시간이라 실제 주기는 조금 더 길다. AC2 실행에서는 평균 약 280ms였다.
+  - 같은 시점에 수신자 Agent 토큰으로 중앙의 받은 작업 상태를 조회한다.
+  - 받은 작업이 모두 PENDING인 동안 snapshot이 처음과 달라지면 위반이다.
+  - 다음 경우도 실패다.
+    - 조회 오류가 하나라도 있다.
+    - 작업이 있는 PENDING 표본이 0이다.
+    - 수락 상태를 한 번도 보지 못했다.
+  - 실행기가 관리하는 `config.json`·`mcp.json`·`.devlink-runtime/`·`.git`은 비교에서 뺀다.
+
+### 실행 결과 (2026-11-06)
+
+- **실행 조합**
+  - client develop `77f07c3560fa0c8d20f63a471b5d913e3b4eda8e`의 native CLI(debug)와 MCP dist
+  - 판정기·실행기는 이 문서와 같은 PR의 것이다. develop `77f07c3`에는 없다.
+  - 실행 뒤 교차검토 지적을 반영해 판정기를 더 엄격하게 고쳤다. 래퍼로 쓴 `timeout`, 명령 치환, `find -delete/-exec`, `git diff --output`도 수락 전에 금지했다. 또 감시 표본이 ENOENT를 만나면 한 번 다시 시도하게 했다. 이번 실행의 transcript 3개는 고친 판정기로 다시 판정해도 통과한다(수락 전 명령은 모두 `sleep`·`Start-Sleep`).
+  - 중앙 `34b2c15`, PostgreSQL 17.11(격리, loopback)
+  - Codex CLI 0.166.0, Claude Code 2.1.310(`claude-opus-5-5`/high)
+- **결과:** 두 실행기 모두 `passed`, `actualLlmHostsExecuted`, `ownedProcessesStopped`가 true였다.
+
+| 시나리오 | 결과 |
+| --- | --- |
+| AC2 Codex → Claude, task 11 | PENDING → 명시적 IN_PROGRESS → `src/invoice.mjs` 수량 곱셈만 수정 → Host 테스트 pass 1/fail 1 → FAILED(`partiallyModified=true`, 사유 538자) → Codex가 같은 사유 조회 |
+| AC1·AC3 Codex → Claude, task 12 | 성공 경로. 수락 전 읽기 전용 명령 3개 |
+| AC1·AC3 Claude → Codex, task 13 | 성공 경로. 수락 전 읽기 전용 명령 2개 |
+
+- **AC2 세부**
+  - 남은 diff는 `src/invoice.mjs` 한 줄이다(`item.unitCents` → `item.unitCents * item.quantity`).
+  - 부모 테스트는 종료 코드 1, tests 2, pass 1, fail 1이었다.
+  - failureReason에는 통과한 테스트, 실패한 테스트와 원인(`src/format.mjs` 없음, `ERR_MODULE_NOT_FOUND`), 새 파일 생성 금지 때문에 추가하지 않았다는 점, 부분 수정을 남겼다는 점이 들어 있다.
+- **파일 감시**
+
+| task | 표본 | PENDING 표본(작업 있음) | 위반 | 조회 오류 |
+| --- | --- | --- | --- | --- |
+| 11 | 228 | 29 | 0 | 0 |
+| 12 | 372 | 11 | 0 | 0 |
+| 13 | 372 | 39 | 0 | 0 |
+
+- **증거 보관**
+  - report와 빌드 출처 SHA256은 Notion 2026-11-06 작업 정리에 옮긴다.
+  - JSONL·프롬프트·stderr·`receiver-remaining.diff`·`parent-node-test.txt` 원본(`run-22b65d95-842d-4cc2-a8cc-6f693c47262d`, `run-f0e91dbd-a814-4de1-8174-f5701ee5f350`)은 실행 세션의 임시 폴더에만 있다.
+  - 자격 파일과 토큰은 기록하지 않았다.
+
+### 한계
+
+- **감시 간격**
+  - 파일 감시는 약 250ms 간격 표본이다. 그 사이에 바뀌었다가 원래대로 돌아간 변경은 놓칠 수 있다.
+  - 마지막 PENDING 표본과 수락 사이의 한 간격 안에 생긴 변경도 감시가 보지 못한다.
+  - 이 빈틈은 transcript의 편집 위치와 셸 명령 판정이 보완한다.
+- **Codex 편집 이벤트**
+  - Codex `file_change`가 `item.completed`만 남기면 편집 위치는 완료 위치로 잡힌다.
+  - 그래도 수락 결과보다 앞서면 실패로 판정하는 것은 같다.
+- **셸 판정의 범위**
+  - 허용 목록 판정은 명령 문자열을 기준으로 한다.
+  - 허용된 명령 안에서 파일을 바꾸는 우회까지 의미적으로 막지는 못한다. 이 경우는 파일 감시가 보완한다.
+- **failureReason 형식**
+  - 프롬프트는 상대 경로만 쓰라고 요구하지만, 판정기는 failureReason에 절대 경로가 없는지 검사하지 않는다.
+- **실패 유도**
+  - AC2의 실패는 fixture와 프롬프트가 만든 것이다.
+  - 실제 업무에서 Host가 실패를 정직하게 보고하는지는 이 실행으로 일반화하지 않는다.
+
+## 제3자 재실행 절차 (AC7)
+
+AC7은 작성자가 아닌 사람이 같은 절차를 따라 재실행하고 결과를 기록해야 충족된다. 아래 절차는 2026-11-06 실행을 그대로 옮긴 것이다.
+
+1. **도구 준비**
+   - Windows 11 기준 Node.js 24+, Git, Java 21, Rust stable(MSVC)이 필요하다.
+   - Codex CLI와 Claude Code CLI에 각각 로그인한다. Claude는 `claude-opus-5-5`를 쓸 수 있어야 한다.
+   - Codex 권한 조건은 위 "선행 환경"과 같다.
+2. **중앙 서버 준비**
+   - DevLink_server를 clone하고 실행할 커밋을 checkout한 뒤 `gradlew bootJar`로 빌드한다.
+   - PostgreSQL 17을 loopback 임의 포트에 따로 띄운다. 전용 계정과 DB를 쓴다. Docker 대신 포터블 배포본도 된다.
+   - 다음 환경 변수를 지정하고 실행한다. `--spring.profiles.active=local`이 없으면 WebSocket origin placeholder 때문에 시작에 실패한다.
+     - `DB_URL`(`jdbc:postgresql://127.0.0.1:<db-port>/<db>`)
+     - `DB_USERNAME`, `DB_PASSWORD`
+     - `TASK_MESSAGE_CURSOR_SECRET`(임의의 긴 문자열)
+
+     ```powershell
+     java -jar build/libs/app.jar --spring.profiles.active=local --server.port=<port> --server.address=127.0.0.1
+     ```
+
+   - `GET http://127.0.0.1:<port>/api/v1/health`가 200인지 확인한다.
+3. **client 준비**
+   - 이 저장소의 기준 커밋을 checkout한다.
+   - 저장소 루트에서 `cargo +stable-x86_64-pc-windows-msvc build --manifest-path rust/Cargo.toml --locked -p devlink-cli`를 실행한다.
+   - 빌드 결과 `rust/target/debug/devlink.exe`의 절대 경로를 `DEVLINK_TEST_CLI`에 쓴다.
+   - `packages/mcp-server`에서 `npm ci`와 `npm run build`를 실행한다.
+4. **실행**
+   - 위 "선행 환경"의 환경 변수를 지정한다.
+   - 두 COMMIT 변수(`DEVLINK_TEST_CONTRACT_COMMIT`, `DEVLINK_TEST_NOTIFICATIONS_COMMIT`)에는 client 기준 커밋 SHA를 넣는다.
+   - `DEVLINK_TEST_HOST_ARTIFACTS`는 실행기마다 다른 빈 폴더로 지정하고, 아래 두 실행기를 차례로 실행한다.
+
+   ```powershell
+   node packages/mcp-server/scripts/verify-central-failure.mjs
+   node packages/mcp-server/scripts/verify-central-hosts.mjs
+   ```
+
+   - 실제 모델을 호출하므로 비용이 들고, 각각 수 분이 걸린다.
+5. **판정과 기록**
+   - stdout report의 `passed`, `actualLlmHostsExecuted`, `ownedProcessesStopped`가 모두 true면 통과다.
+   - 실패하면 report에 남은 첫 assertion 메시지와 run 폴더의 JSONL을 근거로 기록한다.
+   - [MVP 통합 문서](mvp-integration.md)의 실행 기록 양식으로 Notion 작성일 문서에 남긴다.
+     - 재실행자
+     - client·중앙 커밋, Host 버전
+     - taskId, 감시 표본·위반 수
+   - 자격 파일과 토큰은 붙여 넣지 않는다.
+6. **정리:** 중앙 서버 프로세스와 PostgreSQL(`pg_ctl stop`)을 중지한다.
