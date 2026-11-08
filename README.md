@@ -2,7 +2,7 @@
 
 ## 간편설정 규격
 
-[간편설정 호출·단계·오류 규격 v1](contracts/setup/v1/README.md)은 대화형/비대화형 입력, 진행·결과·오류 응답, 복구·종료 코드와 등록 API·MCP 설정·연결 상태의 연동 경계를 정의합니다. `setup`은 설정 준비·로그인·팀/프로젝트/도구 선택과 Agent 생성·재사용까지 연결되어 있습니다. 새 Agent의 토큰 준비와 MCP 설정 통합은 후속 단계이며, 현재 동작과 복구 방법은 [간편설정 구현 문서](rust/docs/setup.md)를 따릅니다.
+[간편설정 호출·단계·오류 규격 v1](contracts/setup/v1/README.md)은 대화형/비대화형 입력, 진행·결과·오류 응답, 복구·종료 코드와 등록 API·MCP 설정·연결 상태의 연동 경계를 정의합니다. `setup`은 설정 준비·로그인·팀/프로젝트/도구 선택, Agent 생성·재사용과 토큰 준비, 브로커 시작, 프로젝트 계층 MCP 설정 적용(Codex `.codex/config.toml`, Claude Code `.mcp.json`)까지 연결되어 있습니다. 현재 동작과 복구 방법은 [간편설정 구현 문서](rust/docs/setup.md), MCP 연결 확인 순서는 [MCP 온보딩](packages/mcp-server/docs/onboarding.md#connection-sequence-three-steps)을 따릅니다.
 
 ## MCP 서버
 

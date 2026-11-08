@@ -4,11 +4,11 @@ S15P31D108-59의 TypeScript·Node.js MCP 실행 기반, -60 로컬 브로커 호
 
 브로커 호출 계층의 [HTTP·세션 계약](docs/broker-contract-v0.1.md)은 먼저 복구한 인스턴스를 인정하는 정책을 설명합니다. S15P31D108-97에서 실제 SDK→Rust→격리 중앙의 Agent 등록과 양방향 컨텍스트·결과 전달을 검증했습니다. [중앙 계약·재현 방법](docs/central-roundtrip.md)에서 실행 범위와 한계를 확인할 수 있습니다.
 
-[인증 컨텍스트·프로필 자격 파일](docs/agent-context.md)에 -62의 처리 정책을, [공유 계약](../../contracts/local-broker/v1/README.md)에 JSON Schema와 fixture를 정리했습니다. 현재 Rust는 CLI 프로필 자격 발행, 세션 API와 7개 업무 도구의 중계를 제공합니다. Agent 생성은 CLI, MCP register_agent는 기존 Agent 확인·세션 연결입니다.
+[인증 컨텍스트·프로필 자격 파일](docs/agent-context.md)에 -62의 처리 정책을, [공유 계약](../../contracts/local-broker/v1/README.md)에 JSON Schema와 fixture를 정리했습니다. 현재 Rust는 CLI 프로필 자격 발행, 세션 API와 업무 도구의 중계를 제공합니다. Agent 생성·토큰 발급과 Host 설정 적용은 CLI `devlink setup`, MCP `register_agent({})`는 기존 Agent 확인·세션 연결입니다.
 
 [공통 오류·시간 제한 계약](docs/error-contract.md)은 -63의 오류 코드·원본 요청 식별자·requestKey 보존, 저장/전달 결과와 전체 호출 예산을 설명합니다. SDK의 입력 검증과 프로토콜 오류는 원래 wire id를 유지합니다.
 
-[도구 입력·결과 예제와 확장 방법](docs/tool-contracts-v0.1.md)에 중앙/Rust 계약에 맞춘 7개 도구 JSON을 정리했습니다. 상태·완료에는 최신 version이 필수이며 완료는 resultText/taskFiles를 사용합니다. 중앙의 별도 verification 필드는 없으므로 검증 내용은 resultText에 명시합니다.
+[도구 입력·결과 예제와 확장 방법](docs/tool-contracts-v0.1.md)에 중앙/Rust 계약에 맞춘 업무 도구 JSON을 정리했습니다. 상태·완료에는 최신 version이 필수이며 완료는 resultText/taskFiles를 사용합니다. 중앙의 별도 verification 필드는 없으므로 검증 내용은 resultText에 명시합니다.
 
 [요청·수락·결과 등록 지침](docs/agent-workflow.md)은 -65의 사용자 지정 수신자, 요청 템플릿, 명시적 수락 후 로컬 작업, 완료·실패·결과 불명 처리 순서를 설명합니다. [Codex](docs/hosts/codex.md)·[Claude Code](docs/hosts/claude-code.md)용 붙여 넣을 지침과 [스키마 검증 가능한 JSON 예제](examples/workflow.json)를 함께 제공합니다.
 
@@ -50,7 +50,9 @@ node packages/mcp-server/dist/index.js
 
 ## MCP Host 설정 예시
 
-다음은 `mcpServers` 형식을 사용하는 Host용 예시입니다. `command`와 첫 번째 인자는 각 컴퓨터의 실제 절대 경로로 변경합니다. 자동으로 사용자 설정 파일을 수정하지 않습니다.
+`devlink setup`(또는 이를 호출하는 [DevLink_frontend 데스크톱 앱](https://github.com/SSAFY-URAYAHA/DevLink_frontend/tree/main/desktop))은 MCP 설정 적용을 허용하면 **프로젝트 계층** Host 설정 파일에 `devlink` 항목 하나만 병합합니다. 대상은 Claude Code가 `<프로젝트>/.mcp.json`, Codex가 `<프로젝트>/.codex/config.toml`입니다. 다른 MCP 항목과 설정은 보존하고, setup은 사용자 전역 Host 설정 파일을 쓰지 않습니다(사용자 계층 훅은 별도 명령 `devlink hooks install`이 씁니다). 적용 전 계획·digest 충돌·백업·조건부 복원 규칙은 [MCP 설정 제공 계약](../../contracts/setup/v1/mcp-config-provider.md), 실행 흐름은 [setup 문서](../../rust/docs/setup.md)를 따릅니다. 파일 적용은 Host 연결 완료가 아닙니다. 신뢰된 프로젝트에서 Host를 다시 열고 [온보딩 3단계](docs/onboarding.md#connection-sequence-three-steps)로 확인합니다.
+
+setup이 쓰는 항목의 형태는 다음과 같습니다. 경로는 예시이며, 실제 값은 절대 경로의 Node 24 이상 실행 파일, 빌드된 MCP 진입점, 이 프로필의 브로커 자격 파일(`devlink --config <프로필 config.json> mcp path`가 출력하는 `<config.json이 있는 디렉터리>/.devlink-runtime/broker.json`, 기본 `~/.devlink/.devlink-runtime/broker.json`)입니다. 자격 파일의 토큰 값은 설정에 복사하지 않습니다. 실제 파일의 키 순서·공백은 아래와 다를 수 있으며, 적용 후 검사는 값으로 비교합니다.
 
 ```json
 {
@@ -58,31 +60,29 @@ node packages/mcp-server/dist/index.js
     "devlink": {
       "command": "C:\\Program Files\\nodejs\\node.exe",
       "args": [
-        "C:\\Users\\SSAFY\\Documents\\DevLink\\packages\\mcp-server\\dist\\index.js",
+        "C:\\Users\\me\\DevLink\\packages\\mcp-server\\dist\\index.js",
         "--transport",
         "stdio"
       ],
       "env": {
-        "DEVLINK_BROKER_FILE": "C:\\Users\\SSAFY\\.devlink-mcp\\claude-main\\broker.json"
-      }
+        "DEVLINK_BROKER_FILE": "C:\\Users\\me\\.devlink\\.devlink-runtime\\broker.json"
+      },
+      "type": "stdio"
     }
   }
 }
 ```
 
-Codex는 같은 실행 명령을 다음 TOML 형태로 설정합니다. [공식 MCP 설정 문서](https://learn.chatgpt.com/docs/extend/mcp)의 `command`·`args` 형식을 따릅니다.
+Codex는 같은 실행 명령을 `mcp_servers` 아래 인라인 테이블로 씁니다. [공식 MCP 설정 문서](https://learn.chatgpt.com/docs/extend/mcp)의 `command`·`args`·`env` 형식을 따릅니다.
 
 ```toml
-[mcp_servers.devlink]
-command = 'C:\Program Files\nodejs\node.exe'
-args = ['C:\Users\SSAFY\Documents\DevLink\packages\mcp-server\dist\index.js', '--transport', 'stdio']
-[mcp_servers.devlink.env]
-DEVLINK_BROKER_FILE = 'C:\Users\SSAFY\.devlink-mcp\codex-main\broker.json'
+[mcp_servers]
+devlink = { command = 'C:\Program Files\nodejs\node.exe', args = ['C:\Users\me\DevLink\packages\mcp-server\dist\index.js', '--transport', 'stdio'], env = { DEVLINK_BROKER_FILE = 'C:\Users\me\.devlink\.devlink-runtime\broker.json' } }
 ```
 
-위 브로커 파일 경로는 예시이며 실제 CLI 발행 위치로 변경합니다. CLI·Rust 브로커가 아직 이 계약을 제공하지 않으면 업무 도구는 성공하지 않습니다.
+자동 적용은 setup이 실제로 검증한 Host 버전에서만 동작합니다(현재 develop 기준 Codex 0.166.0, Claude Code 2.1.310. 목록은 [setup 문서](../../rust/docs/setup.md)와 [제공 계약](../../contracts/setup/v1/mcp-config-provider.md)이 기준입니다). 지원하지 않는 버전이나 `--mcp-mode manual`에서는 setup이 파일을 쓰지 않고 위와 같은 항목과 적용 위치를 안내한 뒤 `SETUP_MANUAL_ACTION_REQUIRED`(종료 3)로 끝납니다. 이는 setup 미완료입니다. 사용자가 직접 프로젝트 설정에 추가한 뒤 `devlink setup status`와 [온보딩 3단계](docs/onboarding.md#connection-sequence-three-steps)로 확인합니다. 브로커가 실행 중이 아니면 MCP가 브로커에 연결할 수 없으므로 업무 도구는 성공하지 않습니다(`get_connection_status`로 확인).
 
-Host마다 별도 프로필 파일을 지정합니다. `.devlink-runtime/runtime.json`의 `controlToken`은 CLI 제어용이며 MCP 자격 파일로 사용할 수 없습니다. 자격 파일은 프로세스마다 최초 업무 요청 시 한 번 읽습니다. 토큰 교체, 다른 팀·Agent로 전환할 때는 CLI에서 명시적으로 설정한 뒤 MCP 프로세스를 다시 시작합니다.
+Host마다 별도 프로필 파일을 지정합니다. 한 프로필에는 Agent 하나가 묶이므로, 두 번째 Host는 `--config`로 다른 프로필(config.json)을 준비하고 그 프로필의 자격 파일 경로를 씁니다. `.devlink-runtime/runtime.json`의 `controlToken`은 CLI 제어용이며 MCP 자격 파일로 사용할 수 없습니다. 자격 파일은 프로세스마다 최초 업무 요청 시 한 번 읽습니다. 토큰 교체, 다른 팀·Agent로 전환할 때는 CLI에서 명시적으로 설정한 뒤 MCP 프로세스를 다시 시작합니다.
 
 MCP SDK 2.4.0의 `serveStdio`가 기존 `initialize` 경로와 현대 프로토콜 경로를 처리합니다. `devlink_ping`은 입력 `{}`에 대해 다음 구조를 텍스트와 `structuredContent`로 반환합니다. 버전은 MCP 패키지 버전이며 브로커·중앙 서버의 준비 상태를 뜻하지 않습니다.
 
