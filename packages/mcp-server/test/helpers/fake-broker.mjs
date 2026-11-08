@@ -19,6 +19,7 @@ export async function fakeBroker({ profiles } = {}) {
     arrivals.push({ method: req.method, path: req.url });
     responses.add(res); res.once('close', () => responses.delete(res));
     try {
+      req.setEncoding('utf8');
       let text = '';
       for await (const chunk of req) text += chunk;
       const body = JSON.parse(text);

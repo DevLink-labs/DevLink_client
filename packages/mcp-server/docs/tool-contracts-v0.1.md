@@ -4,7 +4,7 @@
 
 ## 공개 도구와 입력
 
-`devlink_ping` 진단과 아래 10개 업무 도구를 등록한다. 별도 activate 도구는 없다. 모든 입력 객체는 strict다. 호출자의 userId/teamId/agentId/sessionId/context 필드를 허용하지 않는다. `recipientAgentId`는 작업 대상이며 발신 actor가 아니다. 브로커가 인증한 세션에서 context를 주입한다.
+`devlink_ping` 진단과 아래 11개 업무 도구를 등록한다. 별도 activate 도구는 없다. 모든 입력 객체는 strict다. 호출자의 userId/teamId/agentId/sessionId/context 필드를 허용하지 않는다. `recipientAgentId`는 작업 대상이며 발신 actor가 아니다. 브로커가 인증한 세션에서 context를 주입한다.
 
 아래 객체의 각 값은 해당 도구의 `arguments` 예제다.
 
@@ -19,7 +19,8 @@
   "get_task_result": {"taskId":"101"},
   "get_updates": {"limit":20},
   "ask_question": {"taskId":"101","message":"로그인 API는 v2 기준인가요?"},
-  "answer_question": {"taskId":"101","questionEventId":"501","message":"네, v2 기준입니다."}
+  "answer_question": {"taskId":"101","questionEventId":"501","message":"네, v2 기준입니다."},
+  "get_team_context": {"part":"BACKEND","counterpart":"FRONTEND"}
 }
 ```
 
@@ -35,6 +36,7 @@
 | ask_question | taskId, message(공백만 불가, 최대 8,000 코드포인트, NUL 불가) 필수. 선택 requestKey(공백 없는 식별자, 최대 64 UTF-16 코드 단위). 키가 없으면 MCP가 UUID를 발급해 브로커에 보내고, 응답·오류의 requestKey로 돌려준다. 같은 키와 같은 본문으로 다시 호출하면 같은 eventId를 받는다(`replayed: true`). 같은 키에 다른 본문은 REQUEST_KEY_CONFLICT. 중앙은 IN_PROGRESS Task의 참여자만 받으며, 요청자와 수신자가 같은 Agent면 TASK_CONVERSATION_UNAVAILABLE이다(S15P31D108-166) |
 | answer_question | taskId, questionEventId(정규 양의 Long 십진 문자열), message 필수. 선택 requestKey는 ask_question과 같다. questionEventId는 같은 Task에서 상대가 남긴 QUESTION의 eventId여야 하며, 아니면 INVALID_QUESTION_REFERENCE다. 답변은 Task 상태를 바꾸지 않는다 |
 | get_updates | 선택 cursor 1–512자(이전 `nextCursor`), limit 1–50(기본 20). 브로커가 저장한 새 수신 작업, 보낸 작업의 상태·완료 알림, 질문·답변 도착, 보낸 작업 지연 알림(`TASK_OVERDUE`, 로컬 전용·작업 취소 아님, S15P31D108-177)의 ID·상태만 반환. 읽기 전용이며 수락·ACK·읽음 처리 없음. `coverage: local`, `cursorReset`은 로컬 이력 재시작. 응답은 [updates schema](../../../contracts/local-broker/v1/updates.schema.json)로 검증하고 위반 시 BROKER_PROTOCOL_ERROR. 저장소 오류는 LOCAL_UPDATES_UNAVAILABLE([Rust 계약](../../../rust/docs/local-updates.md)) |
+| get_team_context | part `FRONTEND / BACKEND / INFRA / OTHER` 필수, 선택 counterpart(같은 값 집합). 중앙이 유지하는 파트 쌍 요약(`common`·`changed`·`issues`, 각 항목의 `evidence`는 원본 작업·이벤트 좌표)을 그대로 반환한다. 읽기 전용이며 세션 시작 시와 create_task 직전에 호출한다. 요약은 참고 자료이지 권위가 아니므로 의심되면 get_task_result로 원문을 읽는다 |
 
 업무 텍스트는 공백·개행을 보존하고 공백만 있는 입력을 거부한다. ID는 중앙에서 받은 양의 십진 문자열을 사용한다. version은 0..9223372036854775807의 정규 십진 문자열 또는 JS 안전 정수이며 출력은 문자열로 유지한다. 변경 전 상세에서 현재 version을 읽고 추측·자동 재전송하지 않는다. JSON Schema는 `tools/list`로 제공하고 조건부 FAILED 입력도 실행 전 검증한다. 전체 요청은 [HTTP 계약](broker-contract-v0.1.md)의 128KiB 제한도 적용한다.
 

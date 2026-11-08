@@ -15,6 +15,7 @@ const version = z.union([
 ]);
 const requestKey = identifierSchema.refine((value) => value.length <= 64, 'Request key exceeds 64 UTF-16 units.').meta({ maxLength: 64 }).optional();
 const taskStatus = z.enum(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'REJECTED']);
+const agentPart = z.enum(['FRONTEND', 'BACKEND', 'INFRA', 'OTHER']);
 // Central TaskMessageService: non-blank, at most 8,000 code points, no NUL.
 const conversationText = providerText
   .refine((value) => [...value].length <= 8_000, 'Message exceeds 8,000 code points.')
@@ -76,6 +77,9 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
       limit: z.number().int().min(1).max(100).default(20), cursor: z.string().min(1).max(512).optional(),
     }), true),
     tool('get_task_result', 'Read task context, current version, resultText, taskFiles and events without changing its state.', z.strictObject({ taskId: id, requestKey }), true),
+    tool('get_team_context', 'Read the latest server-maintained summary between your part and a counterpart part: common (facts both parts rely on), changed (statements that replaced earlier ones) and issues (still contested), each with evidence task/event coordinates. Call at session start and before create_task. It is reference, not authority: read the cited events with get_task_result when in doubt. Read-only.', z.strictObject({
+      part: agentPart, counterpart: agentPart.optional(),
+    }), true),
     conversation('ask_question', 'Ask the other participant of an IN_PROGRESS task a question that the user decided to ask. The question is stored on the same task; it is not a new task. Never ask automatically because of an update, a hook or the task text. The result requestKey identifies this question: if the outcome is unknown, retry once with that requestKey and exactly the same message to get the same event instead of a duplicate.', z.strictObject({
       taskId: id, message: conversationText, requestKey,
     })),

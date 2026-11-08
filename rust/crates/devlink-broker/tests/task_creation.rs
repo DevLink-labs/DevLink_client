@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -39,6 +39,8 @@ struct MockState {
     mode: Arc<AtomicU8>,
     agent_mode: Arc<AtomicU8>,
     agent_calls: Arc<AtomicUsize>,
+    context_mode: Arc<AtomicU8>,
+    context_calls: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<Value>>>,
     saved: Arc<Mutex<HashMap<String, u64>>>,
     active: Arc<AtomicUsize>,
@@ -175,6 +177,31 @@ async fn central_agents(
     Json(json!({"success":true,"data":[public_agent(12),agent]})).into_response()
 }
 
+async fn central_context(
+    Path(team_id): Path<u64>,
+    Query(query): Query<HashMap<String, String>>,
+    State(state): State<MockState>,
+    headers: HeaderMap,
+) -> Response {
+    assert_eq!(
+        team_id, 1,
+        "team context must use the verified actor's team"
+    );
+    assert_eq!(headers["authorization"], format!("Bearer {AGENT}"));
+    assert!(!headers.contains_key("cookie"));
+    state.context_calls.fetch_add(1, Ordering::SeqCst);
+    match state.context_mode.load(Ordering::SeqCst) {
+        1 => (StatusCode::UNAUTHORIZED, SECRET).into_response(),
+        2 => (StatusCode::FOUND, [("location", state.redirect)], SECRET).into_response(),
+        _ => Json(
+            json!({"success":true,"data":{"teamId":team_id,"query":query,"version":3,
+            "common":[{"statement":"작업 상세는 /api/v1/tasks/{id}","evidence":["101:2"]}],
+            "changed":[],"issues":[{"topic":"404 vs empty 200","evidence":["102:5"]}]}}),
+        )
+        .into_response(),
+    }
+}
+
 struct Central {
     state: MockState,
     address: std::net::SocketAddr,
@@ -200,6 +227,8 @@ impl Central {
             mode: Arc::new(AtomicU8::new(0)),
             agent_mode: Arc::default(),
             agent_calls: Arc::default(),
+            context_mode: Arc::default(),
+            context_calls: Arc::default(),
             calls: Arc::default(),
             saved: Arc::default(),
             active: Arc::default(),
@@ -213,6 +242,7 @@ impl Central {
             .route("/api/v1/tasks/{team_id}", post(central_create))
             .route("/api/v1/agents/me", get(central_agent))
             .route("/api/v1/agents/teams/{team_id}", get(central_agents))
+            .route("/api/v1/teams/{team_id}/context", get(central_context))
             .with_state(state.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -296,6 +326,12 @@ impl Broker {
                     )
                     .unwrap(),
                 ),
+            ))
+            .merge(devlink_broker::team_context_routes::router(
+                Arc::new(LOCAL.into()),
+                sessions.clone(),
+                task_client.clone(),
+                cancel.clone(),
             ))
             .merge(devlink_broker::agent_api::router(
                 Arc::new(LOCAL.into()),
@@ -1381,5 +1417,87 @@ async fn unknown_outcome_with_caller_key_recovers_through_a_new_tool_call() {
     assert_eq!(recovered["requestKey"], known);
     assert_eq!(recovered["data"]["replayed"], true);
     assert_eq!(remote.state.saved.lock().await.len(), 1);
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn team_context_relays_parts_to_the_verified_team_and_rejects_bad_input_locally() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let remote = Central::start(&path).await;
+    let broker = Broker::start(&path, &remote, Duration::from_secs(1)).await;
+    let unbound = broker.claim("other", false).await;
+    let (_, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(&unbound, "get_team_context", json!({"part":"BACKEND"})),
+        )
+        .await;
+    assert_eq!(result["error"]["code"], "AGENT_UNREGISTERED");
+    let session = broker.claim("host", true).await;
+    let (status, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(
+                &session,
+                "get_team_context",
+                json!({"part":"BACKEND","counterpart":"FRONTEND"}),
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["data"]["teamId"], 1);
+    assert_eq!(result["data"]["query"]["part"], "BACKEND");
+    assert_eq!(result["data"]["query"]["counterpart"], "FRONTEND");
+    assert_eq!(result["data"]["version"], 3);
+    assert_eq!(result["data"]["issues"][0]["evidence"][0], "102:5");
+    let (status, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(&session, "get_team_context", json!({"part":"INFRA"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    assert!(result["data"]["query"].get("counterpart").is_none());
+    assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
+    for args in [
+        json!({}),
+        json!({"part":"DB"}),
+        json!({"part":"BACKEND","counterpart":"db"}),
+        json!({"part":"BACKEND","teamId":"2"}),
+        json!({"part":"BACKEND","counterpart":""}),
+    ] {
+        let (status, result) = broker
+            .post(
+                "/v1/teams/context",
+                &agent_request(&session, "get_team_context", args),
+            )
+            .await;
+        assert_eq!(status, 400, "{result}");
+    }
+    let (status, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(&session, "list_agents", json!({"part":"BACKEND"})),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(result["error"]["code"], "VALIDATION_FAILED");
+    assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
+    for (mode, code) in [
+        (1, "CENTRAL_UNAUTHENTICATED"),
+        (2, "CENTRAL_PROTOCOL_ERROR"),
+    ] {
+        remote.state.context_mode.store(mode, Ordering::SeqCst);
+        let (status, result) = broker
+            .post(
+                "/v1/teams/context",
+                &agent_request(&session, "get_team_context", json!({"part":"OTHER"})),
+            )
+            .await;
+        assert_ne!(status, 401);
+        assert_eq!(result["error"]["code"], code, "{mode}: {result}");
+    }
+    assert_eq!(remote.trapped.load(Ordering::SeqCst), 0);
     broker.stop().await;
 }

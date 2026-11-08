@@ -13,6 +13,7 @@ export const operationRoutes = {
   get_updates: '/v1/updates',
   ask_question: '/v1/tasks/questions',
   answer_question: '/v1/tasks/answers',
+  get_team_context: '/v1/teams/context',
 } as const;
 export type BrokerOperation = keyof typeof operationRoutes;
 

@@ -366,6 +366,38 @@ impl TaskClient {
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
+    /// Read the latest team-part context summary for the actor's own team.
+    pub async fn team_context(
+        &self,
+        actor: &Principal,
+        part: &str,
+        counterpart: Option<&str>,
+    ) -> Result<Value, TaskError> {
+        tokio::time::timeout(self.timeout, async {
+            self.confirm_agent(actor).await?;
+            let team_id = numeric_id(actor.team_id.as_str())
+                .ok_or_else(|| TaskError::rejected("VALIDATION_FAILED", 400))?;
+            let mut query = vec![("part".to_string(), part.to_string())];
+            if let Some(counterpart) = counterpart {
+                query.push(("counterpart".to_string(), counterpart.to_string()));
+            }
+            let (status, envelope) = self
+                .request_http(
+                    reqwest::Method::GET,
+                    &format!("/api/v1/teams/{team_id}/context"),
+                    &query,
+                    None,
+                )
+                .await?;
+            if status != 200 || !envelope.success {
+                return Err(central_error(status, envelope.code.as_deref()));
+            }
+            envelope.data.ok_or_else(protocol_error)
+        })
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
+    }
+
     async fn read(&self, path: &str) -> Result<Value, TaskError> {
         let (status, envelope) = self.request(path, None).await?;
         if status != 200 || !envelope.success {

@@ -50,6 +50,7 @@ HTTP는 포트가 명시된 리터럴 `127.0.0.1`, 평문 로컬 HTTP, 루트 UR
 | complete_task | `/v1/tasks/complete` |
 | get_tasks | `/v1/tasks/list` |
 | get_task_result | `/v1/tasks/result` |
+| get_team_context | `/v1/teams/context` |
 
 ```json
 {
