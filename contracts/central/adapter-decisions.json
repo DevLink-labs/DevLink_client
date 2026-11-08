@@ -1,5 +1,9 @@
 {
   "kind": "decision-record",
+  "historical": true,
+  "historicalNote": "2026-10-29 server 5891ef2 기준 결정 기록이다. null 경로와 missing 표시는 현재 상태를 뜻하지 않는다. 일부는 지금도 미제공이므로 현재 상태는 supersededBy 문서를 본다.",
+  "supersededBy": "current-state.md",
+  "markedHistoricalOn": "2026-11-09",
   "runtimeConfiguration": false,
   "story": "S15P31D108-88",
   "asOf": "2026-10-29",
