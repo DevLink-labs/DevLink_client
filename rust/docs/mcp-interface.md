@@ -82,6 +82,7 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | --- | --- | --- |
 | register_agent | /v1/agents/register | [기존 Agent 확인](business-relay.md) |
 | list_agents | /v1/agents/list | [팀 목록](business-relay.md) |
+| update_agent | /v1/agents/update | [Agent 정보 수정](agent-bootstrap.md#agent-정보-수정-s15p31d108-146) |
 | create_task | /v1/tasks/create | [작업 생성·requestKey](business-relay.md) |
 | update_task_status | /v1/tasks/status | [상태 변경](task-operations.md) |
 | complete_task | /v1/tasks/complete | [완료](task-operations.md) |

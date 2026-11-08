@@ -446,6 +446,21 @@ impl UserClient {
             .await
     }
 
+    pub(crate) async fn prepare_patch(&mut self) -> Result<PreparedPost> {
+        self.csrf().await.map(PreparedPost)
+    }
+
+    /// No preflight IO remains: callers may fence their session after preparing CSRF.
+    pub(crate) async fn patch_prepared<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        body: Value,
+        prepared: PreparedPost,
+    ) -> Result<T> {
+        self.exchange(Method::PATCH, path, Some(body), Some(prepared.0))
+            .await
+    }
+
     async fn exchange<T: DeserializeOwned>(
         &mut self,
         method: Method,

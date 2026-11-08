@@ -64,6 +64,7 @@ SDK 2.4.0이 처리하는 프로토콜 오류와 Tool 실행 오류를 구분한
 | domain | RESOURCE_NOT_FOUND / REQUEST_KEY_CONFLICT / BROKER_STORAGE_FAILED | Rust의 원본 코드와 알려진 taskId/requestKey 및 outcome을 보존. 중앙 키 충돌의 unknown과 로컬 사전 저장 실패의 rejected를 구분 |
 | domain | RECEIVER_NOT_FOUND / RECEIVER_OFFLINE | 저장 전 수신자 거부. 새 작업이 저장된 것으로 표시하지 않으며 오류의 taskId는 제거 |
 | domain | TASK_SAVE_FAILED | 저장 실패 보고. 5xx에서는 명시적 rejected가 없으면 unknown |
+| domain | USER_LOGIN_REQUIRED / LOCAL_ACCOUNT_BUSY | `update_agent` 전용(S15P31D108-146). 이 PC의 CLI 사용자 로그인이 없거나 만료됐으면 USER_LOGIN_REQUIRED, 다른 CLI 작업이 계정 잠금을 쥐고 있으면 LOCAL_ACCOUNT_BUSY. 둘 다 중앙 변경 전이라 rejected. 모델이 로그인하지 않고 사용자에게 `devlink auth login`을 안내한다. CENTRAL_PROTOCOL_ERROR·CENTRAL_UNAVAILABLE·CENTRAL_TIMEOUT 등 unknown이면 변경이 반영됐을 수 있으므로 `get_my_context`로 확인한 뒤 같은 값으로만 다시 호출 |
 | domain | TASK_CONVERSATION_UNAVAILABLE / INVALID_QUESTION_REFERENCE | 질문·답변 규칙 위반(S15P31D108-166). 요청자와 수신자가 같은 Agent인 Task, 또는 같은 Task의 상대 질문이 아닌 questionEventId. rejected이며 다른 ID를 추측해 재시도하지 않음 |
 | transport | CENTRAL_UNAVAILABLE / CENTRAL_TIMEOUT | 중앙 연결 오류. unknown이며 로컬 브로커 세션 자체의 장애로 치환하지 않음 |
 | transport | CENTRAL_PROTOCOL_ERROR / CENTRAL_RESULT_UNKNOWN | 중앙 응답 계약 위반·확정되지 않은 결과. unknown과 알려진 taskId/requestKey 보존 |

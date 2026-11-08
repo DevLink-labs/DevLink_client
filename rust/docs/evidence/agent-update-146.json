@@ -1,0 +1,89 @@
+{
+  "serverCommit": "aecdcc3db69254d1262eb7ec82809487717b7ec7",
+  "cliSha256": "1a4b6781b354ad2e6737072adc3f99735274203e6e39dabb6cd278c2667b5b78",
+  "mcpEntrySha256": "54d8c4d2b310782fe3b372e1129d8359a58384146137a77bd1ead450e9bc9882",
+  "actualLlmHostsExecuted": true,
+  "ownedBrokersStopped": true,
+  "hosts": [
+    {
+      "host": "codex",
+      "model": null,
+      "agentId": 5,
+      "changed": true,
+      "contextMatches": true,
+      "noop": true,
+      "sameToken": true,
+      "independentCentralRead": true,
+      "transcriptSha256": "ba865f6b2f40a0bcd4fad651db971c44b2ed8054b1c5a145afb70da23d6edfc1",
+      "correlations": [
+        {
+          "tool": "register_agent",
+          "requestId": "1bae67f4-d5ce-42b3-85e8-4d5b423c12fa",
+          "mcpRequestId": 2
+        },
+        {
+          "tool": "get_my_context",
+          "requestId": "20b5798c-9765-4a9b-a0db-2cf3bd14e09e",
+          "mcpRequestId": 3
+        },
+        {
+          "tool": "update_agent",
+          "requestId": "a872011d-9d9b-416c-af15-18a0768e24d5",
+          "mcpRequestId": 4
+        },
+        {
+          "tool": "get_my_context",
+          "requestId": "3653b88c-4423-4445-ad1a-c14b6bb43b15",
+          "mcpRequestId": 5
+        },
+        {
+          "tool": "update_agent",
+          "requestId": "0b28c575-b151-42f8-a6a7-8ccfd140741b",
+          "mcpRequestId": 6
+        }
+      ]
+    },
+    {
+      "host": "claude",
+      "model": "claude-opus-5-5",
+      "agentId": 6,
+      "changed": true,
+      "contextMatches": true,
+      "noop": true,
+      "sameToken": true,
+      "independentCentralRead": true,
+      "transcriptSha256": "446587526a70e480231f3cd7277c696ece4242a5d01d4c47e8cf38d1b10fef67",
+      "correlations": [
+        {
+          "tool": "register_agent",
+          "requestId": "e8d90af6-580c-4f1c-bef1-6236aba146b1",
+          "mcpRequestId": 2
+        },
+        {
+          "tool": "get_my_context",
+          "requestId": "e7577fdb-3ced-4e83-a8a5-2bf30f79f179",
+          "mcpRequestId": 3
+        },
+        {
+          "tool": "update_agent",
+          "requestId": "062ed512-fe67-4ea9-90e2-d6f20a3577e4",
+          "mcpRequestId": 4
+        },
+        {
+          "tool": "get_my_context",
+          "requestId": "1e0e5d5a-4872-4240-ac64-4d9c362b2428",
+          "mcpRequestId": 5
+        },
+        {
+          "tool": "update_agent",
+          "requestId": "97009feb-8387-4009-b4a2-ff74431aff62",
+          "mcpRequestId": 6
+        }
+      ]
+    }
+  ],
+  "noNewAgent": true,
+  "counterpartUnchanged": true,
+  "passed": true,
+  "ownedMcpProcessesStopped": true
+}
