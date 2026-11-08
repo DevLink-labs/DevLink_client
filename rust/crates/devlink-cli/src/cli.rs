@@ -241,6 +241,14 @@ pub enum AgentCommand {
     },
     /// Explicitly issue/rotate the current Agent token while its broker is stopped
     Token,
+    /// Change the bound Agent's project name or role; never creates an Agent or token
+    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description"])))]
+    Update {
+        #[arg(long)]
+        project_name: Option<String>,
+        #[arg(long)]
+        role_description: Option<String>,
+    },
     /// Show public profile metadata and verify a stored central token
     Status,
     /// Clear only an unknown creation after manual server inspection; never retries
@@ -531,6 +539,19 @@ pub async fn run(cli: Cli) -> Result<()> {
                     agent_profile::use_agent(&path, id, project.as_deref()).await?
                 }
                 AgentCommand::Token => agent_profile::token(&path).await?,
+                AgentCommand::Update {
+                    project_name,
+                    role_description,
+                } => agent_profile::update(
+                    &path,
+                    agent_profile::UpdateOptions {
+                        project_name,
+                        role_description,
+                    },
+                    None,
+                )
+                .await?
+                .summary(),
                 AgentCommand::Status => agent_profile::status(&path).await?,
                 AgentCommand::ResetPending {
                     accept_duplicate_risk,

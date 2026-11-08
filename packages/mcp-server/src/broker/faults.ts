@@ -9,7 +9,7 @@ export type FaultCode =
   | 'BROKER_CONTEXT_UNAVAILABLE'
   | 'CENTRAL_UNAUTHENTICATED' | 'VALIDATION_FAILED' | 'RECEIVER_NOT_FOUND' | 'RECEIVER_OFFLINE'
   | 'TASK_NOT_FOUND' | 'TASK_STATE_CONFLICT' | 'TASK_VERSION_CONFLICT' | 'TASK_SAVE_FAILED'
-  | 'TASK_CONVERSATION_UNAVAILABLE' | 'INVALID_QUESTION_REFERENCE'
+  | 'TASK_CONVERSATION_UNAVAILABLE' | 'INVALID_QUESTION_REFERENCE' | 'USER_LOGIN_REQUIRED' | 'LOCAL_ACCOUNT_BUSY'
   | 'RESOURCE_NOT_FOUND' | 'REQUEST_KEY_CONFLICT' | 'BROKER_STORAGE_FAILED' | 'LOCAL_UPDATES_UNAVAILABLE'
   | 'CENTRAL_UNAVAILABLE' | 'CENTRAL_TIMEOUT' | 'CENTRAL_PROTOCOL_ERROR' | 'CENTRAL_RESULT_UNKNOWN' | 'TOOL_EXECUTION_FAILED';
 export type FaultCategory = 'input' | 'authentication' | 'session' | 'transport' | 'protocol' | 'domain' | 'internal';
@@ -48,6 +48,8 @@ const definitions: Record<FaultCode, readonly [FaultCategory, Outcome, string]> 
   TASK_SAVE_FAILED: ['domain', 'rejected', 'The server reported a task storage failure. Check the request outcome.'],
   TASK_CONVERSATION_UNAVAILABLE: ['domain', 'rejected', 'Questions and answers are unavailable on a task whose requester and recipient are the same Agent.'],
   INVALID_QUESTION_REFERENCE: ['domain', 'rejected', 'The answer must reference a question from the other participant on the same task.'],
+  USER_LOGIN_REQUIRED: ['domain', 'rejected', 'Changing Agent information needs the DevLink CLI login on this machine. Ask the user to run devlink auth login; nothing was changed.'],
+  LOCAL_ACCOUNT_BUSY: ['domain', 'rejected', 'Another DevLink CLI operation is using the local account. Retry after it finishes; nothing was changed.'],
   RESOURCE_NOT_FOUND: ['domain', 'rejected', 'The requested resource does not exist or is not visible.'],
   REQUEST_KEY_CONFLICT: ['domain', 'rejected', 'The request key conflicts with another request. Preserve the known key and check the reported outcome.'],
   BROKER_STORAGE_FAILED: ['domain', 'rejected', 'The broker could not save the request before sending it. Check local storage before deciding on another request.'],

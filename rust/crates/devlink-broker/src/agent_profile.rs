@@ -588,6 +588,247 @@ pub async fn token(config_path: &Path) -> Result<Value> {
     issue(config_path, &mut client, &mut profile, agent).await
 }
 
+/// S15P31D108-146: the only Agent fields a bound profile may change. Name, tool,
+/// owner and team stay fixed, and no Agent or credential is created.
+pub struct UpdateOptions {
+    pub project_name: Option<String>,
+    pub role_description: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateFaultKind {
+    /// Local validation failed; nothing was sent.
+    Invalid,
+    /// The bound profile is missing, unknown, or belongs to another principal/Agent.
+    Binding,
+    /// The update was sent but the response did not confirm the requested state.
+    Unconfirmed,
+}
+/// Typed, value-free update failure so callers can classify it without parsing text.
+#[derive(Debug)]
+pub struct UpdateFault {
+    pub kind: UpdateFaultKind,
+    message: &'static str,
+}
+impl std::fmt::Display for UpdateFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for UpdateFault {}
+fn update_fault(kind: UpdateFaultKind, message: &'static str) -> anyhow::Error {
+    UpdateFault { kind, message }.into()
+}
+
+pub struct UpdateResult {
+    pub agent: Agent,
+    pub changed: Vec<&'static str>,
+    /// False when the central update succeeded but the local display cache was not rewritten.
+    pub local_profile_synced: bool,
+}
+impl UpdateResult {
+    pub fn summary(&self) -> Value {
+        json!({"agent":self.agent,"updated":!self.changed.is_empty(),"changedFields":self.changed,
+            "credentialsRotated":false,"localProfileSynced":self.local_profile_synced})
+    }
+}
+
+/// Central `isBlank` treats some control characters as blank, so they are rejected here.
+fn valid_text(value: &str, limit: usize) -> bool {
+    !value.trim().is_empty()
+        && value.encode_utf16().count() <= limit
+        && !value.chars().any(char::is_control)
+}
+
+/// Change the bound Agent's project name or role through the central owner session.
+/// Only fields that differ from the live central value are sent. `expected_agent`
+/// pins the caller's verified Agent (the broker session) to the bound profile.
+pub async fn update(
+    config_path: &Path,
+    options: UpdateOptions,
+    expected_agent: Option<u64>,
+) -> Result<UpdateResult> {
+    prepare_update(config_path, options, expected_agent)
+        .await?
+        .commit()
+        .await
+}
+
+/// Holds the account lock and prepared CSRF privately until the caller has fenced
+/// its MCP session. No Debug/Serialize implementation may expose these credentials.
+pub(crate) struct PreparedUpdate {
+    config_path: PathBuf,
+    client: UserClient,
+    profile: Profile,
+    current: Agent,
+    options: UpdateOptions,
+    body: serde_json::Map<String, Value>,
+    changed: Vec<&'static str>,
+    csrf: Option<user_auth::PreparedPost>,
+}
+
+pub(crate) async fn prepare_update(
+    config_path: &Path,
+    options: UpdateOptions,
+    expected_agent: Option<u64>,
+) -> Result<PreparedUpdate> {
+    use UpdateFaultKind::{Binding, Invalid};
+    if (options.project_name.is_none() && options.role_description.is_none())
+        || options
+            .project_name
+            .as_deref()
+            .is_some_and(|v| !valid_text(v, 120))
+        || options
+            .role_description
+            .as_deref()
+            .is_some_and(|v| !valid_text(v, 255))
+    {
+        return Err(update_fault(
+            Invalid,
+            "Invalid Agent update: pass a non-blank --project-name (up to 120) or --role-description (up to 255)",
+        ));
+    }
+    let mut client = UserClient::authenticated(config_path).await?;
+    let team = teams::require_selected(config_path, &mut client).await?;
+    let user = client.user()?.user_id;
+    let profile = load(config_path)?.ok_or_else(|| {
+        update_fault(
+            Binding,
+            "AGENT_PROFILE_REQUIRED: bind an owned Agent first; no Agent was updated",
+        )
+    })?;
+    if profile.origin != client.central_origin()
+        || profile.user_id != user
+        || profile.team_id != team.team_id
+    {
+        return Err(update_fault(
+            Binding,
+            "Selected team/user differs from bound Agent; no Agent was updated",
+        ));
+    }
+    let Some(bound) = profile.agent() else {
+        return Err(update_fault(
+            Binding,
+            "AGENT_CREATION_UNKNOWN: inspect agent list and use an explicit owned ID; no Agent was updated",
+        ));
+    };
+    let id = bound.agent_id;
+    if expected_agent.is_some_and(|expected| expected != id) {
+        return Err(update_fault(
+            Binding,
+            "The session Agent differs from the bound profile; no Agent was updated",
+        ));
+    }
+    let current = owned(&mut client, team.team_id, id).await?;
+    let mut body = serde_json::Map::new();
+    let mut changed = Vec::new();
+    if let Some(project) = &options.project_name
+        && *project != current.project_name
+    {
+        body.insert("projectName".into(), json!(project));
+        changed.push("projectName");
+    }
+    if let Some(role) = &options.role_description
+        && current.role_description.as_ref() != Some(role)
+    {
+        body.insert("roleDescription".into(), json!(role));
+        changed.push("roleDescription");
+    }
+    let csrf = if changed.is_empty() {
+        None
+    } else {
+        Some(client.prepare_patch().await?)
+    };
+    Ok(PreparedUpdate {
+        config_path: config_path.to_owned(),
+        client,
+        profile,
+        current,
+        options,
+        body,
+        changed,
+        csrf,
+    })
+}
+
+impl PreparedUpdate {
+    /// Dispatch immediately after the caller's final authorization. Once sent,
+    /// preserve a confirmed result even if that session is subsequently replaced.
+    pub(crate) async fn commit(mut self) -> Result<UpdateResult> {
+        let id = self.current.agent_id;
+        let agent = if let Some(csrf) = self.csrf {
+            let updated: Agent = self.client
+            .patch_prepared(&format!("/api/v1/agents/{id}"), Value::Object(self.body), csrf)
+            .await
+            .map_err(|error| {
+                if user_auth::rejection_status(&error).is_some_and(|s| (400..500).contains(&s)) {
+                    error
+                } else {
+                    error.context(
+                        "Agent update not confirmed; the outcome is unknown. Inspect agent status before retrying",
+                    )
+                }
+            })?;
+            let confirmed = updated
+                .owned(self.profile.user_id, self.profile.team_id)
+                .is_ok()
+                && updated.agent_id == id
+                && updated.name == self.current.name
+                && updated.tool_type == self.current.tool_type
+                && self
+                    .options
+                    .project_name
+                    .as_ref()
+                    .is_none_or(|p| *p == updated.project_name)
+                && self
+                    .options
+                    .role_description
+                    .as_ref()
+                    .is_none_or(|r| updated.role_description.as_ref() == Some(r));
+            if !confirmed {
+                return Err(update_fault(
+                    UpdateFaultKind::Unconfirmed,
+                    "Central Agent update response does not match the request; the outcome is unknown. Inspect agent status before retrying",
+                ));
+            }
+            updated
+        } else {
+            self.current
+        };
+        let local_profile_synced = sync_cached_agent(&self.config_path, &self.profile, &agent);
+        Ok(UpdateResult {
+            agent,
+            changed: self.changed,
+            local_profile_synced,
+        })
+    }
+}
+
+/// Only the two editable fields are cached: identity, root, token and volatile
+/// status stay, so an unchanged value never rewrites the profile. A profile changed
+/// by another operation is left alone and reported as unsynced.
+fn sync_cached_agent(config_path: &Path, before: &Profile, agent: &Agent) -> bool {
+    let Ok(Some(mut current)) = load(config_path) else {
+        return false;
+    };
+    if current != *before {
+        return false;
+    }
+    match &mut current.state {
+        State::Ready { agent: cached, .. } | State::NeedsToken { agent: cached } => {
+            if cached.project_name == agent.project_name
+                && cached.role_description == agent.role_description
+            {
+                return true;
+            }
+            cached.project_name = agent.project_name.clone();
+            cached.role_description = agent.role_description.clone();
+        }
+        _ => return false,
+    }
+    save(config_path, &current).is_ok()
+}
+
 pub async fn status(config_path: &Path) -> Result<Value> {
     let Some(profile) = load(config_path)? else {
         return Ok(json!({"state":"unconfigured"}));
@@ -748,5 +989,69 @@ mod owner_tests {
         ] {
             std::fs::remove_file(directory.join(name)).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod update_cache_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, Profile, Agent) {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.json");
+        let agent = Agent {
+            agent_id: 201,
+            team_id: 71,
+            owner_user_id: 51,
+            name: "Cache fixture".into(),
+            role_description: None,
+            tool_type: Tool::Codex,
+            project_name: "Before".into(),
+            status: "ONLINE".into(),
+            last_seen_at: None,
+            created_at: "2026-11-08T00:00:00Z".into(),
+        };
+        let before = Profile {
+            schema_version: 1,
+            origin: "http://127.0.0.1:8080/".into(),
+            user_id: 51,
+            team_id: 71,
+            project_root: root.path().canonicalize().unwrap().to_str().unwrap().into(),
+            state: State::Ready {
+                agent: agent.clone(),
+                token: "synthetic-cache-token".into(),
+            },
+        };
+        save(&config, &before).unwrap();
+        let mut updated = agent;
+        updated.project_name = "Central value".into();
+        (root, config, before, updated)
+    }
+
+    #[test]
+    fn changed_profile_is_reported_unsynced_and_preserved_byte_for_byte() {
+        let (_root, config, before, updated) = fixture();
+        let mut concurrent = before.clone();
+        if let State::Ready { agent, .. } = &mut concurrent.state {
+            agent.role_description = Some("Concurrent value".into());
+        }
+        save(&config, &concurrent).unwrap();
+        let bytes = std::fs::read(path(&config)).unwrap();
+        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert_eq!(std::fs::read(path(&config)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn missing_or_corrupt_profile_is_reported_unsynced_without_recreating_it() {
+        let (_root, config, before, updated) = fixture();
+        std::fs::write(path(&config), b"corrupt-private-profile").unwrap();
+        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert_eq!(
+            std::fs::read(path(&config)).unwrap(),
+            b"corrupt-private-profile"
+        );
+        std::fs::remove_file(path(&config)).unwrap();
+        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert!(!path(&config).exists());
     }
 }
