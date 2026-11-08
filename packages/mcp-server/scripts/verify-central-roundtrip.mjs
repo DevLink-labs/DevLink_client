@@ -5,10 +5,8 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve,dirname,basename,isAbsolute} from 'node:path';
-import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Client} from '@modelcontextprotocol/client';
-import {getDefaultEnvironment,StdioClientTransport} from '@modelcontextprotocol/client/stdio';
+import {assertRequiredTools,callTool,connectMcpStdio,withoutDevlinkEnv} from './lib/mcp-stdio.mjs';
 
 const base=new URL(process.env.DEVLINK_TEST_CENTRAL_URL??'');
 assert(base.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(base.hostname)&&base.pathname==='/'&&!base.search&&!base.hash&&!base.username&&!base.password,'Only an isolated loopback server is allowed');
@@ -16,7 +14,7 @@ const cli=process.env.DEVLINK_TEST_CLI;
 assert(cli&&isAbsolute(cli),'DEVLINK_TEST_CLI must name the built CLI');
 const serverCommit=process.env.DEVLINK_TEST_CENTRAL_COMMIT;
 assert(/^[a-f0-9]{40}$/.test(serverCommit??''),'Record the exact server source commit');
-const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^DEVLINK_/i.test(key)));
+const env=withoutDevlinkEnv();
 const root=await mkdtemp(join(tmpdir(),'devlink-central97-'));
 const profiles=[], clients=[], secrets=[], checks=[];
 let cleanupFailed=false, failure;
@@ -69,13 +67,9 @@ async function start(p) {
  const runtime=await saved(p,'runtime.json');secrets.push(runtime.controlToken);
  p.descriptor=await saved(p,'broker.json');secrets.push(p.descriptor.localToken);
  await until(async()=> (await fetch(p.descriptor.brokerUrl+'/health',{headers:{Authorization:'Bearer '+p.descriptor.localToken}})).json(),h=>h.centralServer==='Connected','central WebSocket '+p.label);
- const client=new Client({name:'central97-'+p.label,version:'1'},{versionNegotiation:{mode:'legacy'}});
- clients.push(client);
- const transport=new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--transport','stdio'],env:{...getDefaultEnvironment(),...env,DEVLINK_BROKER_FILE:join(p.folder,'.devlink-runtime','broker.json')},stderr:'pipe'});
- p.stderr='';p.stderrOverflow=false;
- transport.stderr.on('data',chunk=>{if(p.stderr.length+chunk.length<=2_000_000)p.stderr+=chunk.toString();else p.stderrOverflow=true;});
- await client.connect(transport);p.client=client;
- const names=(await client.listTools()).tools.map(t=>t.name);assert.equal(names.length,10);
+ p.mcp=await connectMcpStdio({brokerFile:join(p.folder,'.devlink-runtime','broker.json'),name:'central97-'+p.label,env});
+ p.client=p.mcp.client;clients.push(p.client);
+ await assertRequiredTools(p.client);
  const diagnostic=await call(p,'get_connection_status',{});
  assert.equal(diagnostic.data.broker,'running');assert.equal(diagnostic.data.central,'Connected');
  assert.equal(diagnostic.data.identity,'verified');assert.equal(diagnostic.data.credentials,'valid');
@@ -101,12 +95,7 @@ async function start(p) {
  assert.equal((await call(p,'get_connection_status',{})).data.hostSession,'bound');
  await until(()=>central(p,'/api/v1/agents/me'),a=>a.status==='ONLINE','ONLINE presence '+p.label);
 }
-async function call(p,name,args,expectedCode) {
- const r=await p.client.callTool({name,arguments:args});const v=r.structuredContent;
- assert.deepEqual(JSON.parse(r.content[0].text),v,'text and structured output differ');
- if(expectedCode){assert.equal(r.isError,true);assert.equal(v.error.code,expectedCode);return v;}
- assert.notEqual(r.isError,true,'MCP operation failed: '+name+' '+v?.error?.code);return v;
-}
+async function call(p,name,args,expectedCode){return callTool(p.client,name,args,expectedCode);}
 async function detail(p,taskId){return (await call(p,'get_task_result',{taskId})).data;}
 async function exchange(sender,receiver,label) {
  const args={recipientAgentId:String(receiver.agent.agentId),title:'  '+label+' 컨텍스트  ',description:'  요청 설명\n한글/emoji 🧪  ',taskContext:'  project='+receiver.label+'\nfiles=src/context.txt\nnonce='+randomUUID()+'\n수신자에게만 전달  '};
@@ -171,7 +160,7 @@ try {
  for(const client of clients)try{await client.close();}catch{cleanupFailed=true;}
  for(const p of profiles)if(p.started)try{await raw(p,['stop']);p.started=false;}catch{cleanupFailed=true;}
  try {
-  for(const p of profiles){safe(p.stderr??'');assert(!p.stderrOverflow,'MCP diagnostics exceeded the capture limit');}
+  for(const p of profiles){safe(p.mcp?.stderr??'');assert(!p.mcp?.stderrOverflow,'MCP diagnostics exceeded the capture limit');}
  } catch(error) { failure??=error; }
  try {
   assert(!cleanupFailed,'Owned process cleanup failed; test profiles retained');
