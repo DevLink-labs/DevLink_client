@@ -446,14 +446,18 @@ impl UserClient {
             .await
     }
 
-    /// CSRF-protected partial update with the same cookie and response rules as POST.
-    pub(crate) async fn patch<T: DeserializeOwned>(
+    pub(crate) async fn prepare_patch(&mut self) -> Result<PreparedPost> {
+        self.csrf().await.map(PreparedPost)
+    }
+
+    /// No preflight IO remains: callers may fence their session after preparing CSRF.
+    pub(crate) async fn patch_prepared<T: DeserializeOwned>(
         &mut self,
         path: &str,
         body: Value,
+        prepared: PreparedPost,
     ) -> Result<T> {
-        let csrf = self.csrf().await?;
-        self.exchange(Method::PATCH, path, Some(body), Some(csrf))
+        self.exchange(Method::PATCH, path, Some(body), Some(prepared.0))
             .await
     }
 

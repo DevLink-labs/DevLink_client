@@ -106,9 +106,20 @@ async fn change(api: &Api, body: &BusinessRequest<UpdateArguments>) -> Result<Va
         project_name: body.arguments.project_name.clone(),
         role_description: body.arguments.role_description.clone(),
     };
-    let result = agent_profile::update(api.context.config_path(), options, Some(expected))
+    let prepared =
+        agent_profile::prepare_update(api.context.config_path(), options, Some(expected))
+            .await
+            .map_err(update_error)?;
+    // User/team/Agent/CSRF preflight may have yielded to a fresh claim, release,
+    // or binding change. Fence again before sending any mutation (also for no-op
+    // reads). Do not fence after dispatch: a confirmed mutation stays confirmed.
+    api.central.confirm_agent(&actor).await?;
+    guard_profile(api).await?;
+    api.sessions
+        .authorize(&body.context.session_id, &actor)
         .await
-        .map_err(update_error)?;
+        .map_err(session_error)?;
+    let result = prepared.commit().await.map_err(update_error)?;
     let agent = &result.agent;
     let tool = match agent.tool_type {
         Tool::Codex => "codex",

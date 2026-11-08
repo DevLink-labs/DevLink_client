@@ -62,11 +62,17 @@ pub struct MockState {
     pub agent_context_calls: Arc<AtomicUsize>,
     pub csrf_failure: Arc<AtomicBool>,
     pub csrf_mode: Arc<AtomicU8>,
+    pub pause_csrf: Arc<AtomicBool>,
+    pub csrf_entered: Arc<tokio::sync::Notify>,
+    pub csrf_resume: Arc<tokio::sync::Notify>,
     pub pause_token: Arc<AtomicBool>,
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
     /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404
     pub update_mode: Arc<AtomicU8>,
+    pub pause_update_reply: Arc<AtomicBool>,
+    pub update_entered: Arc<tokio::sync::Notify>,
+    pub update_resume: Arc<tokio::sync::Notify>,
 }
 
 pub fn success(value: Value) -> Response {
@@ -88,6 +94,10 @@ fn user(state: &MockState) -> Value {
 async fn csrf(State(state): State<MockState>, headers: HeaderMap) -> Response {
     assert!(!headers.contains_key("authorization"));
     state.calls.lock().unwrap().push("csrf".into());
+    if state.pause_csrf.load(Ordering::SeqCst) {
+        state.csrf_entered.notify_one();
+        state.csrf_resume.notified().await;
+    }
     if state.csrf_failure.load(Ordering::SeqCst) {
         return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
     }
@@ -356,19 +366,26 @@ async fn agent_update(
         4 => return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),
         _ => {}
     }
-    let mut agents = state.agents.lock().unwrap();
-    let Some(agent) = agents.get_mut(&id) else {
-        return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
+    let reply = {
+        let mut agents = state.agents.lock().unwrap();
+        let Some(agent) = agents.get_mut(&id) else {
+            return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
+        };
+        if agent["ownerUserId"] != user(&state)["userId"] {
+            return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
+        }
+        for key in &keys {
+            agent[key.as_str()] = body[key.as_str()].clone();
+        }
+        let mut reply = agent.clone();
+        if state.update_mode.load(Ordering::SeqCst) == 2 {
+            reply["projectName"] = json!("changed by provider");
+        }
+        reply
     };
-    if agent["ownerUserId"] != user(&state)["userId"] {
-        return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
-    }
-    for key in &keys {
-        agent[key.as_str()] = body[key.as_str()].clone();
-    }
-    let mut reply = agent.clone();
-    if state.update_mode.load(Ordering::SeqCst) == 2 {
-        reply["projectName"] = json!("changed by provider");
+    if state.pause_update_reply.load(Ordering::SeqCst) {
+        state.update_entered.notify_one();
+        state.update_resume.notified().await;
     }
     success(reply)
 }

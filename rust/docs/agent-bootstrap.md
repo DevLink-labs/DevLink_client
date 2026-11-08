@@ -40,6 +40,9 @@ devlink agent update --project-name "DevLink client" --role-description "MCP 담
 
 **중앙 계약.** server develop `34b2c15`의 `AgentController`·`AgentService` 코드를 기준으로 했다. 백엔드와 문서로 따로 합의한 계약은 아니다.
 
+2026-11-08 server `aecdcc3`에서도 재확인했다. 제공 상태·인증·권한·DTO·오류와
+담당자 확인 상태는 [Agent 갱신 소비 계약](agent-update-contract.md)에 기록한다.
+
 - `PATCH /api/v1/agents/{agentId}`, 본문 `{name?, roleDescription?, projectName?}`(`UpdateAgentRequest`, 각각 최대 100·255·120자).
 - 사용자 세션(`JSESSIONID`)과 CSRF만 받는다. Agent Bearer는 받지 않는다.
 - 팀원이면서 Agent 소유자여야 한다. 아니면 403 ACCESS_DENIED이고, 없는 Agent는 404 RESOURCE_NOT_FOUND다.
@@ -58,6 +61,7 @@ devlink agent update --project-name "DevLink client" --role-description "MCP 담
 **MCP 경로의 권한.** 중앙 PATCH가 사용자 세션만 받으므로, 브로커는 이 PC의 `devlink auth login` 세션 파일을 읽어 호출한다. 이 경로를 쓰는 조건은 다음과 같다.
 
 - 요청 세션이 bind된 Agent가 프로필의 Agent와 같아야 한다.
+- 사용자·팀·Agent 조회와 CSRF 준비를 마친 뒤, PATCH 직전에 프로필·중앙 신원·MCP 세션을 다시 검증한다. 조회 중 대체·해제된 세션은 전송하지 않는다(Issue #86). 같은 값 요청도 현재 세션을 검증한다.
 - 사용자 세션의 사용자가 프로필 사용자와 같아야 한다.
 - 바꿀 수 있는 필드는 위 두 가지뿐이다.
 

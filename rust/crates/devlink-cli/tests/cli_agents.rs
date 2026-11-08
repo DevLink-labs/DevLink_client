@@ -903,3 +903,185 @@ async fn mcp_update_agent_uses_the_cli_login_for_the_verified_session_agent_only
     assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
 }
+
+async fn update_fixture() -> (
+    Fixture,
+    Stop,
+    credentials::McpCredentials,
+    reqwest::Client,
+    Value,
+) {
+    let f = Fixture::new().await;
+    let stop = Stop(f.path.clone());
+    selected(&f);
+    data(create(&f));
+    let started = f.run(&["start"], None);
+    assert!(started.status.success(), "{}", text(&started));
+    connected(&f.path).await;
+    let mcp = credentials::load(&f.path).unwrap();
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let (status, claimed) = local(&http, &mcp, "/v1/sessions", &json!({
+        "requestId":"update-claim-a", "instanceId":"update-instance-a", "mode":"fresh", "agentId":"201"
+    })).await;
+    assert_eq!(status, 200, "{claimed}");
+    let mut context = claimed["data"]["principal"].clone();
+    context["sessionId"] = claimed["data"]["sessionId"].clone();
+    (f, stop, mcp, http, context)
+}
+
+fn pending_update(
+    http: &reqwest::Client,
+    mcp: &credentials::McpCredentials,
+    context: Value,
+    project: &str,
+) -> tokio::task::JoinHandle<(u16, Value)> {
+    let client = http.clone();
+    let url = format!("{}/v1/agents/update", mcp.broker_url);
+    let token = mcp.local_token.clone();
+    let body = json!({"requestId":"pending-update", "operation":"update_agent",
+        "arguments":{"projectName":project}, "context":context});
+    tokio::spawn(async move {
+        let response = client
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, response.json().await.unwrap())
+    })
+}
+
+async fn replace_update_session(http: &reqwest::Client, mcp: &credentials::McpCredentials) {
+    let (status, response) = local(http, mcp, "/v1/sessions", &json!({
+        "requestId":"update-claim-b", "instanceId":"update-instance-b", "mode":"fresh", "agentId":"201"
+    })).await;
+    assert_eq!(status, 200, "{response}");
+}
+
+/// Issue #86: every asynchronous preflight, including CSRF, must precede the
+/// final session fence. A no-op must not publish a result to a replaced owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_fences_replaced_released_changed_context_and_binding_before_dispatch() {
+    for (gate, action, project) in [
+        ("members", "replace", "New project"),
+        ("csrf", "replace", "New project"),
+        ("members", "release", "New project"),
+        ("csrf", "release", "New project"),
+        ("members", "context", "New project"),
+        ("csrf", "context", "New project"),
+        ("members", "binding", "New project"),
+        ("csrf", "binding", "New project"),
+        ("members", "replace", "My project"),
+    ] {
+        let (f, _stop, mcp, http, context) = update_fixture().await;
+        let (pause, entered, resume) = if gate == "members" {
+            (
+                &f.state.pause_members,
+                &f.state.members_entered,
+                &f.state.members_resume,
+            )
+        } else {
+            (
+                &f.state.pause_csrf,
+                &f.state.csrf_entered,
+                &f.state.csrf_resume,
+            )
+        };
+        pause.store(true, Ordering::SeqCst);
+        let pending = pending_update(&http, &mcp, context.clone(), project);
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        match action {
+            "replace" => replace_update_session(&http, &mcp).await,
+            "release" => {
+                let response = http
+                    .delete(format!(
+                        "{}/v1/sessions/{}",
+                        mcp.broker_url,
+                        context["sessionId"].as_str().unwrap()
+                    ))
+                    .bearer_auth(&mcp.local_token)
+                    .json(&json!({"requestId":"release-a", "instanceId":"update-instance-a"}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+            }
+            "context" => f.state.wrong_context.store(true, Ordering::SeqCst),
+            "binding" => {
+                let root = f._root.path().join("changed-binding");
+                std::fs::create_dir(&root).unwrap();
+                let mut changed = profile(&f.path);
+                changed["projectRoot"] = json!(std::fs::canonicalize(root).unwrap());
+                private_file::write(&agent_profile::path(&f.path), &changed, 16384).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(agent_profile::path(&f.path)).unwrap();
+        assert!(update_calls(&f).is_empty());
+        pause.store(false, Ordering::SeqCst);
+        resume.notify_one();
+        let (status, response) = pending.await.unwrap();
+        assert!((400..500).contains(&status), "{gate}/{action}: {response}");
+        assert_eq!(
+            response["error"]["outcome"], "rejected",
+            "{gate}/{action}: {response}"
+        );
+        assert!(update_calls(&f).is_empty(), "{gate}/{action}");
+        assert_eq!(std::fs::read(agent_profile::path(&f.path)).unwrap(), before);
+        assert_eq!(
+            f.state.agents.lock().unwrap()[&201]["projectName"],
+            "My project"
+        );
+        assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_preserves_confirmed_result_when_session_is_replaced_after_dispatch() {
+    let (f, _stop, mcp, http, context) = update_fixture().await;
+    f.state.pause_update_reply.store(true, Ordering::SeqCst);
+    let pending = pending_update(&http, &mcp, context, "Committed project");
+    tokio::time::timeout(Duration::from_secs(5), f.state.update_entered.notified())
+        .await
+        .unwrap();
+    replace_update_session(&http, &mcp).await;
+    f.state.update_resume.notify_one();
+    let (status, response) = pending.await.unwrap();
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["data"]["updated"], true);
+    assert_eq!(
+        response["data"]["agent"]["projectName"],
+        "Committed project"
+    );
+    assert_eq!(update_calls(&f), ["agent_update:projectName"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_reports_unsynced_profile_without_overwriting_concurrent_local_changes() {
+    let (f, _stop, mcp, http, context) = update_fixture().await;
+    let token = profile(&f.path)["state"]["token"].clone();
+    f.state.pause_update_reply.store(true, Ordering::SeqCst);
+    let pending = pending_update(&http, &mcp, context, "Central project");
+    tokio::time::timeout(Duration::from_secs(5), f.state.update_entered.notified())
+        .await
+        .unwrap();
+    let mut changed = profile(&f.path);
+    changed["state"]["agent"]["projectName"] = json!("Concurrent local project");
+    private_file::write(&agent_profile::path(&f.path), &changed, 16384).unwrap();
+    let before = std::fs::read(agent_profile::path(&f.path)).unwrap();
+    f.state.update_resume.notify_one();
+    let (status, response) = pending.await.unwrap();
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["data"]["localProfileSynced"], false);
+    assert_eq!(response["data"]["updated"], true);
+    assert_eq!(response["data"]["agent"]["projectName"], "Central project");
+    assert_eq!(std::fs::read(agent_profile::path(&f.path)).unwrap(), before);
+    assert_eq!(profile(&f.path)["state"]["token"], token);
+    assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
+}
