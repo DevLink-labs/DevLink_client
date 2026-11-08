@@ -13,8 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const CODEX_VERSION: &str = "0.166.0";
-pub const CLAUDE_VERSION: &str = "2.1.317";
+pub const CODEX_VERSIONS: &[&str] = &["0.166.0"];
+pub const CLAUDE_VERSIONS: &[&str] = &["2.1.317"];
 const LIMIT: usize = 1024 * 1024;
 type Result<T> = std::result::Result<T, ConfigError>;
 
@@ -25,10 +25,10 @@ pub struct VerifiedHost {
 impl VerifiedHost {
     pub fn new(tool: ToolType, version: &str) -> Result<Self> {
         let expected = match tool {
-            ToolType::Codex => CODEX_VERSION,
-            ToolType::ClaudeCode => CLAUDE_VERSION,
+            ToolType::Codex => CODEX_VERSIONS,
+            ToolType::ClaudeCode => CLAUDE_VERSIONS,
         };
-        if version != expected {
+        if !expected.contains(&version) {
             return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
         }
         Ok(Self { tool })

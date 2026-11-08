@@ -101,8 +101,8 @@ impl Fixture {
             VerifiedHost::new(
                 tool,
                 match tool {
-                    ToolType::Codex => CODEX_VERSION,
-                    ToolType::ClaudeCode => CLAUDE_VERSION,
+                    ToolType::Codex => CODEX_VERSIONS[0],
+                    ToolType::ClaudeCode => CLAUDE_VERSIONS[0],
                 },
             )
             .unwrap(),
@@ -341,6 +341,24 @@ fn write_and_post_inspection_failures_restore_only_the_owned_version() {
                 assert_ne!(actual, before);
                 assert_eq!(error.rollback, "failed");
                 assert!(error.backup_path.unwrap().exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn only_listed_versions_of_the_selected_host_are_verified() {
+    for (tool, versions, other) in [
+        (ToolType::Codex, CODEX_VERSIONS, CLAUDE_VERSIONS),
+        (ToolType::ClaudeCode, CLAUDE_VERSIONS, CODEX_VERSIONS),
+    ] {
+        assert!(!versions.is_empty());
+        for version in versions {
+            assert!(VerifiedHost::new(tool, version).is_ok());
+        }
+        for version in other.iter().copied().chain(["", "9.9.9", "0.166.0-beta.1"]) {
+            if !versions.contains(&version) {
+                assert!(VerifiedHost::new(tool, version).is_err());
             }
         }
     }

@@ -759,3 +759,13 @@ cargo test --offline --locked -p devlink-broker --test task_creation actual_mcp_
 ```
 
 실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.317` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
+
+## 2026-11-08 데스크톱 다중 프로젝트 연결 보완
+
+프로젝트별 `--config`를 사용해도 기존의 계정 단위 owner 잠금 때문에 같은 사용자의 두 번째 Agent 등록·토큰 준비·브로커 실행이 막혔다. owner 잠금을 서버·사용자·Agent 단위로 나눠 서로 다른 Agent를 동시에 실행하도록 보완했다. 실행 중인 같은 프로필의 변경은 기존 broker/control 잠금으로, 다른 프로필에서 같은 Agent를 중복 실행하거나 토큰을 변경하는 작업은 Agent 잠금으로 계속 거부한다.
+
+기존 계정 단위 잠금 파일에는 새 브로커들이 공유 잠금을 유지한다. 구버전의 배타적 계정 잠금과는 양방향으로 충돌하므로 구버전 브로커가 같은 계정으로 실행 중이면 한 번 중지하고 새 CLI로 다시 실행해야 한다. Agent ID를 아직 모르는 신규 생성은 공유 잠금과 프로필 잠금으로 보호하고, 확인된 Agent의 토큰 발급부터 Agent 잠금을 적용한다. 서버의 Agent별 토큰·WebSocket 연결 정책은 변경하지 않았다.
+
+자동 적용 가능 버전은 `CODEX_VERSIONS`, `CLAUDE_VERSIONS` 목록으로 관리한다. 이번 변경에서는 기존에 검증한 `0.166.0`, `2.1.317`만 유지했다. 미검증 버전의 직접 적용 재사용과 일치 검사 정책도 유지한다.
+
+Windows에서 Agent CLI 16건, setup 등록 22건·토큰 13건·MCP 20건, MCP 제공자 21건과 owner 잠금 호환성 1건을 통과했다. 전체 타깃 Clippy와 fmt 검사도 통과했다. 별도 데스크톱 검증에서는 실제 Electron 연결 화면·실제 CLI·로컬 Spring/PostgreSQL 서버로 같은 계정의 두 프로젝트와 다른 팀 연결, 재연결, 직접 적용 후 확인·재실행을 확인했다. 직접 적용 경로의 Host만 버전 `9.9.9`를 출력하는 합성 실행 파일을 사용했고 모델 호출은 하지 않았다.

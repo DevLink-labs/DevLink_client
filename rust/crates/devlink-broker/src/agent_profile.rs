@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -302,14 +302,18 @@ fn stopped(config_path: &Path) -> Result<crate::broker_control::StoppedGuard> {
     })
 }
 
-/// Local-machine, per-central-user lock. It is not a claim of server-wide policy.
-fn owner_lock(origin: &str, user: u64) -> Result<File> {
-    try_owner_lock(origin, user)?.context(
-        "Another broker or setup operation is active for this central user on this machine",
-    )
+pub struct OwnerGuard {
+    _legacy: File,
+    _agent: Option<File>,
 }
 
-fn try_owner_lock(origin: &str, user: u64) -> Result<Option<File>> {
+/// Agent별 중복 실행·토큰 변경 방지. 공유 잠금으로 구버전의 계정 단위 잠금과 호환.
+fn owner_lock(origin: &str, user: u64, agent: Option<u64>) -> Result<OwnerGuard> {
+    try_owner_lock(origin, user, agent)?
+        .context("Another broker or setup operation is active for this Agent on this machine")
+}
+
+fn try_owner_lock(origin: &str, user: u64, agent: Option<u64>) -> Result<Option<OwnerGuard>> {
     let digest = Sha256::digest(format!("{origin}\0{user}"));
     let directory = dirs::data_local_dir()
         .context("Cannot locate private broker owner directory")?
@@ -321,7 +325,32 @@ fn try_owner_lock(origin: &str, user: u64) -> Result<Option<File>> {
     if std::fs::symlink_metadata(&lock).is_ok() {
         credentials::verify_path_safety(&lock)?;
     }
-    config::try_lock(&lock)
+    let legacy = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock)?;
+    match fs2::FileExt::try_lock_shared(&legacy) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let agent = if let Some(id) = agent {
+        let lock = directory.join(format!("{digest:x}.agent-{id}.lock"));
+        let Some(guard) = config::try_lock(&lock)? else {
+            return Ok(None);
+        };
+        Some(guard)
+    } else {
+        None
+    };
+    Ok(Some(OwnerGuard {
+        _legacy: legacy,
+        _agent: agent,
+    }))
 }
 
 fn rotate_mcp_if_present(config_path: &Path) -> Result<()> {
@@ -456,7 +485,7 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         return Ok(existing.summary(true));
     }
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), user)?;
+    let _owner = owner_lock(client.central_origin(), user, None)?;
     let prepared = client.prepare_post().await?;
     let mut profile = Profile {
         schema_version: 1,
@@ -489,6 +518,7 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         agent: agent.clone(),
     };
     save(config_path,&profile).map_err(|_|anyhow::anyhow!("Agent {} created; local save failed. Recover with explicit agent use, never create again blindly",agent.agent_id))?;
+    let _agent_owner = owner_lock(&profile.origin, profile.user_id, Some(agent.agent_id))?;
     issue(config_path, &mut client, &mut profile, agent).await
 }
 
@@ -524,7 +554,7 @@ pub async fn use_agent(config_path: &Path, id: u64, local_project: Option<&Path>
         return Ok(old.summary(true));
     }
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), client.user()?.user_id)?;
+    let _owner = owner_lock(client.central_origin(), client.user()?.user_id, Some(id))?;
     let profile = Profile {
         schema_version: 1,
         origin: client.central_origin().to_owned(),
@@ -554,7 +584,7 @@ pub async fn token(config_path: &Path) -> Result<Value> {
         .agent_id;
     let agent = owned(&mut client, team.team_id, id).await?;
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), client.user()?.user_id)?;
+    let _owner = owner_lock(client.central_origin(), client.user()?.user_id, Some(id))?;
     issue(config_path, &mut client, &mut profile, agent).await
 }
 
@@ -599,7 +629,7 @@ pub async fn reset_pending(config_path: &Path, accept_duplicate_risk: bool) -> R
         "Only an unknown creation can be reset; known Agent IDs must be reused"
     );
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), client.user()?.user_id)?;
+    let _owner = owner_lock(client.central_origin(), client.user()?.user_id, None)?;
     profile.state = State::Vacant;
     save(config_path, &profile)?;
     Ok(
@@ -644,7 +674,7 @@ pub fn stored_token(config_path: &Path) -> Result<Option<String>> {
 
 pub struct BrokerIdentity {
     pub token: String,
-    pub _owner: File,
+    pub _owner: OwnerGuard,
 }
 pub fn startup_allowance(config_path: &Path) -> Duration {
     if std::fs::symlink_metadata(path(config_path)).is_ok() {
@@ -678,7 +708,7 @@ pub async fn prepare_broker(config_path: &Path) -> Result<Option<BrokerIdentity>
             .is_some_and(|a| a.agent_id == agent.agent_id),
         "Agent profile token identity mismatch"
     );
-    let owner = owner_lock(&profile.origin, profile.user_id)?;
+    let owner = owner_lock(&profile.origin, profile.user_id, Some(agent.agent_id))?;
     ensure!(
         load(config_path)?.as_ref() == Some(&profile),
         "Agent profile changed during startup; retry explicitly"
@@ -687,4 +717,36 @@ pub async fn prepare_broker(config_path: &Path) -> Result<Option<BrokerIdentity>
         token,
         _owner: owner,
     }))
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    #[test]
+    fn agent_guards_coexist_but_exclude_same_agent_and_legacy_exclusive_guard() {
+        let origin = format!("http://lock-test-{}.invalid/", uuid::Uuid::new_v4());
+        let first = owner_lock(&origin, 51, Some(201)).unwrap();
+        let second = owner_lock(&origin, 51, Some(301)).unwrap();
+        assert!(try_owner_lock(&origin, 51, Some(201)).unwrap().is_none());
+        let digest = Sha256::digest(format!("{origin}\0{}", 51));
+        let directory = dirs::data_local_dir()
+            .unwrap()
+            .join("DevLink/broker-owners");
+        let legacy = directory.join(format!("{digest:x}.lock"));
+        assert!(config::try_lock(&legacy).unwrap().is_none());
+        drop(first);
+        drop(second);
+        let old = config::lock(&legacy).unwrap();
+        assert!(try_owner_lock(&origin, 51, Some(201)).unwrap().is_none());
+        assert!(try_owner_lock(&origin, 51, None).unwrap().is_none());
+        drop(old);
+        for name in [
+            format!("{digest:x}.lock"),
+            format!("{digest:x}.agent-201.lock"),
+            format!("{digest:x}.agent-301.lock"),
+        ] {
+            std::fs::remove_file(directory.join(name)).unwrap();
+        }
+    }
 }

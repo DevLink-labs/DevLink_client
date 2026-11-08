@@ -432,11 +432,13 @@ async fn actual_broker_uses_profile_without_environment_and_keeps_four_credentia
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_local_profiles_of_one_user_cannot_run_brokers_at_the_same_time() {
+async fn different_agents_of_one_user_can_be_bound_and_run_while_another_is_connected() {
     let f = Fixture::new().await;
     selected(&f);
     data(create(&f));
     let _stop_a = Stop(f.path.clone());
+    assert!(f.run(&["start"], None).status.success());
+    connected(&f.path).await;
     let second = f._root.path().join("second");
     std::fs::create_dir(&second).unwrap();
     let other = second.join("config.json");
@@ -457,13 +459,35 @@ async fn two_local_profiles_of_one_user_cannot_run_brokers_at_the_same_time() {
     ));
     data(run_at(&other, &["agent", "token"], None));
     let _stop_b = Stop(other.clone());
-    assert!(f.run(&["start"], None).status.success());
-    connected(&f.path).await;
-    deny(run_at(&other, &["broker"], None), "Another broker");
-    assert!(!devlink_broker::local::running(&other).unwrap());
-    assert!(f.run(&["stop"], None).status.success());
     assert!(run_at(&other, &["start"], None).status.success());
     connected(&other).await;
+    connected(&f.path).await;
+    assert_ne!(
+        Runtime::load(&f.path).unwrap().port,
+        Runtime::load(&other).unwrap().port
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_same_agent_in_another_profile_cannot_run_or_rotate_a_live_credential() {
+    let f = Fixture::new().await;
+    selected(&f);
+    data(create(&f));
+    let _stop = Stop(f.path.clone());
+    let other = f._root.path().join("duplicate/config.json");
+    std::fs::create_dir(other.parent().unwrap()).unwrap();
+    config::atomic_json(&other, &config::Config::load(&f.path).unwrap()).unwrap();
+    data(login_at(&other));
+    data(run_at(&other, &["team", "select", "--id", "71"], None));
+    private_file::write(&agent_profile::path(&other), &profile(&f.path), 16384).unwrap();
+    assert!(f.run(&["start"], None).status.success());
+    connected(&f.path).await;
+    let issued = f.state.token_calls.load(Ordering::SeqCst);
+    deny(run_at(&other, &["broker"], None), "Another broker");
+    deny(run_at(&other, &["agent", "token"], None), "Another broker");
+    assert_eq!(f.state.token_calls.load(Ordering::SeqCst), issued);
+    assert!(!devlink_broker::local::running(&other).unwrap());
+    connected(&f.path).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -395,7 +395,7 @@ pub async fn ensure_tracked(
                     || a.role_description != agent.role_description
                     || a.tool_type != agent.tool_type
             }) {
-                let _guard = require_mutation(path, &expected.origin, expected.user_id)?;
+                let _guard = require_mutation(path, &expected.origin, expected.user_id, Some(id))?;
                 check_binding(path, expected)?;
                 let mut refreshed = old.clone();
                 match &mut refreshed.state {
@@ -416,7 +416,7 @@ pub async fn ensure_tracked(
             check_binding(path, expected)?;
             return Ok(summary(old, true));
         }
-        let _owner = require_mutation(path, &expected.origin, expected.user_id)?;
+        let _owner = require_mutation(path, &expected.origin, expected.user_id, Some(id))?;
         check_binding(path, expected)?;
         let profile = Profile {
             schema_version: 1,
@@ -440,7 +440,7 @@ pub async fn ensure_tracked(
         result.outcome = Mutation::Applied;
         return Ok(result);
     }
-    let _owner = require_mutation(path, &expected.origin, expected.user_id)?;
+    let _owner = require_mutation(path, &expected.origin, expected.user_id, None)?;
     let prepared = client.prepare_post().await.map_err(central)?;
     check_binding(path, expected)?;
     let metadata = &expected.project.metadata;
@@ -524,14 +524,15 @@ pub(super) fn require_mutation(
     path: &Path,
     origin: &str,
     user: u64,
-) -> Result<(File, File), Failure> {
+    agent: Option<u64>,
+) -> Result<(File, OwnerGuard), Failure> {
     // Keep the broker lock, rather than only probing it: a foreground broker must
     // not start between the stopped check and durable profile publication.
     let lock = config::state_directory(path).join("broker.lock");
     let broker = config::try_lock(&lock)
         .map_err(|_| failure(FailureKind::Storage))?
         .ok_or_else(|| failure(FailureKind::BrokerBusy))?;
-    let owner = try_owner_lock(origin, user)
+    let owner = try_owner_lock(origin, user, agent)
         .map_err(|_| failure(FailureKind::Storage))?
         .ok_or_else(|| failure(FailureKind::BrokerBusy))?;
     Ok((broker, owner))

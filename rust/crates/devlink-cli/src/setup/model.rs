@@ -244,7 +244,7 @@ impl ErrorCode {
                 "Another setup or configuration operation is using this profile. Wait for it to finish, then rerun setup."
             }
             Self::BrokerBusy => {
-                "The broker is running or starting. Stop the broker using this profile or central account before creating configuration or changing Agent credentials."
+                "The broker is running or starting. Stop the broker using this profile or Agent before creating configuration or changing Agent credentials."
             }
             Self::ConfigStorageFailed => {
                 "Configuration storage failed. Inspect the indicated path and existing file before retrying; setup did not remove it."
