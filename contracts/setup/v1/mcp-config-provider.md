@@ -6,7 +6,7 @@ discovery and runtime verification. The module does not install or start a Host,
 log in, select a team, create an Agent, issue a token, or deploy anything.
 
 Create `VerifiedHost::new(toolType, detectedVersion)` and then `McpConfig::new(host)`.
-The tested automatic formats are **Codex 0.166.0** and **Claude Code 2.1.310**.
+The tested automatic formats are **Codex 0.166.0** and **Claude Code 2.1.317**.
 Unknown versions return `SETUP_TOOL_UNAVAILABLE` for a manual path. Supporting a
 new version requires its actual parser/Host verification, not silently guessing.
 
@@ -124,7 +124,7 @@ persistent reviewed-plan store. The product CLI must retain the same plan instan
 
 ```json
 {
-  "hostVersion": "2.1.310",
+  "hostVersion": "2.1.317",
   "input": {
     "toolType": "claude_code",
     "projectPath": "C:\\work\\demo",

@@ -138,6 +138,7 @@ struct Mcp {
 #[serde(rename_all = "lowercase")]
 enum McpMode {
     Apply,
+    Replace,
     Manual,
 }
 
@@ -228,7 +229,7 @@ impl Input {
         let login = self.user.mode.0 == Some(UserMode::Login);
         let create = self.agent.action.0 == Some(Action::Create);
         let use_agent = self.agent.action.0 == Some(Action::Use);
-        let apply = self.mcp.mode.0 == Some(McpMode::Apply);
+        let apply = matches!(self.mcp.mode.0, Some(McpMode::Apply | McpMode::Replace));
         if self.schema_version.0.is_some_and(|v| v != 1)
             || self
                 .timeout_ms
@@ -317,7 +318,11 @@ impl Input {
             },
             issue_token: self.agent.issue_token.0.unwrap_or(false),
             mcp: Options {
-                mode: if apply { Mode::Apply } else { Mode::Manual },
+                mode: match self.mcp.mode.0 {
+                    Some(McpMode::Replace) => Mode::Replace,
+                    Some(McpMode::Apply) => Mode::Apply,
+                    _ => Mode::Manual,
+                },
                 target: self.mcp.target_path.0,
                 apply,
                 ..Default::default()

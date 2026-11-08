@@ -188,8 +188,8 @@ pub async fn ensure_tracked(
     if !allow_issue {
         return Ok(result(&profile, false, false, Mutation::NotApplied));
     }
-    let _guard =
-        require_mutation(path, &expected.origin, expected.user_id).map_err(|e| known(e, id))?;
+    let _guard = require_mutation(path, &expected.origin, expected.user_id, Some(id))
+        .map_err(|e| known(e, id))?;
     let owned: Agent = client
         .get(&format!("/api/v1/agents/{id}"))
         .await
