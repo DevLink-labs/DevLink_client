@@ -211,9 +211,32 @@ impl TaskClient {
         query: &[(String, String)],
         body: Option<Value>,
     ) -> Result<(u16, CentralEnvelope), TaskError> {
-        if body.as_ref().is_some_and(|value| {
-            !serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= REQUEST_LIMIT)
-        }) {
+        self.request_with_limit(method, path, query, body, REQUEST_LIMIT)
+            .await
+    }
+
+    pub(crate) async fn request_graph_http(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, CentralEnvelope), TaskError> {
+        self.request_with_limit(method, path, &[], body, 2 * 1024 * 1024)
+            .await
+    }
+
+    async fn request_with_limit(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<Value>,
+        limit: usize,
+    ) -> Result<(u16, CentralEnvelope), TaskError> {
+        if body
+            .as_ref()
+            .is_some_and(|value| !serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= limit))
+        {
             return Err(TaskError::rejected("VALIDATION_FAILED", 400));
         }
         tokio::time::timeout(self.timeout, self.exchange_http(method, path, query, body))
