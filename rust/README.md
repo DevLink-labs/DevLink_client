@@ -104,6 +104,8 @@ cargo build --release --locked --workspace
 
 `rust-toolchain.toml`은 stable, rustfmt, clippy를 선택합니다. 의존성 버전은 이 디렉터리의 `Cargo.lock`으로 고정하며 공통 의존성은 workspace의 `Cargo.toml`에서 관리합니다. 빌드 산출물은 `rust/target/`에 생성됩니다. 최근 Windows MSVC 검증과 고정 중앙·DB 결과는 [검증 요약](docs/verification.md)에 실행별로 보관합니다. -95 후속 보완의 전체 Rust 회귀는 168건 통과·2건 제외였고, 문서 정리 과정에서 다시 실행한 결과는 아닙니다. Ubuntu·CI·운영 Host 전체 왕복은 별도 검증입니다.
 
+Windows x64 MSVC 빌드는 `.cargo/config.toml`의 `+crt-static` 설정으로 C 런타임을 정적으로 연결합니다. 배포받는 PC에 Visual C++ 재배포 패키지를 요구하지 않도록 한 설정입니다. `rust` 디렉터리에서 빌드해야 이 설정을 읽으며, `RUSTFLAGS`로 재정의할 때도 정적 연결 설정을 유지해야 합니다. 데스크톱 패키징은 완성된 CLI의 일반·지연 DLL 가져오기 표를 검사해 Visual C++ 런타임 DLL 의존성이 남으면 중단합니다.
+
 통합 테스트는 로컬 TCP 연결을 사용합니다. 네트워크가 제한된 샌드박스에서 Windows 오류 `10013` 또는 브로커 시작 시간 초과가 발생하면 로컬 통신이 허용된 일반 PowerShell이나 승인된 샌드박스 외부 실행으로 검증하세요.
 
 ## 빠른 실행
