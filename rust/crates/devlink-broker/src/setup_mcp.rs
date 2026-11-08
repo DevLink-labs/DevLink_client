@@ -132,6 +132,8 @@ pub struct Preparation {
     manual: ManualConfig,
     fingerprint: Fingerprint,
     replace_devlink: bool,
+    /// An unverified Host already holds this profile's exact entry, applied by hand.
+    manually_applied: bool,
     /// The devlink executable, for comparing installed Host hooks with this profile.
     devlink: PathBuf,
 }
@@ -143,7 +145,7 @@ impl Preparation {
         &self.manual
     }
     pub fn requires_manual(&self) -> bool {
-        self.provider.is_none()
+        self.provider.is_none() && !self.manually_applied
     }
     pub async fn apply(self) -> Result<ConfigurationResult> {
         tokio::task::spawn_blocking(move || {
@@ -152,26 +154,41 @@ impl Preparation {
             if fingerprints(&prepared.context, &prepared.input)? != prepared.fingerprint {
                 return Err(error("SETUP_PROFILE_CONFLICT"));
             }
-            let provider = prepared
-                .provider
-                .as_mut()
-                .ok_or_else(|| error("SETUP_MANUAL_ACTION_REQUIRED"))?;
-            let plan = prepared
-                .plan
-                .as_ref()
-                .ok_or_else(|| error("SETUP_MCP_CONFIG_CONFLICT"))?;
-            let applied = provider.apply(&plan.plan_id, plan.expected_digest.as_deref())?;
-            let inspection = provider
-                .inspect(InspectionInput {
-                    tool_type: prepared.input.tool_type,
-                    target_path: prepared.input.target_path,
-                    broker_file: prepared.input.broker_file,
-                    executable: prepared.input.executable,
-                })
-                .map_err(|_| ConfigError::uncertain("not_needed", applied.backup_path.clone()))?;
-            if inspection.status != InspectionStatus::Applied {
-                return Err(ConfigError::uncertain("not_needed", applied.backup_path));
-            }
+            let inspection_input = InspectionInput {
+                tool_type: prepared.input.tool_type,
+                target_path: prepared.input.target_path.clone(),
+                broker_file: prepared.input.broker_file.clone(),
+                executable: prepared.input.executable.clone(),
+            };
+            let applied = if let Some(provider) = prepared.provider.as_mut() {
+                let plan = prepared
+                    .plan
+                    .as_ref()
+                    .ok_or_else(|| error("SETUP_MCP_CONFIG_CONFLICT"))?;
+                let applied = provider.apply(&plan.plan_id, plan.expected_digest.as_deref())?;
+                let inspection = provider.inspect(inspection_input).map_err(|_| {
+                    ConfigError::uncertain("not_needed", applied.backup_path.clone())
+                })?;
+                if inspection.status != InspectionStatus::Applied {
+                    return Err(ConfigError::uncertain("not_needed", applied.backup_path));
+                }
+                applied
+            } else if prepared.manually_applied {
+                // Nothing is written; the hand-applied entry must still match under the locks.
+                let inspection =
+                    McpConfig::inspect_for(prepared.input.tool_type, inspection_input)?;
+                if inspection.status != InspectionStatus::Applied {
+                    return Err(error("SETUP_MCP_CONFIG_CONFLICT"));
+                }
+                ConfigApplyResult {
+                    status: ApplyStatus::Unchanged,
+                    target_path: inspection.target_path,
+                    backup_path: None,
+                    restart_required: false,
+                }
+            } else {
+                return Err(error("SETUP_MANUAL_ACTION_REQUIRED"));
+            };
             let next = if applied.restart_required {
                 "restart_host_then_register_agent"
             } else {
@@ -465,6 +482,7 @@ pub async fn prepare(
     options: Options,
     executable: PathBuf,
 ) -> Result<Preparation> {
+    let automatic = options.mode != Mode::Manual;
     let mut prepared = tokio::task::spawn_blocking(move || {
         let _guards = check_context(&context)?;
         let input = runtime_input(&PreflightContext::from(&context), &options, &executable)?;
@@ -483,6 +501,7 @@ pub async fn prepare(
             manual,
             fingerprint,
             replace_devlink: options.mode == Mode::Replace,
+            manually_applied: false,
             devlink: executable,
         })
     })
@@ -500,6 +519,30 @@ pub async fn prepare(
             } else {
                 provider.plan(prepared.input.clone())?
             });
+        } else if automatic {
+            // Unverified Host: a rerun after the manual guidance passes as unchanged
+            // only when the target already holds exactly this profile's entry.
+            let inspection = McpConfig::inspect_for(
+                prepared.input.tool_type,
+                InspectionInput {
+                    tool_type: prepared.input.tool_type,
+                    target_path: prepared.input.target_path.clone(),
+                    broker_file: prepared.input.broker_file.clone(),
+                    executable: prepared.input.executable.clone(),
+                },
+            );
+            if inspection.is_ok_and(|inspection| inspection.status == InspectionStatus::Applied) {
+                prepared.manually_applied = true;
+                prepared.plan = Some(ConfigPlan {
+                    plan_id: String::new(),
+                    tool_type: prepared.input.tool_type,
+                    target_path: prepared.input.target_path.clone(),
+                    expected_digest: None,
+                    change: Change::Unchanged,
+                    diff: None,
+                    restart_required: false,
+                });
+            }
         }
         Ok(prepared)
     })

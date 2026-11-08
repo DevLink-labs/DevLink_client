@@ -351,6 +351,49 @@ async fn unsupported_host_returns_only_manual_guidance_without_writing_or_claimi
     assert!(!f.target().exists());
     assert_eq!(f.calls(), (1, 1));
 }
+async fn manual_application_is_reused_on_rerun(tool: ToolType) {
+    let mut f = Prepared::new(tool, "9.9.9").await;
+    let mut stages = f.stages.take().unwrap().with_mcp(f.options.clone());
+    let context = SetupContext {
+        config_path: f.app.path.clone(),
+    };
+    let StepResult::Failed(error) = stages.execute(Step::ConfigureMcp, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, ErrorCode::ManualActionRequired);
+    let manual = error.manual_config.unwrap();
+
+    // The user applies the guidance exactly; the rerun must not ask again or write.
+    fs::create_dir_all(manual.suggested_target_path.parent().unwrap()).unwrap();
+    fs::write(&manual.suggested_target_path, &manual.snippet).unwrap();
+    let modified = fs::metadata(f.target()).unwrap().modified().unwrap();
+    // A rerun is a new process, so it prepares again instead of reusing the failed stage.
+    let prepared = f.plan().await;
+    assert!(!prepared.requires_manual());
+    assert_eq!(prepared.plan().unwrap().change, Change::Unchanged);
+    let reused = prepared.apply().await.unwrap();
+    assert_eq!(reused.config.status, ApplyStatus::Unchanged);
+    assert!(reused.config.backup_path.is_none());
+    assert_eq!(reused.config.target_path, f.target());
+    assert_eq!(fs::read_to_string(f.target()).unwrap(), manual.snippet);
+    assert_eq!(
+        fs::metadata(f.target()).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(f.calls(), (1, 1));
+
+    // A hand edit that no longer matches this profile goes back to the guidance.
+    fs::write(f.target(), manual.snippet.replace("--transport", "--other")).unwrap();
+    assert!(f.plan().await.requires_manual());
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_manual_application_is_reused_on_rerun_without_writing() {
+    manual_application_is_reused_on_rerun(ToolType::Codex).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_manual_application_is_reused_on_rerun_without_writing() {
+    manual_application_is_reused_on_rerun(ToolType::ClaudeCode).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn changed_runtime_is_rejected_after_review_and_cannot_reuse_a_prior_probe() {
     let f = Prepared::new(ToolType::Codex, "0.166.0").await;
