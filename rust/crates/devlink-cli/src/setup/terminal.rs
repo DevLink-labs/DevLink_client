@@ -74,7 +74,7 @@ pub struct SetupArgs {
     /// Permit one issuance only when the existing Agent token is missing or rejected
     #[arg(long, conflicts_with = "create_agent")]
     pub issue_token: bool,
-    /// Project MCP configuration mode: apply or manual
+    /// 프로젝트 MCP 설정 모드: apply, replace(DevLink 항목만 교체), manual
     #[arg(long, value_parser = devlink_broker::setup_mcp::parse_mode)]
     pub mcp_mode: Option<devlink_broker::setup_mcp::Mode>,
     /// Explicit project Host config target; otherwise the provider chooses its fixed project file

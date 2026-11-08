@@ -30,6 +30,7 @@ devlink setup --tool codex --agent-id 34 --apply-mcp
 devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "$HOME\DevLink\mcp-server\dist\index.js" --apply-mcp
 # Host 파일은 쓰지 않고 DevLink 설정 예시와 적용 위치를 반환
 devlink setup --mcp-mode manual
+devlink setup --mcp-mode replace --apply-mcp
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.

@@ -57,8 +57,8 @@ devlink [--config <FILE>] setup status --output json
 | `agent.name` | create일 때 필수, use일 때 금지 | 중앙 표시명 |
 | `agent.roleDescription` | create일 때 선택 문자열 | 생략은 없음. use는 중앙 메타데이터를 변경하지 않음 |
 | `agent.issueToken` | use일 때 선택 boolean, 기본 false | 토큰이 없거나 무효이면 true일 때만 발급/회전. create에서는 금지. true인 호출을 네트워크 오류 후 자동 반복하지 않음 |
-| `mcp.mode` | `apply | manual`, 필수 | apply는 지정한 Host 설정 대상만 반영. manual은 설정 안내만 반환하고 종료 3 |
-| `mcp.targetPath` | apply일 때 필수 절대 경로 | 선택 도구와 일치하는 프로젝트 범위 설정 파일. 전역 파일·프로젝트 밖 경로는 거부. manual에서는 금지 |
+| `mcp.mode` | `apply | replace | manual`, 필수 | apply는 기존 DevLink 항목이 다르면 충돌로 보존. replace는 백업 후 DevLink 항목만 현재 프로필로 교체. manual은 설정 안내만 반환하고 종료 3 |
+| `mcp.targetPath` | apply·replace일 때 필수 절대 경로 | 선택 도구와 일치하는 프로젝트 범위 설정 파일. 전역 파일·프로젝트 밖 경로는 거부. manual에서는 금지 |
 | `timeoutMs` | 선택 정수, 기본 60000, 범위 30000–300000 | 비대화형 실행 전체 예산. 대화형의 사용자 입력 대기는 제외하며 네트워크/하위 단계 예산은 포함 |
 
 ID는 `1..9223372036854775807` 범위의 정규 십진 **문자열**이다. 선행 0·부호·공백은 금지하며 JS Number로 왕복하지 않는다. 중앙 숫자 ID와의 변환은 Rust가 검증해 수행한다. Agent 이름은 UTF-16 code unit 100 이하, 프로젝트 표시명 120 이하, 역할 설명 255 이하로 기존 bootstrap과 맞춘다. 이름/표시명은 공백만으로 구성할 수 없다.

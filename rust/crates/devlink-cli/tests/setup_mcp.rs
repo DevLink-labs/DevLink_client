@@ -490,6 +490,77 @@ async fn cli_requires_review_applies_explicitly_and_then_reuses_configuration_be
     assert!(result["data"].get("agentId").is_none());
     assert_eq!(f.calls(), (1, 1));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_replacement_updates_only_devlink_and_preserves_the_existing_agent() {
+    for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+        let version = if tool == ToolType::Codex {
+            "0.166.0"
+        } else {
+            "2.1.317"
+        };
+        let f = Prepared::new(tool, version).await;
+        let target = f.target();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        credentials::set_private_permissions(target.parent().unwrap()).unwrap();
+        let before: &[u8] = if tool == ToolType::Codex {
+            b"# preserve comment\nmodel='keep'\n[mcp_servers]\ndevlink={command='old',args=[]}\nother={command='other'}\n"
+        } else {
+            br#"{"editor":{"number":9007199254740993},"mcpServers":{"devlink":{"command":"old","args":[]},"other":{"command":"other"}}}"#
+        };
+        fs::write(&target, before).unwrap();
+        let profile = f.profile();
+        let input = f.app.path.parent().unwrap().join("replace-input.json");
+        fs::write(
+            &input,
+            serde_json::to_vec(&json!({
+                "schemaVersion":1,
+                "user":{"mode":"session"},
+                "team":{"id":"71"},
+                "project":{"path":f.context.project},
+                "tool":{"type":if tool == ToolType::Codex {"codex"} else {"claude-code"}},
+                "agent":{"action":"use","id":"201"},
+                "mcp":{"mode":"replace","targetPath":target}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_devlink"))
+            .arg("--config")
+            .arg(&f.app.path)
+            .env_remove("DEVLINK_TOKEN")
+            .args([
+                "setup",
+                "--non-interactive",
+                "--input",
+                input.to_str().unwrap(),
+                "--node-path",
+                f.options.node.as_ref().unwrap().to_str().unwrap(),
+                "--mcp-entry",
+                f.options.entry.as_ref().unwrap().to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+        assert_no_secrets(&output);
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let backup = result["data"]["mcpConfig"]["backupPath"].as_str().unwrap();
+        assert_eq!(fs::read(backup).unwrap(), before);
+        assert_eq!(result["data"]["connection"]["setupReady"], true);
+        assert_eq!(f.profile(), profile);
+        assert_eq!(f.calls(), (1, 1));
+        let after = fs::read_to_string(&target).unwrap();
+        assert!(after.contains("other"));
+        if tool == ToolType::Codex {
+            assert!(after.contains("# preserve comment"));
+            assert!(after.contains("model='keep'"));
+        } else {
+            assert!(after.contains("9007199254740993"));
+        }
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_mcp_options_are_rejected_before_configuration_or_central_calls() {
     let app = Fixture::new().await;

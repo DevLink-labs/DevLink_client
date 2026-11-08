@@ -23,13 +23,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum Mode {
     #[default]
     Apply,
+    Replace,
     Manual,
 }
 pub fn parse_mode(value: &str) -> std::result::Result<Mode, &'static str> {
     match value {
         "apply" => Ok(Mode::Apply),
+        "replace" => Ok(Mode::Replace),
         "manual" => Ok(Mode::Manual),
-        _ => Err("Choose apply or manual"),
+        _ => Err("Choose apply, replace or manual"),
     }
 }
 #[derive(Clone, Default)]
@@ -129,6 +131,7 @@ pub struct Preparation {
     plan: Option<ConfigPlan>,
     manual: ManualConfig,
     fingerprint: Fingerprint,
+    replace_devlink: bool,
     /// The devlink executable, for comparing installed Host hooks with this profile.
     devlink: PathBuf,
 }
@@ -412,18 +415,21 @@ pub async fn preflight(
     options: Options,
     executable: PathBuf,
 ) -> Result<()> {
-    let inspect_target = options.mode == Mode::Apply && context.mcp_automatic_supported;
+    let inspect_target = options.mode != Mode::Manual && context.mcp_automatic_supported;
+    let replace_devlink = options.mode == Mode::Replace;
     let input = tokio::task::spawn_blocking(move || {
         let input = runtime_input(&context, &options, &executable)?;
-        mcp_config::preflight(input.clone(), inspect_target)?;
+        mcp_config::preflight_with_replacement(input.clone(), inspect_target, replace_devlink)?;
         Ok::<_, ConfigError>(input)
     })
     .await
     .map_err(|_| error("SETUP_INTERNAL_ERROR"))??;
     probe_runtime(&input.executable).await?;
-    tokio::task::spawn_blocking(move || mcp_config::preflight(input, inspect_target))
-        .await
-        .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
+    tokio::task::spawn_blocking(move || {
+        mcp_config::preflight_with_replacement(input, inspect_target, replace_devlink)
+    })
+    .await
+    .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
 }
 
 /// Check paths before authentication, when the saved Host is not yet scoped.
@@ -464,7 +470,7 @@ pub async fn prepare(
         let input = runtime_input(&PreflightContext::from(&context), &options, &executable)?;
         let manual = mcp_config::manual_config(input.clone())?;
         let fingerprint = fingerprints(&context, &input)?;
-        let provider = if options.mode == Mode::Apply {
+        let provider = if options.mode != Mode::Manual {
             context.tool.verified_host().ok().map(McpConfig::new)
         } else {
             None
@@ -476,6 +482,7 @@ pub async fn prepare(
             plan: None,
             manual,
             fingerprint,
+            replace_devlink: options.mode == Mode::Replace,
             devlink: executable,
         })
     })
@@ -488,7 +495,11 @@ pub async fn prepare(
             return Err(error("SETUP_PROFILE_CONFLICT"));
         }
         if let Some(provider) = &mut prepared.provider {
-            prepared.plan = Some(provider.plan(prepared.input.clone())?);
+            prepared.plan = Some(if prepared.replace_devlink {
+                provider.plan_replacing_devlink(prepared.input.clone())?
+            } else {
+                provider.plan(prepared.input.clone())?
+            });
         }
         Ok(prepared)
     })
