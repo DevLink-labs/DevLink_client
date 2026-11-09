@@ -29,7 +29,7 @@
 | 수신 작업·요청자 알림·질문·답변의 로컬 업데이트 조회 (`get_updates`) | [local-updates.md](local-updates.md) |
 | Host 훅용 로컬 업데이트 요약 (`devlink updates-hook`) | [update-hook.md](update-hook.md) |
 
-MCP 도구의 소비자 계약·Host 설정은 [MCP 문서](../../packages/mcp-server/README.md), 중앙과의 계약 차이는 [중앙 연동 결정표](../../contracts/central/README.md)를 참고한다. Rust provider 구현과 MCP의 최종 입력 DTO 수렴(-97), 실제 Host 전체 왕복(-66)은 별도 범위다.
+MCP 도구의 소비자 계약·Host 설정은 [MCP 문서](../../packages/mcp-server/README.md), 중앙과의 현재 연동 상태는 [중앙 연동 현재 상태](../../contracts/central/current-state.md)를 참고한다. 2026-10-29 [중앙 연동 결정표](../../contracts/central/README.md)는 역사 기록이다. Rust provider 구현과 MCP의 최종 입력 DTO 수렴(-97), 실제 Host 전체 왕복(-66)은 별도 범위다.
 
 ## 과거 검증 이력
 

@@ -11,7 +11,7 @@ JSON은 MCP 측 v0.1 초안이며 실제 Rust 브로커와의 상호 검증은 �
 
 사용자는 [Agent 요청·수락·결과 등록 지침](packages/mcp-server/docs/agent-workflow.md)에서 수신자 지정부터 사용자 수락, Host의 로컬 수정·검증, 완료·실패 조회까지 확인할 수 있습니다.
 
-실제 중앙 연동의 인증·Agent bootstrap·DTO 차이와 후속 구현 조건은 [중앙 연동 결정표](contracts/central/README.md)에 정리했습니다. 확인한 develop SHA와 미제공 API를 구분하며, 기존 로컬 계약의 실제 연동 완료를 뜻하지 않습니다.
+실제 중앙 server와의 현재 연동 경로·자격·DTO와 아직 제공되지 않는 API는 [중앙 연동 현재 상태](contracts/central/current-state.md)에 정리했습니다. 기준 server SHA와 확인 방법을 함께 적었고, 실행으로 확인하지 않은 항목은 "코드 기준"으로 표시합니다. 2026-10-29의 [중앙 연동 결정표](contracts/central/README.md)는 당시 설계 결정을 보존한 역사 기록입니다.
 
 ## Git Flow
 

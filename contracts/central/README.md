@@ -1,5 +1,7 @@
 # 중앙 연동 결정표 (S15P31D108-88)
 
+> **역사 기록 (2026-11-09 표시).** 이 문서와 [adapter-decisions.json](adapter-decisions.json)은 2026-10-29 server `5891ef2` 기준의 설계 결정 기록이다. 그 뒤 server에 사용자 로그인·CSRF API와 Agent Bearer 업무 REST가 생겼고, create_task 외 6개 업무 경로가 추가됐으며 create_task의 자격도 Agent Bearer로 바뀌었다. 그래서 아래의 "없음", "결정 필요", `null` 표시는 현재 상태를 뜻하지 않는다. 일부는 지금도 미제공이다. 현재 상태는 [중앙 연동 현재 상태](current-state.md)를 본다. 이 문서는 결정 근거를 보존하려고 본문을 고치지 않는다 (GitHub Issue #89).
+
 작성일: 2026-10-29 (Asia/Seoul). **설계 산출물이며 실행 가능한 중앙 adapter나 실제 연동 완료 기록이 아니다.**
 
 | 확인 대상 | develop 기준 | 확인 방법 |
