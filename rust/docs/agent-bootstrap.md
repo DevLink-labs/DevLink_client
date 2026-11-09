@@ -1,5 +1,7 @@
 # CLI Agent bootstrap (S15P31D108-91)
 
+본인의 Git 이메일 등록·조회·삭제와 브로커의 작성자 판별은 [Git 신원 관리](git-identity.md)를 참고한다. Git 수집 기능은 별도 담당 범위다.
+
 사용자 로그인과 검증된 선택 팀을 기존 중앙 Agent API, Rust 브로커, MCP 자격 파일에 연결한다. 중앙은 Agent ID·소유자·팀의 권한 근거다. 프로젝트 경로는 사용자가 명시한 실제 로컬 디렉터리를 canonicalize해 저장하며 중앙으로 전송하지 않는다.
 
 ```powershell

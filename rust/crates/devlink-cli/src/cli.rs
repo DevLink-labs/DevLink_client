@@ -18,7 +18,7 @@ pub struct Cli {
 
 pub fn parse() -> Cli {
     let arguments: Vec<_> = std::env::args_os().collect();
-    let setup_requested = {
+    let requested_command = {
         let mut arguments = arguments.iter().skip(1);
         loop {
             match arguments.next() {
@@ -27,8 +27,8 @@ pub fn parse() -> Cli {
                     arguments.next();
                 }
                 Some(arg) if arg.to_str().is_some_and(|s| s.starts_with("--config=")) => {}
-                Some(arg) => break arg == "setup",
-                None => break false,
+                Some(arg) => break Some(arg.clone()),
+                None => break None,
             }
         }
     };
@@ -36,9 +36,19 @@ pub fn parse() -> Cli {
         Ok(cli) => cli,
         Err(error) => {
             // Invalid-value errors omit command usage, so identify the requested
-            // command before parsing. Never echo setup values; preserve legacy errors.
-            if setup_requested && error.use_stderr() {
+            // command before parsing. Never echo setup or Git identity values; preserve legacy errors.
+            if requested_command.as_deref() == Some(std::ffi::OsStr::new("setup"))
+                && error.use_stderr()
+            {
                 eprintln!("Invalid setup arguments. Run devlink setup --help for usage.");
+                std::process::exit(2);
+            }
+            if requested_command.as_deref() == Some(std::ffi::OsStr::new("git-identity"))
+                && error.use_stderr()
+            {
+                eprintln!(
+                    "Invalid Git identity arguments. Run devlink git-identity --help for usage."
+                );
                 std::process::exit(2);
             }
             error.exit()
@@ -47,6 +57,11 @@ pub fn parse() -> Cli {
 }
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Manage your Git email using the logged-in user session
+    GitIdentity {
+        #[command(subcommand)]
+        command: GitIdentityCommand,
+    },
     /// Run guided setup or inspect setup readiness
     Setup(Box<SetupArgs>),
     /// Create a configuration file without overwriting existing settings
@@ -113,6 +128,19 @@ pub enum Commands {
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
     Broker,
+}
+
+#[derive(Subcommand)]
+pub enum GitIdentityCommand {
+    /// Register or replace one Git email; hidden prompt or a single stdin line
+    Register {
+        #[arg(long)]
+        email_stdin: bool,
+    },
+    /// Show registration status and time; never reveals the email or hash
+    Status,
+    /// Delete your registration (idempotent)
+    Delete,
 }
 
 #[derive(Subcommand)]
@@ -440,6 +468,28 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
     let path = config::config_path(cli.config)?;
     match cli.command {
+        Commands::GitIdentity { command } => {
+            use devlink_broker::git_identity;
+            let result = match command {
+                GitIdentityCommand::Register { email_stdin } => {
+                    use std::io::IsTerminal;
+                    anyhow::ensure!(
+                        email_stdin
+                            || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()),
+                        "Use --email-stdin or an interactive terminal for Git email input"
+                    );
+                    let email = secret_input("Git email", 1024, email_stdin).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Cannot read Git email; use --email-stdin or an interactive terminal"
+                        )
+                    })?;
+                    git_identity::register(&path, &email).await?
+                }
+                GitIdentityCommand::Status => git_identity::status(&path).await?,
+                GitIdentityCommand::Delete => git_identity::delete(&path).await?,
+            };
+            print_json(&serde_json::to_value(result)?)?;
+        }
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
