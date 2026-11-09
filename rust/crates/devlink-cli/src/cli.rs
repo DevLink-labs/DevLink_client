@@ -229,6 +229,10 @@ pub enum AgentCommand {
         project: PathBuf,
         #[arg(long)]
         role_description: Option<String>,
+        #[arg(long, default_value = "OTHER", value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: devlink_broker::agent_metadata::AgentPart,
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Vec<String>,
     },
     /// List the selected team's Agents; only your own ID can be bound
     List,
@@ -521,6 +525,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     project_name,
                     project,
                     role_description,
+                    part,
+                    roles,
                 } => {
                     agent_profile::create(
                         &path,
@@ -530,6 +536,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                             project_name,
                             project,
                             role_description,
+                            part,
+                            roles,
                         },
                     )
                     .await?

@@ -58,6 +58,12 @@ pub struct SetupArgs {
     /// Optional Agent role description
     #[arg(long, value_name = "DESCRIPTION")]
     pub role_description: Option<String>,
+    /// 담당 파트: FRONTEND, BACKEND, INFRA, OTHER (기본 OTHER)
+    #[arg(long, value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+    pub part: Option<devlink_broker::agent_metadata::AgentPart>,
+    /// 역할 태그 (쉼표 구분 또는 반복 지정, 최대 10개)
+    #[arg(long, value_name = "TAG", value_delimiter = ',')]
+    pub roles: Vec<String>,
     /// Select codex or claude-code; otherwise reuse a valid selection or choose
     #[arg(long, value_name = "TYPE", value_parser = devlink_broker::tool_discovery::parse_tool)]
     pub tool: Option<devlink_broker::sessions::ToolType>,
@@ -69,7 +75,7 @@ pub struct SetupArgs {
     pub create_agent: bool,
     /// Explicit owned Agent ID, including recovery after an uncertain creation
     #[arg(long, value_name = "ID", value_parser = parse_team_id,
-        conflicts_with_all = ["agent_name", "project_name", "role_description"])]
+        conflicts_with_all = ["agent_name", "project_name", "role_description", "part", "roles"])]
     pub agent_id: Option<u64>,
     /// Permit one issuance only when the existing Agent token is missing or rejected
     #[arg(long, conflicts_with = "create_agent")]
@@ -208,6 +214,8 @@ pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
             project_name: args.project_name,
             agent_name: args.agent_name,
             role_description: args.role_description,
+            part: args.part,
+            roles: (!args.roles.is_empty()).then_some(args.roles),
         });
     let result = super::flow::run_controlled(
         &context,
@@ -245,6 +253,8 @@ async fn run_batch<W: Write>(
         || args.project_name.is_some()
         || args.agent_name.is_some()
         || args.role_description.is_some()
+        || args.part.is_some()
+        || !args.roles.is_empty()
         || args.tool.is_some()
         || args.tool_path.is_some()
         || args.create_agent
@@ -750,7 +760,57 @@ impl<W: Write> Renderer<W> {
 }
 
 struct TerminalAgentInput;
+const ROLE_INPUT_LIMIT: u64 = 2048;
+
+fn parse_role_tags(value: &str) -> Result<Vec<String>, AgentInputError> {
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    let value = value.strip_suffix('\r').unwrap_or(value);
+    let roles = if value.trim().is_empty() {
+        Vec::new()
+    } else {
+        value.split(',').map(str::to_owned).collect()
+    };
+    devlink_broker::agent_metadata::normalize_roles(&roles).map_err(|_| AgentInputError::Invalid)
+}
+
 impl AgentInput for TerminalAgentInput {
+    async fn routing_metadata(
+        &mut self,
+        part: Option<devlink_broker::agent_metadata::AgentPart>,
+        roles: Option<Vec<String>>,
+    ) -> Result<(devlink_broker::agent_metadata::AgentPart, Vec<String>), AgentInputError> {
+        tokio::task::spawn_blocking(move || {
+            use devlink_broker::agent_metadata::{AgentPart, normalize_roles};
+            let part = match part {
+                Some(part) => part,
+                None => {
+                    let value =
+                        read_agent_input("Agent part (FRONTEND/BACKEND/INFRA/OTHER) [OTHER]: ")?;
+                    if value.trim().is_empty() {
+                        AgentPart::default()
+                    } else {
+                        AgentPart::parse(value.trim()).map_err(|_| AgentInputError::Invalid)?
+                    }
+                }
+            };
+            let roles = match roles {
+                Some(roles) => roles,
+                None => {
+                    let value = read_agent_input_with_limit(
+                        "Role tags (comma-separated, optional): ",
+                        ROLE_INPUT_LIMIT,
+                    )?;
+                    parse_role_tags(&value)?
+                }
+            };
+            Ok((
+                part,
+                normalize_roles(&roles).map_err(|_| AgentInputError::Invalid)?,
+            ))
+        })
+        .await
+        .map_err(|_| AgentInputError::ReadFailed)?
+    }
     fn available(&self) -> bool {
         self.interactive()
     }
@@ -879,8 +939,11 @@ fn write_public_text(
 }
 
 fn read_agent_input(prompt: &str) -> Result<String, AgentInputError> {
+    read_agent_input_with_limit(prompt, 512)
+}
+
+fn read_agent_input_with_limit(prompt: &str, limit: u64) -> Result<String, AgentInputError> {
     use std::io::{BufRead, Read};
-    const MAX_INPUT: u64 = 512;
     {
         let mut stderr = std::io::stderr().lock();
         write!(stderr, "{prompt}")
@@ -890,13 +953,13 @@ fn read_agent_input(prompt: &str) -> Result<String, AgentInputError> {
     let mut bytes = Vec::new();
     let n = std::io::stdin()
         .lock()
-        .take(MAX_INPUT)
+        .take(limit)
         .read_until(b'\n', &mut bytes)
         .map_err(|_| AgentInputError::ReadFailed)?;
     if n == 0 {
         return Err(AgentInputError::Cancelled);
     }
-    if n as u64 >= MAX_INPUT {
+    if n as u64 >= limit {
         return Err(AgentInputError::Invalid);
     }
     String::from_utf8(bytes).map_err(|_| AgentInputError::Invalid)
@@ -957,6 +1020,20 @@ impl McpInput for TerminalMcpInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_role_tags_accept_all_ten_utf16_boundaries_without_counting_crlf() {
+        let roles: Vec<_> = (0..10).map(|i| format!("{i}{}", "가".repeat(63))).collect();
+        let line = format!("{}\r\n", roles.join(","));
+        assert!(line.len() > 512 && line.len() < ROLE_INPUT_LIMIT as usize);
+        assert_eq!(parse_role_tags(&line).unwrap(), roles);
+        assert_eq!(
+            parse_role_tags(&format!("{}\n", "😀".repeat(32))).unwrap(),
+            vec!["😀".repeat(32)]
+        );
+        assert!(parse_role_tags(&format!("{}\n", "😀".repeat(33))).is_err());
+        assert!(parse_role_tags("\r\n").unwrap().is_empty());
+    }
 
     #[test]
     fn secret_input_distinguishes_cancellation_io_and_invalid_values() {

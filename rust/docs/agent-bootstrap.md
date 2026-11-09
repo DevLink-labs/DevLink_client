@@ -6,6 +6,7 @@
 devlink --config C:\work\profile\config.json auth login --email me@example.test
 devlink --config C:\work\profile\config.json team select --id 12
 devlink --config C:\work\profile\config.json agent create --name "My Agent" --tool codex --project-name "DevLink" --project C:\work\DevLink
+devlink --config C:\work\profile\config.json agent create --name "API Agent" --tool codex --project-name "DevLink" --project C:\work\DevLink --part BACKEND --roles API,인증
 devlink --config C:\work\profile\config.json agent status
 devlink --config C:\work\profile\config.json start
 devlink --config C:\work\profile\config.json mcp path
@@ -13,6 +14,8 @@ devlink --config C:\work\profile\config.json stop
 ```
 
 `--tool`은 `codex` 또는 `claude-code`다. `--role-description`은 선택 입력이다. `agent list`는 검증된 선택 팀의 목록을 표시한다. 생성/바인딩/발급은 로그인 사용자, 현재 서버 멤버십, 선택 팀을 매번 확인하며 다른 팀이나 같은 팀의 다른 소유자 Agent를 바인딩하지 않는다. 팀 selector만 바꾸면 기존 Agent 토큰으로 다른 팀을 가장할 수 없으며 기동 시 불일치를 거부한다.
+
+`agent create`의 `--part`는 `FRONTEND/BACKEND/INFRA/OTHER`를 허용하며 생략 시 `OTHER`다. `--roles`는 쉼표 구분 또는 반복 옵션으로 입력하고 생략 시 `[]`다. 태그는 정규화 전 최대 10개·각 UTF-16 64자로 제한하며, 공백만인 태그를 거부한다. 서버와 동일하게 앞뒤 U+0000–U+0020과 중복을 제거한 뒤 등록한다. `roleDescription`은 별도로 유지하며 담당 정보는 생성·목록·상태 응답과 로컬 프로필에 포함한다. 서버 메타데이터 API 변경 반영이 필요하다.
 
 ## 단일 생성과 복구
 
