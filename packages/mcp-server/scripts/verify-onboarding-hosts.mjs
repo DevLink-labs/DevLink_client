@@ -88,7 +88,7 @@ async function configure(p){activeStep=p.tool+'/configure';
  p.wrapper=join(p.folder,'devlink-onboarding-'+randomUUID()+'.mjs');await writeFile(p.wrapper,`import ${JSON.stringify(pathToFileURL(entry).href)};\n`,{mode:0o600});
  p.target=p.tool==='codex'?join(p.folder,'.codex','config.toml'):join(p.folder,'.mcp.json');
  const input={toolType:p.tool,projectPath:p.folder,targetPath:p.target,brokerFile:join(p.folder,'.devlink-runtime','broker.json'),executable:{command:process.execPath,args:[p.wrapper,'--transport','stdio']}};
- const started=Date.now(),output=JSON.parse(await run(provider,['--apply'],p.folder,JSON.stringify({hostVersion:p.tool==='codex'?'0.166.0':'2.1.310',input})));assert.equal(output.inspection.status,'applied');
+ const started=Date.now(),output=JSON.parse(await run(provider,['--apply'],p.folder,JSON.stringify({hostVersion:p.tool==='codex'?'0.166.0':'2.1.317',input})));assert.equal(output.inspection.status,'applied');
  p.configApplyMs=Date.now()-started;p.configHash=hash(await readFile(p.target));safe(await readFile(p.target,'utf8'));
 }
 const normal='Call only these DevLink MCP tools, sequentially, with empty object arguments: get_my_context, get_connection_status, register_agent, get_connection_status, get_my_context, register_agent. Do not supply name/toolType/role. Do not use any other tools or read files, secrets, shell or network. Finish after the six calls, even if any returns an error. Briefly state completion.';
@@ -148,7 +148,7 @@ async function localSession(p){
 let failure,baseline;const cleanup={brokers:true,fixture:false,proxy:false};
 try{
  for(const [label,command]of [['codex',process.env.DEVLINK_TEST_CODEX??'codex.exe'],['claude',process.env.DEVLINK_TEST_CLAUDE??'claude.exe']]){const path=isAbsolute(command)?command:(await run('where.exe',[command],root)).trim().split(/\r?\n/)[0];binaries[label]={path,sha256:await fileHash(path)};}
- versions.codex=(await run(binaries.codex.path,['--version'],root)).trim();versions.claude=(await run(binaries.claude.path,['--version'],root)).trim();assert.equal(versions.codex,'codex-cli 0.166.0');assert.equal(versions.claude,'2.1.310 (Claude Code)');
+ versions.codex=(await run(binaries.codex.path,['--version'],root)).trim();versions.claude=(await run(binaries.claude.path,['--version'],root)).trim();assert.equal(versions.codex,'codex-cli 0.166.0');assert.equal(versions.claude,'2.1.317 (Claude Code)');
  const a=await prepare('codex','codex'),b=await prepare('claude','claude_code');
  activeStep='team/preparation';const team=await json(a,['team','create','--name','Synthetic onboarding '+randomUUID()]);secrets.push(team.inviteCode);await raw(a,['team','select','--id',String(team.teamId)]);await raw(b,['team','join','--code-stdin'],team.inviteCode+'\n');await raw(b,['team','select','--id',String(team.teamId)]);
  await configure(a);await configure(b);activeStep='preparation/request-baseline';baseline={...counters};assert.deepEqual(baseline,{agentCreates:2,tokenIssues:2,agentMutations:4});

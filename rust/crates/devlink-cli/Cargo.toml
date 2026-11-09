@@ -28,5 +28,6 @@ libc.workspace = true
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
+reqwest.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true

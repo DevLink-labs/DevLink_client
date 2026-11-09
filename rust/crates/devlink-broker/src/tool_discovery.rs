@@ -101,6 +101,8 @@ impl Default for ToolSearch {
         if let Some(appdata) = std::env::var_os("APPDATA") {
             directories.push(PathBuf::from(appdata).join("npm"));
         }
+        #[cfg(windows)]
+        directories.extend(desktop_bundled_claude_dir());
         Self {
             directories,
             timeout: Duration::from_secs(5),
@@ -263,6 +265,40 @@ impl ToolSearch {
             args: Vec::new(),
         })
     }
+}
+
+/// The Claude desktop app ships Claude Code without adding it to PATH:
+/// `%LOCALAPPDATA%\Claude-Data\<package>\claude-code\<version>\<build>\claude.exe`.
+/// Only the newest version is returned, after every PATH and standard install dir.
+#[cfg(windows)]
+fn desktop_bundled_claude_dir() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Claude-Data");
+    let mut newest: Option<(Vec<u64>, PathBuf)> = None;
+    for package in std::fs::read_dir(root).ok()?.flatten() {
+        let Ok(versions) = std::fs::read_dir(package.path().join("claude-code")) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            let Some(key) = version.file_name().to_str().and_then(|name| {
+                let parts: Option<Vec<u64>> = name.split('.').map(|p| p.parse().ok()).collect();
+                parts.filter(|parts| parts.len() == 3)
+            }) else {
+                continue;
+            };
+            let Ok(builds) = std::fs::read_dir(version.path()) else {
+                continue;
+            };
+            for build in builds.flatten() {
+                let dir = build.path();
+                if dir.join("claude.exe").is_file()
+                    && newest.as_ref().is_none_or(|(best, _)| key > *best)
+                {
+                    newest = Some((key.clone(), dir));
+                }
+            }
+        }
+    }
+    newest.map(|(_, dir)| dir)
 }
 
 fn package_entry(tool: ToolType) -> &'static str {

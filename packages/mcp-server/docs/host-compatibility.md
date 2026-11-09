@@ -20,7 +20,7 @@ Jira 완료 판정에는 실제 Rust에 등록 Agent 식별자가 전달되는 �
 | OS / 전송 | Windows / stdio |
 | Node.js | 24.18.0 |
 | Codex CLI | 0.165.0-alpha.1.2 |
-| Claude Code | 2.1.310 |
+| Claude Code | 2.1.317 |
 | Claude 모델 / effort | 실제 init 모델 `claude-opus-5-5` / CLI 요청 effort `high` (init에 effort 미표시) |
 | Codex 모델 | CLI 기본값, JSONL에 모델 ID가 없어 특정 모델 검증으로 표기하지 않음 |
 
