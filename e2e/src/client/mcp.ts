@@ -30,6 +30,16 @@ export class McpSession {
     return callTool(this.session.client, name, args, code);
   }
 
+  /** Calls a tool with arguments its input schema must reject before the broker; returns whether it did. */
+  async rejectsInput(name: string, args: Record<string, unknown>): Promise<boolean> {
+    try {
+      const result = await this.session.client.callTool({ name, arguments: args });
+      return result.isError === true && result.structuredContent === undefined;
+    } catch (error: any) {
+      return error?.code === -32602;
+    }
+  }
+
   async close() {
     if (this.closed) return;
     this.closed = true;

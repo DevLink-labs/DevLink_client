@@ -366,6 +366,40 @@ impl TaskClient {
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
+    /// S15P31D108-188: read-only central Agent recommendation for the verified team.
+    /// `question` and `repo_key` must already satisfy `agent_recommendations`.
+    pub async fn find_agents(
+        &self,
+        actor: &Principal,
+        question: &str,
+        repo_key: Option<&str>,
+    ) -> Result<Value, TaskError> {
+        tokio::time::timeout(self.timeout, async {
+            // As in list_agents: the credential must still be this actor's Agent
+            // before its team selects the central path.
+            let agent = PublicAgent::decode(self.read("/api/v1/agents/me").await?)?;
+            if agent.owner_user_id.to_string() != actor.user_id.as_str()
+                || agent.team_id.to_string() != actor.team_id.as_str()
+                || actor
+                    .agent_id
+                    .as_ref()
+                    .is_none_or(|id| id.as_str() != agent.agent_id.to_string())
+            {
+                return Err(TaskError::rejected("FORBIDDEN", 403));
+            }
+            let body = crate::agent_recommendations::request_body(question, repo_key);
+            let (status, envelope) = self
+                .request(
+                    &format!("/api/v1/teams/{}/agents/recommendations", agent.team_id),
+                    Some(body),
+                )
+                .await?;
+            crate::agent_recommendations::decode(status, envelope, agent.agent_id)
+        })
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
+    }
+
     async fn read(&self, path: &str) -> Result<Value, TaskError> {
         let (status, envelope) = self.request(path, None).await?;
         if status != 200 || !envelope.success {

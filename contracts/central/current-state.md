@@ -87,7 +87,7 @@ client의 오류 매핑은 `task_client.rs`에 있다.
 | `POST /tasks/{taskId}/questions`, `POST /tasks/{taskId}/answers` | Agent Bearer. 새 메시지 201, 같은 키 재생 200 | `task_operations.rs` (S15P31D108-166) |
 | `GET /agents/me/task-messages?cursor=&limit=` (기본 50) | Agent Bearer | `task_messages.rs` |
 | `GET /tasks/{taskId}/events` | Agent Bearer | 호출하지 않음 |
-| `POST /teams/{teamId}/agents/recommendations` | Agent Bearer | 호출하지 않음 |
+| `POST /teams/{teamId}/agents/recommendations` | Agent Bearer | `task_client.rs`·`agent_recommendations.rs` (MCP `find_agent`, S15P31D108-188) |
 | `POST /teams`, `GET /teams`, `GET /teams/{id}`, `GET /teams/{id}/members`, `POST /teams/{id}/invites`, `POST /teams/join` | 사용자 세션·CSRF | `teams.rs` (invites는 호출하지 않음) |
 | `POST /agents/teams/{teamId}`, `GET /agents/teams/{teamId}`(헤더 없음), `GET·PATCH·DELETE /agents/{agentId}`, `POST /agents/{agentId}/token` | 사용자 세션·CSRF | `agent_profile.rs`·`agent_profile/` (DELETE는 호출하지 않음) |
 | `GET /web/teams/{teamId}/tasks`, `/web/teams/{teamId}/tasks/{taskId}`, `/web/teams/{teamId}/tasks/{taskId}/events` | 사용자 세션. 팀 멤버여야 하고, 상세·이력은 요청 또는 수신 Agent를 소유한 사용자만 본다 | client는 호출하지 않음 (웹 화면용) |

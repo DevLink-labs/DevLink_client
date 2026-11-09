@@ -11,6 +11,7 @@ export function recoveryAdvice(fault: BrokerFault, operation?: string): { stage:
   if (['BROKER_FORBIDDEN', 'BROKER_CONTEXT_INVALID', 'VALIDATION_FAILED'].includes(fault.code)) return { stage: 'identity', nextActions: ['inspect_profile_then_rebind'] };
   if (['SESSION_CONFLICT', 'SESSION_REPLACED'].includes(fault.code)) return { stage: 'binding', nextActions: ['inspect_connection_owner'] };
   if (['SESSION_EXPIRED', 'AGENT_UNREGISTERED'].includes(fault.code)) return { stage: 'binding', nextActions: ['register_agent'] };
+  if (fault.code === 'GIT_ROUTING_UNAVAILABLE') return { stage: 'central', nextActions: ['check_network_then_retry'] };
   if (fault.code === 'CENTRAL_RESULT_UNKNOWN') return { stage: 'registration', nextActions: ['inspect_owned_agents_then_use'] };
   if (fault.code.startsWith('CENTRAL_')) return { stage: 'central', nextActions: ['check_network_then_retry'] };
   if (fault.category === 'transport') return { stage: 'broker', nextActions: ['inspect_local_broker'] };
