@@ -4,7 +4,7 @@
 //! 동일한 클라이언트가 동일한 requestId로 재요청할 경우 기발급된 동일 멱등키를 재사용하여 중복 작업을 방지합니다.
 
 use crate::{
-    config, credentials,
+    config, credentials, private_file,
     sessions::{Identifier, Principal},
     task_client::{CreateTaskCommand, TaskError, numeric_id},
 };
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -21,7 +21,7 @@ use std::{
 /// 최대 보관 요청 수 (1,024건)
 const MAX_RECORDS: usize = 1024;
 /// 로그 파일 최대 크기 (64 MB)
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// 영속 저장되는 개별 작업 생성 요청 레코드
 #[derive(Clone, Serialize, Deserialize)]
@@ -99,12 +99,9 @@ impl TaskRequests {
         let records = if exists {
             let mut bytes = Vec::new();
             File::open(&path)?
-                .take(MAX_BYTES + 1)
+                .take(MAX_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)?;
-            ensure!(
-                bytes.len() as u64 <= MAX_BYTES,
-                "Task request log is too large"
-            );
+            ensure!(bytes.len() <= MAX_BYTES, "Task request log is too large");
             let snapshot: Snapshot = serde_json::from_slice(&bytes)
                 .map_err(|_| anyhow::anyhow!("Invalid task request log"))?;
             ensure!(
@@ -278,12 +275,13 @@ impl TaskRequests {
             }
             let mut records = store.records.clone();
             records.push(incoming.clone());
-            if persist(
+            if private_file::write(
                 &store.path,
                 &Snapshot {
                     schema_version: 1,
                     records: records.clone(),
                 },
+                MAX_BYTES,
             )
             .is_err()
             {
@@ -324,27 +322,6 @@ fn valid_origin(value: &str) -> bool {
             && url.path() == "/"
             && url.as_str() == value
     })
-}
-
-fn persist(path: &Path, snapshot: &Snapshot) -> Result<()> {
-    let bytes = serde_json::to_vec(snapshot)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_BYTES,
-        "Task request log is too large"
-    );
-    let parent = path.parent().context("Task request log has no parent")?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".task-request-")
-        .tempfile_in(parent)?;
-    credentials::set_private_permissions(temp.path())?;
-    temp.write_all(&bytes)?;
-    temp.as_file().sync_all()?;
-    credentials::verify_private_permissions(temp.path())?;
-    temp.persist(path)
-        .map_err(|_| anyhow::anyhow!("Cannot replace task request log"))?;
-    #[cfg(unix)]
-    File::open(parent)?.sync_all()?;
-    Ok(())
 }
 
 fn validation() -> TaskError {
