@@ -23,7 +23,10 @@ test("S15 find_agent relays the central recommendation @p1", async ({ seedTeam, 
     expect(candidate.matchedRoles).toEqual(["로그인"]);
     expect(candidate.score).toBeGreaterThan(0);
     expect(candidate.scores.role).toBeGreaterThan(0);
-    expect(["AVAILABLE", "NOT_COLLECTED"]).toContain(found.gitCoverage.state);
+    // No Git collection exists yet (IDX-3-01/02): role-only scoring, reported apart from missing evidence.
+    expect(found.gitCoverage).toEqual({ state: "NOT_COLLECTED", reason: "NO_TEAM_REPOSITORIES", workingState: "NOT_COLLECTED" });
+    expect(candidate.scores).toEqual({ role: 20, git: 0, working: 0, frequency: 0, recency: 0 });
+    expect(candidate.relatedFiles).toEqual([]);
   });
 
   await test.step("an unrelated question returns reference candidates without a match", async () => {
