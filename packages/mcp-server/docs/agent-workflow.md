@@ -15,17 +15,14 @@ DevLink 도구는 등록·조회·상태·결과 전달을 맡는다. 로컬 파
 
 ## 1. 등록하고 수신자를 지정한다
 
-CLI로 Agent를 생성·토큰 발급한 프로필에서 `register_agent`로 기존 Agent 확인·세션 연결을 수행하고 반환된 `data.agentId`를 확인한다. name과 toolType은 CLI에서 생성한 중앙 Agent와 정확히 같아야 한다. role은 동일한 roleDescription을 알고 있는 경우에만 넣고 보통 생략한다. 아래 이름은 합성 예제이므로 실제 CLI Agent 이름으로 교체한다. Codex의 toolType은 `codex`, Claude Code는 `claude_code`다. `userId/teamId/발신 agentId/context`를 호출 인자에 임의로 추가하지 않는다. 신원은 브로커의 인증 세션이 제공한다. `recipientAgentId`는 사용자가 지정한 수신 대상이다.
+CLI(`devlink setup` 등)로 Agent를 생성·토큰 발급한 프로필에서 [온보딩 3단계](onboarding.md#connection-sequence-three-steps)대로 `get_connection_status({})` → `get_my_context({})` → `register_agent({})`를 호출한다. `register_agent`는 기존 Agent 확인·세션 연결이며, 반환된 `data.agentId`가 `get_my_context`의 `principal.agentId`와 같은지 확인한다. 인자는 비워 둔다. name·toolType·role은 각각 선택이며, 넣으면 중앙 Agent와 정확히 같아야 하고 다르면 `VALIDATION_FAILED`로 거부된다(값을 고치거나 Agent를 만들지 않는다). Codex의 toolType은 `codex`, Claude Code는 `claude_code`다. `userId/teamId/발신 agentId/context`를 호출 인자에 임의로 추가하지 않는다. 신원은 브로커의 인증 세션이 제공한다. `recipientAgentId`는 사용자가 지정한 수신 대상이다.
 
-<!-- example:registerCodex -->
+<!-- example:register -->
 ```json
-{
-  "name": "MVP Codex",
-  "toolType": "codex"
-}
+{}
 ```
 
-위 JSON은 `register_agent`의 arguments다. Claude 예제와 나머지 입력의 원본은 [workflow.json](../examples/workflow.json)에 있다. 이 도구는 중앙 Agent를 새로 생성하거나 수정하지 않는다. 등록을 매번 반복하지 않으며, 프로필·토큰을 바꾸면 CLI에서 명시적으로 설정하고 MCP 프로세스를 재시작한다.
+위 JSON은 `register_agent`의 arguments다. 메타데이터를 함께 대조하는 선택 예제와 나머지 입력의 원본은 [workflow.json](../examples/workflow.json)에 있다. 이 도구는 중앙 Agent를 새로 생성하거나 수정하지 않는다. 등록을 매번 반복하지 않으며, 프로필·토큰을 바꾸면 CLI에서 명시적으로 설정하고 MCP 프로세스를 재시작한다.
 
 `list_agents({})`로 같은 팀의 목록을 확인한다. 사용자가 지정한 이름·소유자·도구 유형을 반환된 정보 범위에서 실제 Agent ID와 대조한다. 누락된 소유자·필드를 추측하지 않는다. ID가 이미 정확히 지정되었다면 확인에 사용한다. 동명이인이나 대상 누락으로 ID를 특정할 수 없으면 그 선택만 사용자에게 요청한다. 가용성·역할 점수로 Agent를 자동 선택하거나 다른 수신자에게 자동 재할당하지 않는다.
 

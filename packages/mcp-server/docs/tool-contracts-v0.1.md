@@ -10,7 +10,7 @@
 
 ```json
 {
-  "register_agent": {"name":"MCP worker","toolType":"codex"},
+  "register_agent": {},
   "list_agents": {},
   "update_agent": {"projectName":"DevLink client","roleDescription":"MCP 담당"},
   "create_task": {"recipientAgentId":"202","title":"인터페이스 검토","description":"계약 초안을 확인해주세요","taskContext":"관련 Jira: S15P31D108-60"},
