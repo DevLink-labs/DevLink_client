@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "합성 사용 예제. 일괄 실행 스크립트가 아니다. 실제 사용 시 각 calls 항목의 arguments만 사용하고 ID·프로젝트·검증 기록을 실제 값으로 바꾼다. 등록은 register 항목(register_agent({}))을 쓴다. registerWithMetadataCheck는 선택 예제이며 name·toolType을 실제 CLI Agent 값으로 바꾸지 않으면 VALIDATION_FAILED가 된다. complete와 fail은 대안이며 모두 호출하지 않는다.",
+  "note": "합성 사용 예제. 일괄 실행 스크립트가 아니다. 실제 사용 시 각 calls 항목의 arguments만 사용하고 ID·프로젝트·검증 기록을 실제 값으로 바꾼다. 등록은 register 항목(register_agent({}))을 쓴다. registerWithMetadataCheck는 선택 예제이며 name·toolType을 실제 CLI Agent 값으로 바꾸지 않으면 VALIDATION_FAILED가 된다. complete와 fail은 대안이며 모두 호출하지 않는다. findAgent는 수신자를 모를 때만 쓰며, 결과 후보 중 사용자가 고른 agentId를 create의 recipientAgentId로 넣는다.",
   "calls": {
     "register": {
       "name": "register_agent",
@@ -16,6 +16,12 @@
     "listAgents": {
       "name": "list_agents",
       "arguments": {}
+    },
+    "findAgent": {
+      "name": "find_agent",
+      "arguments": {
+        "question": "로그인 화면에서 이메일 형식 검사를 맡은 담당자"
+      }
     },
     "create": {
       "name": "create_task",
