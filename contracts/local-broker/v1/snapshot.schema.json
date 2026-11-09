@@ -136,6 +136,8 @@
             "TASK_SAVE_FAILED",
             "TASK_CONVERSATION_UNAVAILABLE",
             "INVALID_QUESTION_REFERENCE",
+            "USER_LOGIN_REQUIRED",
+            "LOCAL_ACCOUNT_BUSY",
             "RESOURCE_NOT_FOUND",
             "REQUEST_KEY_CONFLICT",
             "BROKER_STORAGE_FAILED",

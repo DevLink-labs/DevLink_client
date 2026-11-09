@@ -50,6 +50,6 @@ debug 로그는 서버가 생성한 UUID requestId, 허용된 operation, 고정�
 
 `npm --prefix packages/mcp-server run check`와 `npm --prefix packages/mcp-server test`로 타입·계약 drift·실제 stdio와 SDK·가짜 브로커를 검증한다. 새 검증은 malformed principal, bind 신원 변경, 동시 등록, 오래된 응답, lease 소실, 두 Host 프로필 분리, 토큰 교체 후 재시작, 잘못된 파일/권한/링크, 프록시 우회와 비밀 비노출을 포함한다.
 
-현재 Rust의 `/v1/sessions`, bind/heartbeat/delete, 업무 route, 프로필별 localToken 발행·검증 및 중앙의 user/team/Agent 연결은 구현 전이다. 따라서 두 실제 Host가 Rust와 중앙 서버를 거쳐 구분되는 -62 수용 기준은 미검증이다. 로컬 테스트 통과나 스토리 커밋만으로 Jira Done 처리하지 않는다.
+이 절을 작성한 2026-10-28에는 Rust의 `/v1/sessions`, bind/heartbeat/delete, 업무 route, 프로필별 localToken 발행·검증 및 중앙의 user/team/Agent 연결이 구현 전이었다. 2026-11-09 갱신: 이후 Rust 세션 API(-92)·업무 중계와 중앙 연결이 구현됐다. 실제 Rust·중앙·Host에서 무엇을 확인했는지는 [중앙 왕복 검증](central-roundtrip.md)과 [두 Host 온보딩 검증](onboarding-host-verification.md)을 따른다. 로컬 테스트 통과나 스토리 커밋만으로 Jira Done 처리하지 않는다.
 
 2026-10-28 갱신: -63의 [공통 오류·시간 제한 계약](error-contract.md)에서 업무 403과 명시적 local_auth 거부를 구분했다. 업무 BROKER_FORBIDDEN은 세션을 영구 중단하지 않고 로컬 LOCAL_AUTH_FORBIDDEN은 중단한다. requestKey·원본 요청 ID 보존과 전체 시간 예산을 추가했으며 실제 Rust·중앙 계약 검증은 남아 있다.

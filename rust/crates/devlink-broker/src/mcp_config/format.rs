@@ -21,6 +21,15 @@ pub(super) fn merge(
     before: Option<&[u8]>,
     wanted: &Value,
 ) -> Result<(Change, Vec<u8>)> {
+    merge_with_replacement(tool, before, wanted, false)
+}
+
+pub(super) fn merge_with_replacement(
+    tool: ToolType,
+    before: Option<&[u8]>,
+    wanted: &Value,
+    replace_devlink: bool,
+) -> Result<(Change, Vec<u8>)> {
     let change = if before.is_none() {
         Change::Create
     } else {
@@ -44,14 +53,16 @@ pub(super) fn merge(
             if let Some(existing) = servers.get("devlink") {
                 let existing: Value =
                     serde_json::from_str(existing.get()).map_err(|_| conflict())?;
-                return Ok((
-                    if &existing == wanted {
-                        Change::Unchanged
-                    } else {
-                        Change::Conflict
-                    },
-                    before.unwrap_or_default().to_vec(),
-                ));
+                if &existing == wanted || !replace_devlink {
+                    return Ok((
+                        if &existing == wanted {
+                            Change::Unchanged
+                        } else {
+                            Change::Conflict
+                        },
+                        before.unwrap_or_default().to_vec(),
+                    ));
+                }
             }
             servers.insert(
                 "devlink".into(),
@@ -81,14 +92,17 @@ pub(super) fn merge(
                 .as_table_like_mut()
                 .ok_or_else(|| ConfigError::new("SETUP_MCP_CONFIG_CONFLICT"))?;
             if let Some(existing) = servers.get("devlink") {
-                return Ok((
-                    if toml_json(existing).as_ref() == Some(wanted) {
-                        Change::Unchanged
-                    } else {
-                        Change::Conflict
-                    },
-                    before.unwrap_or_default().to_vec(),
-                ));
+                let unchanged = toml_json(existing).as_ref() == Some(wanted);
+                if unchanged || !replace_devlink {
+                    return Ok((
+                        if unchanged {
+                            Change::Unchanged
+                        } else {
+                            Change::Conflict
+                        },
+                        before.unwrap_or_default().to_vec(),
+                    ));
+                }
             }
             servers.insert("devlink", toml_edit::Item::Value(to_toml(wanted)?));
             Ok((change, doc.to_string().into_bytes()))

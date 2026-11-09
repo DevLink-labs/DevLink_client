@@ -30,6 +30,7 @@ devlink setup --tool codex --agent-id 34 --apply-mcp
 devlink setup --node-path "C:\Program Files\nodejs\node.exe" --mcp-entry "$HOME\DevLink\mcp-server\dist\index.js" --apply-mcp
 # Host 파일은 쓰지 않고 DevLink 설정 예시와 적용 위치를 반환
 devlink setup --mcp-mode manual
+devlink setup --mcp-mode replace --apply-mcp
 ```
 
 전역 `--config`는 명령 앞/뒤 모두 기존 파서를 통해 전달되며, 공백·한글 경로도 지원한다. 생략 시 기존 `$HOME/.devlink/config.json`을 사용한다.
@@ -619,7 +620,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 - Node 24 이상이 필요하다. `--node-path` → 선택 Host의 Node 실행 경로 → PATH의 절대 경로 순으로 찾는다. MCP 진입점은 `--mcp-entry` → CLI 옆 `mcp-server/dist/index.js` → CLI 위치에서 확인한 개발 checkout의 `packages/mcp-server/dist/index.js` 순이다. 현재 작업 폴더나 빌드 PC 경로를 실행 경로로 쓰지 않는다. 개발 checkout은 `npm.cmd --prefix packages/mcp-server run build`로 먼저 빌드한다. 다운로드·설치·배포 패키지 제작은 수행하지 않는다.
 - 실행 전 경로·권한을 확인하고 Node 버전과 MCP stdio `initialize`를 제한 시간 5초/출력 16 KiB 안에서 확인한다. 검사용 프로세스에는 DevLink 자격 환경변수와 Node 실행 옵션을 전달하지 않는다. AI 작업·업무 도구·Host 세션 등록을 호출하지 않는다.
-- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 / Claude Code 2.1.310**이다. 미검증 버전과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
+- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 / Claude Code 2.1.317**이다. 미검증 버전과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
 - 생성/병합 계획은 안전한 DevLink 항목만 표시한다. TTY에서는 계획을 보여준 후 확인하고, 비대화형에서는 `--apply-mcp`가 없으면 `SETUP_INPUT_REQUIRED`/종료 2와 `mcpPlan`을 반환한다. 거절/EOF는 종료 130이다. 기존 항목이 일치하면 확인·재작성·추가 백업 없이 재사용한다.
 - 확인한 같은 제공자 인스턴스와 `planId`/예상 digest로 적용한다. 입력 대기 동안 잠금은 해제하며 적용 직전에 사용자·팀·Agent·도구·브로커 PID/instance·프로필/자격/실행 파일 해시를 재확인한다. Host 파일의 동시 수정은 제공자의 digest 검사로 거절한다. 확인 후 계획을 몰래 재생성하지 않는다.
 
@@ -757,4 +758,14 @@ $env:DEVLINK_MCP_BUILD = (Resolve-Path ../packages/mcp-server/dist).Path
 cargo test --offline --locked -p devlink-broker --test task_creation actual_mcp_ -- --ignored
 ```
 
-실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.310` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
+실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.317` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
+
+## 2026-11-08 데스크톱 다중 프로젝트 연결 보완
+
+프로젝트별 `--config`를 사용해도 기존의 계정 단위 owner 잠금 때문에 같은 사용자의 두 번째 Agent 등록·토큰 준비·브로커 실행이 막혔다. owner 잠금을 서버·사용자·Agent 단위로 나눠 서로 다른 Agent를 동시에 실행하도록 보완했다. 실행 중인 같은 프로필의 변경은 기존 broker/control 잠금으로, 다른 프로필에서 같은 Agent를 중복 실행하거나 토큰을 변경하는 작업은 Agent 잠금으로 계속 거부한다.
+
+기존 계정 단위 잠금 파일에는 새 브로커들이 공유 잠금을 유지한다. 구버전의 배타적 계정 잠금과는 양방향으로 충돌하므로 구버전 브로커가 같은 계정으로 실행 중이면 한 번 중지하고 새 CLI로 다시 실행해야 한다. Agent ID를 아직 모르는 신규 생성은 공유 잠금과 프로필 잠금으로 보호하고, 확인된 Agent의 토큰 발급부터 Agent 잠금을 적용한다. 서버의 Agent별 토큰·WebSocket 연결 정책은 변경하지 않았다.
+
+자동 적용 가능 버전은 `CODEX_VERSIONS`, `CLAUDE_VERSIONS` 목록으로 관리한다. 이번 변경에서는 기존에 검증한 `0.166.0`, `2.1.317`만 유지했다. 미검증 버전의 직접 적용 재사용과 일치 검사 정책도 유지한다.
+
+Windows에서 Agent CLI 16건, setup 등록 22건·토큰 13건·MCP 20건, MCP 제공자 21건과 owner 잠금 호환성 1건을 통과했다. 전체 타깃 Clippy와 fmt 검사도 통과했다. 별도 데스크톱 검증에서는 실제 Electron 연결 화면·실제 CLI·로컬 Spring/PostgreSQL 서버로 같은 계정의 두 프로젝트와 다른 팀 연결, 재연결, 직접 적용 후 확인·재실행을 확인했다. 직접 적용 경로의 Host만 버전 `9.9.9`를 출력하는 합성 실행 파일을 사용했고 모델 호출은 하지 않았다.

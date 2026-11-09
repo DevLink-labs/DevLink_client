@@ -86,7 +86,7 @@ for (const versionNegotiation of [{ mode: 'legacy' }, { mode: { pin: '2026-07-28
       await deadline(client.connect(transport));
       assert.deepEqual(client.getServerVersion(), { name: 'devlink-mcp', version: '0.1.0' });
       const { tools } = await client.listTools();
-      assert.deepEqual(tools.map(({ name }) => name), ['devlink_ping', 'register_agent', 'list_agents', 'create_task', 'update_task_status', 'complete_task', 'get_tasks', 'get_task_result', 'ask_question', 'answer_question', 'get_updates', 'get_my_context', 'get_connection_status']);
+      assert.deepEqual(tools.map(({ name }) => name), ['devlink_ping', 'register_agent', 'list_agents', 'update_agent', 'create_task', 'update_task_status', 'complete_task', 'get_tasks', 'get_task_result', 'ask_question', 'answer_question', 'get_updates', 'get_my_context', 'get_connection_status']);
       assert.equal(tools[0].annotations.readOnlyHint, true);
       const result = await client.callTool({ name: 'devlink_ping', arguments: {} });
       assert.deepEqual(result.structuredContent, { status: 'ok', version: '0.1.0' });

@@ -101,8 +101,8 @@ impl Fixture {
             VerifiedHost::new(
                 tool,
                 match tool {
-                    ToolType::Codex => CODEX_VERSION,
-                    ToolType::ClaudeCode => CLAUDE_VERSION,
+                    ToolType::Codex => CODEX_VERSIONS[0],
+                    ToolType::ClaudeCode => CLAUDE_VERSIONS[0],
                 },
             )
             .unwrap(),
@@ -216,6 +216,89 @@ fn conflicts_and_external_edits_never_overwrite_the_existing_file() {
         "SETUP_MCP_CONFIG_CONFLICT"
     );
 }
+
+#[test]
+fn replacement_preserves_other_settings_and_backs_up_the_exact_previous_file() {
+    for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+        let f = Fixture::new();
+        let other = Fixture::new();
+        let mut m = Fixture::manager(tool);
+        f.seed(tool, &original(tool));
+        let first = m.plan(f.input(tool)).unwrap();
+        m.apply(&first.plan_id, first.expected_digest.as_deref())
+            .unwrap();
+        let before = fs::read(f.input(tool).target_path).unwrap();
+        let mut next = f.input(tool);
+        next.broker_file = other.broker.clone();
+        assert_eq!(m.plan(next.clone()).unwrap().change, Change::Conflict);
+        let plan = m.plan_replacing_devlink(next.clone()).unwrap();
+        assert_eq!(plan.change, Change::Merge);
+        assert!(
+            !serde_json::to_string(&plan)
+                .unwrap()
+                .contains("fixture-secret")
+        );
+        let applied = m
+            .apply(&plan.plan_id, plan.expected_digest.as_deref())
+            .unwrap();
+        let backup = applied.backup_path.unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), before);
+        credentials::verify_private_permissions(&backup).unwrap();
+        let after = fs::read_to_string(f.input(tool).target_path).unwrap();
+        assert!(after.contains("fixture-secret"));
+        if tool == ToolType::Codex {
+            assert!(after.contains("# preserve comment"));
+            assert!(after.contains("model='keep'"));
+        } else {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&after).unwrap()["editor"]["theme"],
+                "dark"
+            );
+        }
+        assert_eq!(
+            m.inspect(InspectionInput {
+                broker_file: other.broker,
+                ..f.inspect(tool)
+            })
+            .unwrap()
+            .status,
+            InspectionStatus::Applied
+        );
+        assert_eq!(
+            m.plan_replacing_devlink(next).unwrap().change,
+            Change::Unchanged
+        );
+    }
+}
+
+#[test]
+fn replacement_rejects_concurrent_edits_and_malformed_settings() {
+    for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+        let f = Fixture::new();
+        let mut m = Fixture::manager(tool);
+        f.seed(tool, &original(tool));
+        let plan = m.plan_replacing_devlink(f.input(tool)).unwrap();
+        fs::write(&f.input(tool).target_path, outside(tool)).unwrap();
+        assert_eq!(
+            m.apply(&plan.plan_id, plan.expected_digest.as_deref())
+                .unwrap_err()
+                .code,
+            "SETUP_MCP_CONFIG_CONFLICT"
+        );
+        assert_eq!(fs::read(f.input(tool).target_path).unwrap(), outside(tool));
+        f.seed(
+            tool,
+            match tool {
+                ToolType::Codex => b"[broken",
+                ToolType::ClaudeCode => b"{broken",
+            },
+        );
+        assert_eq!(
+            m.plan_replacing_devlink(f.input(tool)).unwrap_err().code,
+            "SETUP_MCP_CONFIG_CONFLICT"
+        );
+    }
+}
 #[test]
 fn write_and_post_inspection_failures_restore_only_the_owned_version() {
     for fault in [
@@ -258,6 +341,24 @@ fn write_and_post_inspection_failures_restore_only_the_owned_version() {
                 assert_ne!(actual, before);
                 assert_eq!(error.rollback, "failed");
                 assert!(error.backup_path.unwrap().exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn only_listed_versions_of_the_selected_host_are_verified() {
+    for (tool, versions, other) in [
+        (ToolType::Codex, CODEX_VERSIONS, CLAUDE_VERSIONS),
+        (ToolType::ClaudeCode, CLAUDE_VERSIONS, CODEX_VERSIONS),
+    ] {
+        assert!(!versions.is_empty());
+        for version in versions {
+            assert!(VerifiedHost::new(tool, version).is_ok());
+        }
+        for version in other.iter().copied().chain(["", "9.9.9", "0.166.0-beta.1"]) {
+            if !versions.contains(&version) {
+                assert!(VerifiedHost::new(tool, version).is_err());
             }
         }
     }
