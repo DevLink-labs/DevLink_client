@@ -106,7 +106,7 @@ items는 taskId/teamId/requesterAgent/receiverAgent/status/createdAt/startedAt/c
   - 409 `TASK_STATE_CONFLICT`(IN_PROGRESS 아님): rejected
   - 중앙 403: `FORBIDDEN`
   - `REQUEST_KEY_CONFLICT`: 생성과 같이 unknown
-- **범위 밖:** 질문·답변 WebSocket 알림(`TASK_QUESTION_CREATED`/`TASK_ANSWER_CREATED`)과 `/api/v1/agents/me/task-messages` 동기화는 아직 처리하지 않는다. 브로커는 알 수 없는 WebSocket 유형을 무시하므로 연결에는 영향이 없다.
+- **도착 알림:** 질문·답변 WebSocket 알림(`TASK_QUESTION_CREATED`/`TASK_ANSWER_CREATED`)과 `/api/v1/agents/me/task-messages` 동기화는 [task-messages](task-messages.md)(S15P31D108-167)에서 처리한다. 이 절은 보내는 쪽만 다룬다(2026-11-09 갱신).
 
 ## 오류·결과 불명
 
