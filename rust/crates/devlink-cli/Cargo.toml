@@ -26,6 +26,7 @@ windows-sys.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+tokio-util.workspace = true
 axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
 reqwest.workspace = true

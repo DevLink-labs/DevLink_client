@@ -114,6 +114,13 @@ pub async fn run(path: &Path) -> Result<()> {
 
     // 취소 토큰 및 중앙 서버 연결 상태 초기화
     let cancel = CancellationToken::new();
+    // Git 수집기는 이 캐시를 복제해 작성자 판별에 사용
+    let git_identity = crate::git_identity::IdentityCache::default();
+    let git_identity_sync = tokio::spawn(crate::git_identity::run(
+        crate::git_identity::IdentityClient::new(&config.server_url, &token)?,
+        git_identity.clone(),
+        cancel.clone(),
+    ));
     let status = Arc::new(RwLock::new(ConnectionStatus::Connecting));
     let central_state = CentralState::new(status)
         .with_inbox(inbox)
@@ -272,6 +279,13 @@ pub async fn run(path: &Path) -> Result<()> {
         if timeout(Duration::from_secs(1), task).await.is_err() {
             abort.abort();
         }
+    let abort_git_identity = git_identity_sync.abort_handle();
+    if timeout(Duration::from_secs(1), git_identity_sync)
+        .await
+        .is_err()
+    {
+        abort_git_identity.abort();
+        git_identity.clear().await;
     }
     inbox_guard.0.stop_accepting();
     notification_guard.0.stop_accepting();
