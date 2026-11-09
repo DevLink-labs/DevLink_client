@@ -216,6 +216,94 @@ async fn claude_project_configuration_is_applied_and_reused_without_token_values
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_guide_reads_a_stopped_profile_without_writes_or_central_side_effects() {
+    fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                files.extend(snapshot(&entry.path()));
+            } else {
+                files.insert(entry.path(), fs::read(entry.path()).unwrap());
+            }
+        }
+        files
+    }
+    let f = Prepared::new(ToolType::Codex, "0.166.0").await;
+    assert!(f.app.run(&["stop"], None).status.success());
+    let before = snapshot(f.app._root.path());
+    let original_calls = f.calls();
+    let central_calls = f.app.state.calls.lock().unwrap().clone();
+    let args = [
+        "setup",
+        "mcp-guide",
+        "--output",
+        "json",
+        "--node-path",
+        f.options.node.as_ref().unwrap().to_str().unwrap(),
+        "--mcp-entry",
+        f.options.entry.as_ref().unwrap().to_str().unwrap(),
+    ];
+    let output = f.app.run(&args, None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["fileState"], "file_missing");
+    assert_eq!(result["data"]["availability"], "ready");
+    assert_eq!(result["data"]["agentId"], "201");
+    assert_eq!(result["stages"], json!([]));
+    let public = String::from_utf8(output.stdout).unwrap();
+    assert!(!public.contains(account_server::AGENT_SECRET));
+    assert!(!public.contains(&credentials::load(&f.app.path).unwrap().local_token));
+    assert_eq!(snapshot(f.app._root.path()), before);
+    assert_eq!(f.calls(), original_calls);
+    assert_eq!(*f.app.state.calls.lock().unwrap(), central_calls);
+    let copies = result["data"]["copyItems"].as_array().unwrap();
+    fs::create_dir_all(f.target().parent().unwrap()).unwrap();
+    fs::write(f.target(), copies[0]["snippet"].as_str().unwrap()).unwrap();
+    let output = f.app.run(&args, None);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["fileState"], "matches");
+    assert!(result["data"]["copyItems"].as_array().unwrap().is_empty());
+    fs::remove_file(credentials::path(&f.app.path)).unwrap();
+    let output = f.app.run(&args, None);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["availability"], "needs_preparation");
+    assert_eq!(result["data"]["reason"], "prepare_credentials");
+    assert!(result["data"]["copyItems"].as_array().unwrap().is_empty());
+    fs::remove_file(f.options.node.as_ref().unwrap()).unwrap();
+    let output = f.app.run(&args, None);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["availability"], "needs_preparation");
+    assert_eq!(result["data"]["reason"], "prepare_runtime");
+    assert!(result["data"]["copyItems"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_manual_mode_on_a_supported_host_never_writes_the_host_file() {
+    let mut f = Prepared::new(ToolType::Codex, "0.166.0").await;
+    let before = f.profile();
+    let mut options = f.options.clone();
+    options.mode = setup_mcp::Mode::Manual;
+    let mut stages = f.stages.take().unwrap().with_mcp(options);
+    let context = SetupContext {
+        config_path: f.app.path.clone(),
+    };
+    let StepResult::Failed(error) = stages.execute(Step::ConfigureMcp, &context).await else {
+        panic!("manual must await user edits")
+    };
+    assert_eq!(error.code, ErrorCode::ManualActionRequired);
+    assert_eq!(error.code.exit_code(), 3);
+    assert!(!f.target().exists());
+    assert_eq!(f.profile(), before);
+    assert_eq!(f.calls(), (1, 1));
+    assert!(error.manual_config.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_preserves_other_mcp_settings_and_returns_a_private_exact_backup() {
     let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let original = br#"{"huge":9223372036854775807,"mcpServers":{"other":{"command":"other","env":{"OTHER_SECRET":"unrelated-private-marker"}}}}"#;

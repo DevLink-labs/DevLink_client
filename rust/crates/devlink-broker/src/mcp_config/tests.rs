@@ -2,6 +2,108 @@ use super::*;
 use crate::credentials;
 use serde_json::json;
 use std::fs;
+
+#[test]
+fn guide_classifies_json_without_exposing_existing_values_or_writing_files() {
+    let f = Fixture::new();
+    let input = storage::normalize(ToolType::ClaudeCode, f.input(ToolType::ClaudeCode)).unwrap();
+    for (bytes, state, kind, scope) in [
+        (None, "file_missing", "create_file", "whole_file"),
+        (
+            Some(br#"{"custom":"SECRET"}"#.as_slice()),
+            "entry_missing",
+            "add_container",
+            "container",
+        ),
+        (
+            Some(br#"{"mcpServers":{"other":{"env":{"token":"SECRET"}}}}"#.as_slice()),
+            "entry_missing",
+            "add_entry",
+            "entry",
+        ),
+        (
+            Some(br#"{"mcpServers":{"devlink":{"command":"OLD_SECRET"}}}"#.as_slice()),
+            "different",
+            "replace_entry",
+            "entry",
+        ),
+    ] {
+        let (actual, edit, items, _) = guide::classify(&input, bytes).unwrap();
+        assert_eq!((actual, edit, items[0].scope), (state, kind, scope));
+        assert!(!items[0].snippet.contains("SECRET"));
+        let applied = match scope {
+            "whole_file" => items[0].snippet.clone(),
+            "container" => format!(r#"{{"custom":"SECRET",{}}}"#, items[0].snippet),
+            _ => format!(
+                r#"{{"mcpServers":{{"other":{{"command":"keep"}},{}}}}}"#,
+                items[0].snippet
+            ),
+        };
+        assert_eq!(
+            format::configured_entry(input.tool, applied.as_bytes()).unwrap(),
+            Some(format::entry(&input))
+        );
+    }
+    for bytes in [
+        br#"{"mcpServers":[]}"#.as_slice(),
+        br#"{"mcpServers":{},"mcpServers":{}}"#,
+        b"{ broken",
+    ] {
+        let (state, _, copies, _) = guide::classify(&input, Some(bytes)).unwrap();
+        assert_eq!(state, "invalid");
+        assert!(copies.is_empty());
+    }
+    let (_, applied) = format::merge(input.tool, None, &format::entry(&input)).unwrap();
+    assert_eq!(
+        guide::classify(&input, Some(&applied)).unwrap().0,
+        "matches"
+    );
+    assert!(!f.input(input.tool).target_path.exists());
+}
+
+#[test]
+fn guide_codex_table_and_inline_snippets_preserve_other_settings() {
+    let f = Fixture::new();
+    let input = storage::normalize(ToolType::Codex, f.input(ToolType::Codex)).unwrap();
+    let (_, _, items, _) = guide::classify(
+        &input,
+        Some(b"model='keep'\n[mcp_servers.other]\ncommand='SECRET'\n"),
+    )
+    .unwrap();
+    assert!(!items[0].snippet.contains("SECRET"));
+    assert!(items[0].snippet.contains("[mcp_servers.devlink]"));
+    let applied = format!(
+        "model='keep'\n[mcp_servers.other]\ncommand='SECRET'\n{}",
+        items[0].snippet
+    );
+    assert_eq!(
+        format::configured_entry(input.tool, applied.as_bytes()).unwrap(),
+        Some(format::entry(&input))
+    );
+    let (_, _, copies, reason) =
+        guide::classify(&input, Some(b"mcp_servers={other={command='SECRET'}}\n")).unwrap();
+    assert_eq!(reason, "edit_inline_container");
+    let inline = format!(
+        "mcp_servers={{other={{command='SECRET'}},{}}}\n",
+        copies[0].snippet
+    );
+    assert_eq!(
+        format::configured_entry(input.tool, inline.as_bytes()).unwrap(),
+        Some(format::entry(&input))
+    );
+    for bytes in [
+        b"[mcp_servers.devlink]\ncommand='old'\nstartup_timeout_sec=20\n".as_slice(),
+        b"[mcp_servers]\ndevlink={command='old'}\n".as_slice(),
+        b"[mcp_servers.devlink]\ncommand='old'\n[mcp_servers.devlink.env]\nsecret='SECRET'\n",
+    ] {
+        let (state, kind, copies, _) = guide::classify(&input, Some(bytes)).unwrap();
+        assert_eq!((state, kind), ("different", "replace_entry"));
+        assert!(!copies[0].snippet.contains("SECRET"));
+    }
+    let (state, _, copies, _) = guide::classify(&input, Some(b"[mcp_servers\n")).unwrap();
+    assert_eq!(state, "invalid");
+    assert!(copies.is_empty());
+}
 #[derive(Clone, Copy)]
 pub(super) enum Fault {
     BeforeCommitFailure,
