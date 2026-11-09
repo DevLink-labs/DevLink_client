@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { BrokerClient } from '../broker/client.js';
 import { BrokerFault, type BrokerOperation } from '../broker/contracts.js';
 import { identifierSchema } from '../broker/schemas.js';
+import { recommendationOutput, recommendationSchema } from '../broker/recommendations.js';
 import { updatesOutput, updatesSchema } from '../broker/updates.js';
 import { defineTool, type RegisteredDefinition } from './registry.js';
 
@@ -71,9 +72,21 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       handler: (args, ctx) => broker.execute('update_agent', args, { signal: ctx.signal, mcpRequestId: ctx.mcpRequestId }),
     }),
-    tool('find_agent', 'Find which teammate Agents are most likely responsible for the work the user described, using the central team recommendation (role tags and recent Git activity; no LLM). Read-only: it never chooses a recipient, creates a task or changes anything. question is the user\'s description of the work (1 to 1,000 characters). repoKey is an optional hint (64 lowercase hex) and does not narrow the search. The result lists up to 5 candidates with score, per-factor scores, matchedRoles, relatedFiles and connectionStatus at evaluation time, or INSUFFICIENT_EVIDENCE with a reason. Present the candidates and let the user decide; never send a task to a candidate the user did not choose.', z.strictObject({
-      question: recommendationQuestion, repoKey: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-    }), true),
+    defineTool({ name: 'find_agent',
+      description: 'Find which teammate Agents are most likely responsible for the work the user described, using the central team recommendation (role tags and recent Git activity; no LLM). Read-only: it never chooses a recipient, creates a task or changes anything. question is the user\'s description of the work (1 to 1,000 characters). repoKey is an optional hint (64 lowercase hex) and does not narrow the search. '
+        + 'The result lists up to 5 candidates within 5 points of the best positive score (or, with NO_MATCHING_EVIDENCE, up to 5 zero-point reference candidates). For each candidate show the name, agentId, connectionStatus (at evaluation time; not part of the score), score out of 100 with scores.role (out of 60) and scores.git (out of 40 = working 15 + frequency 15 + recency 10), matchedRoles, and relatedFiles grouped by repoId with observedAt. '
+        + 'Explain these separately: INSUFFICIENT_EVIDENCE with NO_ELIGIBLE_AGENTS (no other teammate Agent), INSUFFICIENT_EVIDENCE with NO_MATCHING_EVIDENCE (no evidence matched; the 0-point candidates are only for reference), gitCoverage.state NOT_COLLECTED (Git activity was not collected, so only role tags could count), gitCoverage.workingState STALE (working-file observations expired, so they did not count), and workingState NOT_COLLECTED (no working-file observation exists, so working points are 0). gitCoverage is a separate axis from INSUFFICIENT_EVIDENCE; when both apply, explain both. '
+        + 'Present the candidates and let the user decide; never send a task to a candidate the user did not choose.',
+      inputSchema: z.strictObject({ question: recommendationQuestion, repoKey: z.string().regex(/^[0-9a-f]{64}$/).optional() }),
+      outputSchema: recommendationOutput,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      handler: async (args, ctx) => {
+        const result = await broker.execute('find_agent', args, { signal: ctx.signal, mcpRequestId: ctx.mcpRequestId });
+        const data = recommendationSchema.safeParse(result.data);
+        if (!data.success) throw new BrokerFault('BROKER_PROTOCOL_ERROR', result.requestId);
+        return { requestId: result.requestId, ...(result.mcpRequestId !== undefined ? { mcpRequestId: result.mcpRequestId } : {}), data: data.data };
+      },
+    }),
     tool('create_task', 'Request work from a recipient agent. A delivery failure is separate from the central task status. Timeout does not cancel the task; do not blindly resend. Without requestKey every call is a new request. To retry a request whose outcome is unknown, call again with the requestKey from the earlier result or error (or a key you chose up front) and exactly the same arguments: the same task is returned instead of a duplicate. Different arguments under one key fail with REQUEST_KEY_CONFLICT.', z.strictObject({
       recipientAgentId: id, title: providerText.max(200), description: providerText.max(16_000), taskContext: providerText.max(16_000).optional(), requestKey,
     })),

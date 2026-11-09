@@ -1,0 +1,189 @@
+{
+  "matchedWithGit": {
+    "status": "MATCHED",
+    "evaluatedAt": "2026-11-09T02:00:00Z",
+    "insufficientReason": null,
+    "gitCoverage": {
+      "state": "AVAILABLE",
+      "reason": null,
+      "workingState": "FRESH"
+    },
+    "candidates": [
+      {
+        "agentId": "13",
+        "name": "로그인 담당 Agent",
+        "part": "BACKEND",
+        "connectionStatus": "ONLINE",
+        "score": 51.92,
+        "scores": {
+          "role": 20,
+          "git": 31.92,
+          "working": 15,
+          "frequency": 9,
+          "recency": 7.92
+        },
+        "matchedRoles": [
+          "로그인"
+        ],
+        "relatedFiles": [
+          {
+            "repoId": "4",
+            "relativePath": "src/auth/LoginService.java",
+            "sources": [
+              "WORKING",
+              "COMMIT"
+            ],
+            "observedAt": "2026-11-09T01:59:30Z"
+          },
+          {
+            "repoId": "4",
+            "relativePath": "src/auth/LoginController.java",
+            "sources": [
+              "COMMIT"
+            ],
+            "observedAt": "2026-11-04T09:12:00Z"
+          }
+        ],
+        "latestCommitAt": "2026-11-04T09:12:00Z",
+        "workingObservedAt": "2026-11-09T01:59:30Z",
+        "insufficientReason": null
+      }
+    ]
+  },
+  "multipleRoleOnly": {
+    "status": "MULTIPLE_CANDIDATES",
+    "evaluatedAt": "2026-11-09T02:00:00Z",
+    "insufficientReason": null,
+    "gitCoverage": {
+      "state": "NOT_COLLECTED",
+      "reason": "NO_TEAM_REPOSITORIES",
+      "workingState": "NOT_COLLECTED"
+    },
+    "candidates": [
+      {
+        "agentId": "13",
+        "name": "로그인 담당 Agent",
+        "part": "BACKEND",
+        "connectionStatus": "ONLINE",
+        "score": 20,
+        "scores": {
+          "role": 20,
+          "git": 0,
+          "working": 0,
+          "frequency": 0,
+          "recency": 0
+        },
+        "matchedRoles": [
+          "로그인"
+        ],
+        "relatedFiles": [],
+        "latestCommitAt": null,
+        "workingObservedAt": null,
+        "insufficientReason": null
+      },
+      {
+        "agentId": "21",
+        "name": "인증 화면 Agent",
+        "part": "FRONTEND",
+        "connectionStatus": "OFFLINE",
+        "score": 20,
+        "scores": {
+          "role": 20,
+          "git": 0,
+          "working": 0,
+          "frequency": 0,
+          "recency": 0
+        },
+        "matchedRoles": [
+          "로그인 화면"
+        ],
+        "relatedFiles": [],
+        "latestCommitAt": null,
+        "workingObservedAt": null,
+        "insufficientReason": null
+      }
+    ]
+  },
+  "staleWorkingFiles": {
+    "status": "MATCHED",
+    "evaluatedAt": "2026-11-09T02:00:00Z",
+    "insufficientReason": null,
+    "gitCoverage": {
+      "state": "AVAILABLE",
+      "reason": null,
+      "workingState": "STALE"
+    },
+    "candidates": [
+      {
+        "agentId": "13",
+        "name": "로그인 담당 Agent",
+        "part": "BACKEND",
+        "connectionStatus": "ONLINE",
+        "score": 9.72,
+        "scores": {
+          "role": 0,
+          "git": 9.72,
+          "working": 0,
+          "frequency": 6,
+          "recency": 3.72
+        },
+        "matchedRoles": [],
+        "relatedFiles": [
+          {
+            "repoId": "4",
+            "relativePath": "src/auth/LoginService.java",
+            "sources": [
+              "COMMIT"
+            ],
+            "observedAt": "2026-10-20T03:00:00Z"
+          }
+        ],
+        "latestCommitAt": "2026-10-20T03:00:00Z",
+        "workingObservedAt": null,
+        "insufficientReason": null
+      }
+    ]
+  },
+  "noMatchingEvidence": {
+    "status": "INSUFFICIENT_EVIDENCE",
+    "evaluatedAt": "2026-11-09T02:00:00Z",
+    "insufficientReason": "NO_MATCHING_EVIDENCE",
+    "gitCoverage": {
+      "state": "NOT_COLLECTED",
+      "reason": "NO_RETAINED_OBSERVATIONS",
+      "workingState": "NOT_COLLECTED"
+    },
+    "candidates": [
+      {
+        "agentId": "13",
+        "name": "로그인 담당 Agent",
+        "part": "BACKEND",
+        "connectionStatus": "OFFLINE",
+        "score": 0,
+        "scores": {
+          "role": 0,
+          "git": 0,
+          "working": 0,
+          "frequency": 0,
+          "recency": 0
+        },
+        "matchedRoles": [],
+        "relatedFiles": [],
+        "latestCommitAt": null,
+        "workingObservedAt": null,
+        "insufficientReason": "NO_MATCHING_EVIDENCE"
+      }
+    ]
+  },
+  "noEligibleAgents": {
+    "status": "INSUFFICIENT_EVIDENCE",
+    "evaluatedAt": "2026-11-09T02:00:00Z",
+    "insufficientReason": "NO_ELIGIBLE_AGENTS",
+    "gitCoverage": {
+      "state": "NOT_COLLECTED",
+      "reason": "NO_TEAM_REPOSITORIES",
+      "workingState": "NOT_COLLECTED"
+    },
+    "candidates": []
+  }
+}

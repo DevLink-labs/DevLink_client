@@ -38,6 +38,7 @@ MCP `find_agent({question, repoKey?})` → 로컬 `POST /v1/agents/find` → 중
 - `connectionStatus`는 중앙 평가 시점의 상태다. 점수·순위에 반영되지 않으며, 작업 전달 결과는 `create_task`의 delivery로 따로 확인한다.
 - `relatedFiles[].sources`는 `WORKING`·`COMMIT`만 남긴다. 중앙이 4차에서 값을 추가할 수 있으므로 모르는 값은 오류로 보지 않고 뺀다.
 - 중앙 응답의 그 밖의 필드는 버린다.
+- MCP는 이 결과를 `contracts/local-broker/v1/recommendation.schema.json`과 상태 일관성 규칙으로 다시 검증한다. 점수 상한(총점 100, 역할 60, Git 40, 작업 중 15, 횟수 15, 최근성 10)과 양의 점수 규칙(선정 후보는 0보다 크고 참고 후보는 0)은 MCP에서만 확인한다. 상태별 예제는 `recommendation.examples.json`이다(S15P31D108-189).
 
 다음 경우는 CENTRAL_PROTOCOL_ERROR(unknown)다.
 
