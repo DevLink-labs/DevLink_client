@@ -236,7 +236,14 @@ async fn agent_create(
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["name", "projectName", "roleDescription", "toolType"]
+        [
+            "name",
+            "part",
+            "projectName",
+            "roleDescription",
+            "roles",
+            "toolType"
+        ]
     );
     let fixed = [
         agent_for(&state, 301).unwrap(),
@@ -263,6 +270,12 @@ async fn agent_create(
             body["projectName"].clone(),
         );
         agent["roleDescription"] = body["roleDescription"].clone();
+        agent["part"] = body["part"].clone();
+        agent["roles"] = body["roles"].clone();
+        if state.create_mode.load(Ordering::SeqCst) == 5 {
+            agent.as_object_mut().unwrap().remove("part");
+            agent.as_object_mut().unwrap().remove("roles");
+        }
         stored.insert(id, agent.clone());
         agent
     };

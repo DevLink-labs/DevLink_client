@@ -126,6 +126,7 @@ async fn stage_retains_canonical_root_and_separate_registration_metadata() {
         serde_json::to_value(&prepared.metadata).unwrap(),
         json!({
             "projectName":"프로젝트 with spaces", "name":"프로젝트 with spaces", "roleDescription":null,
+            "part":"OTHER", "roles":[],
         })
     );
     assert!(f.state.calls.lock().unwrap().is_empty());
@@ -234,11 +235,12 @@ async fn explicit_metadata_overrides_defaults_and_invalid_utf16_lengths_are_reje
         project_name: Some("표시 프로젝트".into()),
         agent_name: Some("개발 Agent".into()),
         role_description: Some("구현과 검증".into()),
+        ..Default::default()
     };
     let prepared = setup_project::prepare(&f.path, &options).unwrap();
     assert_eq!(
         serde_json::to_value(prepared.metadata).unwrap(),
-        json!({"name":"개발 Agent","projectName":"표시 프로젝트","roleDescription":"구현과 검증"})
+        json!({"name":"개발 Agent","projectName":"표시 프로젝트","roleDescription":"구현과 검증","part":"OTHER","roles":[]})
     );
     let value = run(
         &f,
@@ -325,7 +327,7 @@ async fn long_folder_defaults_fit_central_limits_and_do_not_include_parent_paths
     assert_eq!(prepared.metadata.agent_name.encode_utf16().count(), 99);
     assert_eq!(prepared.metadata.project_name.encode_utf16().count(), 120);
     let body = serde_json::to_value(prepared.metadata).unwrap();
-    assert_eq!(body.as_object().unwrap().len(), 3);
+    assert_eq!(body.as_object().unwrap().len(), 5);
     assert!(body.get("projectRoot").is_none());
     assert!(body.get("path").is_none());
     let boundary = setup_project::resolve(&ProjectOptions {
@@ -333,6 +335,7 @@ async fn long_folder_defaults_fit_central_limits_and_do_not_include_parent_paths
         agent_name: Some("😀".repeat(50)),
         project_name: Some("😀".repeat(60)),
         role_description: Some("가".repeat(255)),
+        ..Default::default()
     })
     .unwrap();
     assert_eq!(boundary.metadata.agent_name.encode_utf16().count(), 100);
@@ -427,6 +430,8 @@ async fn prepared_metadata_registers_without_sending_local_path_fields() {
             name: prepared.metadata.agent_name,
             project_name: prepared.metadata.project_name,
             role_description: prepared.metadata.role_description,
+            part: prepared.metadata.part,
+            roles: prepared.metadata.roles,
             tool: agent_profile::Tool::Codex,
             project: prepared.root,
         },
