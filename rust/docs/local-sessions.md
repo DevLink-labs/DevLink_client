@@ -14,7 +14,7 @@
 
 | 메서드·경로 | 요청 JSON | 성공 data |
 | --- | --- | --- |
-| POST /v1/sessions | requestId, instanceId, mode: fresh/recover, 선택 agentId | sessionId, principal |
+| POST /v1/sessions | requestId, instanceId, mode: fresh/recover, 선택 agentId, 선택 processId(claim하는 MCP의 OS 프로세스 ID, u32) | sessionId, principal |
 | POST /v1/sessions/{id}/bind | requestId, instanceId, agentId | 같은 sessionId와 바인딩된 principal |
 | POST /v1/sessions/{id}/heartbeat | requestId, instanceId | 빈 객체 |
 | DELETE /v1/sessions/{id} | requestId, instanceId | 빈 객체 |
@@ -57,6 +57,7 @@
 - 교체된 인스턴스의 재claim·heartbeat·해제는 기존 lease가 남은 동안 SESSION_REPLACED입니다. 이후에는 SESSION_EXPIRED이며, 오래된 세션 ID로 새 소유자를 지우거나 갱신하지 않습니다.
 - bind는 같은 검증된 사용자·팀과 요청한 Agent의 일치를 확인합니다. 다른 활성 소유자를 빼앗거나 이미 bound인 세션의 Agent를 전환할 수 없습니다. 같은 Agent의 명시적 bind에서는 검증된 toolType 갱신을 허용하지만 이미 확인한 메타데이터의 소실은 거부합니다.
 - lease는 브로커의 monotonic clock 기준 90초입니다. 90초 경계부터 만료하며, 만료 후 heartbeat로 되살리지 않습니다. 요청 처리 전 만료 정리와 1초 주기의 백그라운드 정리를 모두 사용합니다. MCP의 30초 갱신과 중앙 JSON Heartbeat의 20초 주기는 별개입니다.
+- 소유 프로세스(DevLink_client#108, S15P31D108-144): claim에 `processId`가 있으면 브로커가 그 프로세스와 시작 시각을 기록합니다. 그 프로세스가 확실히 끝났거나 같은 ID가 다른 프로세스를 가리키면, lease와 관계없이 다음 만료 정리(요청 처리 전 또는 1초 주기)에서 세션을 끝냅니다. 그래서 presence도 곧 OFFLINE이 되고, 다른 인스턴스의 recover·bind가 기다리지 않고 성공합니다. Codex는 Windows에서 MCP 자식을 stdin 종료나 시그널 없이 강제 종료하므로, 이 기록이 없으면 lease 90초가 끝날 때까지 `SESSION_CONFLICT`가 납니다. 프로세스 상태를 읽을 수 없으면(권한 거부 등) 확인되지 않은 것으로 보고 lease 규칙을 그대로 따릅니다. 실행 중이 아닌 `processId`는 기록하지 않습니다. 소유 프로세스는 처음 기록한 뒤 바뀌지 않습니다. Windows는 `OpenProcess`·`GetProcessTimes`(종료 시각·생성 시각)·`GetExitCodeProcess`, Unix는 `kill(pid, 0)`과 Linux `/proc/<pid>/stat`(상태 Z·X는 종료, 시작 시각)으로 판정합니다(`owner_process.rs`). 한계: 같은 ID의 재사용은 시작 시각을 읽을 수 있는 Windows·Linux에서만 알아채고, macOS 등에서는 lease까지 세션이 유지됩니다. Host가 `npx`·`cmd /c`·버전 관리자 shim 같은 래퍼로 MCP를 띄우면 `processId`는 래퍼의 자식이며, 래퍼만 죽고 MCP가 살아 있으면 세션도 유지됩니다(이전과 같은 동작). `devlink setup`은 node 실행 파일 절대 경로로 MCP를 직접 띄웁니다.
 - 재시작 후 세션·소유권은 메모리에서 새로 시작하며 과거 소유자는 보존하지 않습니다. 먼저 유효하게 recover한 인스턴스가 빈 슬롯을 확보합니다.
 - 신원 공급부의 await 중에는 저장소 잠금을 잡지 않습니다. bind 응답을 적용하기 직전에 소유권·만료를 다시 확인하고, 종료한 관리자는 늦은 claim 응답도 거부합니다.
 
