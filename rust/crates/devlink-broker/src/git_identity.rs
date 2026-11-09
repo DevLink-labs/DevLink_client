@@ -140,6 +140,9 @@ impl IdentityClient {
             .send()
             .await
             .map_err(|_| IdentityError::Unavailable)?;
+        if matches!(response.status().as_u16(), 401 | 403) {
+            return Err(IdentityError::Unauthenticated);
+        }
         if response.status().as_u16() != 200 {
             return Err(IdentityError::Unavailable);
         }
@@ -221,15 +224,28 @@ impl IdentityCache {
     }
 
     pub async fn refresh(&self, client: &IdentityClient) -> Result<(), IdentityError> {
-        self.clear().await;
-        if let Some((user_id, hash)) = client.comparison().await? {
-            *self.0.write().await = Some(Snapshot {
-                user_id,
-                hash,
-                checked_at: Instant::now(),
-            });
+        match client.comparison().await {
+            Ok(comparison) => {
+                // Publish only a complete result, without blocking readers on HTTP.
+                *self.0.write().await = comparison.map(|(user_id, hash)| Snapshot {
+                    user_id,
+                    hash,
+                    checked_at: Instant::now(),
+                });
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    IdentityError::Unauthenticated | IdentityError::Forbidden
+                ) {
+                    self.clear().await;
+                }
+                // Unavailable includes transport/protocol failures: retain the last
+                // verified snapshot with its original expiry, never renew it here.
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub async fn attribute(&self, author_email: &str) -> AuthorAttribution {
@@ -269,6 +285,206 @@ pub async fn run(client: IdentityClient, cache: IdentityCache, cancel: Cancellat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::StatusCode,
+        response::{IntoResponse, Response},
+        routing::get,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+    use tokio::sync::{Notify, Semaphore};
+
+    struct Replies {
+        context_status: AtomicU16,
+        comparison_status: AtomicU16,
+        registered: AtomicBool,
+        gated: bool,
+        context_entered: Notify,
+        comparison_entered: Notify,
+        context_release: Semaphore,
+        comparison_release: Semaphore,
+    }
+    struct Fixture {
+        client: Arc<IdentityClient>,
+        replies: Arc<Replies>,
+        task: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+    async fn context(State(replies): State<Arc<Replies>>) -> Response {
+        replies.context_entered.notify_one();
+        if replies.gated {
+            replies.context_release.acquire().await.unwrap().forget();
+        }
+        let status = StatusCode::from_u16(replies.context_status.load(Ordering::SeqCst)).unwrap();
+        if status != StatusCode::OK {
+            return status.into_response();
+        }
+        Json(serde_json::json!({"success":true,"data":{"agentId":12,"ownerUserId":52,"teamId":71}}))
+            .into_response()
+    }
+    async fn comparison(State(replies): State<Arc<Replies>>) -> Response {
+        replies.comparison_entered.notify_one();
+        if replies.gated {
+            replies.comparison_release.acquire().await.unwrap().forget();
+        }
+        let status =
+            StatusCode::from_u16(replies.comparison_status.load(Ordering::SeqCst)).unwrap();
+        if status != StatusCode::OK {
+            return status.into_response();
+        }
+        let registered = replies.registered.load(Ordering::SeqCst);
+        Json(serde_json::json!({"success":true,"data":{
+            "registered":registered,"gitEmailHash":registered.then(|| email_hash("new@example.test")),
+            "hashAlgorithm":"SHA-256","normalization":"TRIM_LOWERCASE"
+        }})).into_response()
+    }
+    impl Fixture {
+        async fn new(gated: bool) -> Self {
+            let replies = Arc::new(Replies {
+                context_status: AtomicU16::new(200),
+                comparison_status: AtomicU16::new(200),
+                registered: AtomicBool::new(true),
+                gated,
+                context_entered: Notify::new(),
+                comparison_entered: Notify::new(),
+                context_release: Semaphore::new(0),
+                comparison_release: Semaphore::new(0),
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/api/v1/agents/me", get(context))
+                .route("/api/v1/agents/me/git-identity", get(comparison))
+                .with_state(replies.clone());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = Arc::new(
+                IdentityClient::new(&format!("ws://{address}"), "synthetic-agent-token").unwrap(),
+            );
+            Self {
+                client,
+                replies,
+                task,
+            }
+        }
+    }
+    async fn seeded(age: Duration) -> IdentityCache {
+        let cache = IdentityCache::default();
+        *cache.0.write().await = Some(Snapshot {
+            user_id: 51,
+            hash: decode_hash(&email_hash("old@example.test")).unwrap(),
+            checked_at: Instant::now() - age,
+        });
+        cache
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_attribution_while_both_requests_wait_then_replaces_it() {
+        let f = Fixture::new(true).await;
+        let cache = seeded(Duration::ZERO).await;
+        let client = f.client.clone();
+        let refreshing = cache.clone();
+        let task = tokio::spawn(async move { refreshing.refresh(&client).await });
+        for (entered, release) in [
+            (&f.replies.context_entered, &f.replies.context_release),
+            (&f.replies.comparison_entered, &f.replies.comparison_release),
+        ] {
+            tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                .await
+                .unwrap();
+            let current =
+                tokio::time::timeout(Duration::from_secs(1), cache.attribute("old@example.test"))
+                    .await
+                    .unwrap();
+            let replacement = cache.attribute("new@example.test").await;
+            // Release before asserting so failures do not leave a blocked refresh.
+            release.add_permits(1);
+            assert_eq!(current.author_user_id.as_deref(), Some("51"));
+            assert_eq!(replacement.author_user_id, None);
+        }
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            cache.attribute("old@example.test").await.author_user_id,
+            None
+        );
+        assert_eq!(
+            cache
+                .attribute("new@example.test")
+                .await
+                .author_user_id
+                .as_deref(),
+            Some("52")
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_failure_at_either_request_preserves_only_the_original_ttl() {
+        for fail_context in [true, false] {
+            let f = Fixture::new(false).await;
+            let cache = seeded(Duration::from_secs(20)).await;
+            if fail_context {
+                f.replies.context_status.store(503, Ordering::SeqCst);
+            } else {
+                f.replies.comparison_status.store(503, Ordering::SeqCst);
+            }
+            assert_eq!(
+                cache.refresh(&f.client).await,
+                Err(IdentityError::Unavailable)
+            );
+            assert_eq!(
+                cache
+                    .attribute("old@example.test")
+                    .await
+                    .author_user_id
+                    .as_deref(),
+                Some("51")
+            );
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert_eq!(
+                cache.attribute("old@example.test").await.author_user_id,
+                None
+            );
+            tokio::time::resume();
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_auth_denials_at_either_request_and_unregistration_clear_immediately() {
+        for (context_status, comparison_status, registered) in [
+            (401, 200, true),
+            (403, 200, true),
+            (200, 401, true),
+            (200, 403, true),
+            (200, 200, false),
+        ] {
+            let f = Fixture::new(false).await;
+            let cache = seeded(Duration::ZERO).await;
+            f.replies
+                .context_status
+                .store(context_status, Ordering::SeqCst);
+            f.replies
+                .comparison_status
+                .store(comparison_status, Ordering::SeqCst);
+            f.replies.registered.store(registered, Ordering::SeqCst);
+            let result = cache.refresh(&f.client).await;
+            if registered {
+                assert_eq!(result, Err(IdentityError::Unauthenticated));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(
+                cache.attribute("old@example.test").await.author_user_id,
+                None
+            );
+        }
+    }
 
     #[test]
     fn hashing_matches_the_server_vector_and_java_trim() {

@@ -85,7 +85,9 @@ async fn periodic_refresh_observes_a_deleted_registration_without_restart() {
     let refreshed = tokio::time::timeout(
         git_identity::REFRESH_INTERVAL + Duration::from_secs(5),
         async {
-            while f.state.git_identity_calls.load(Ordering::SeqCst) < 2 {
+            while f.state.git_identity_calls.load(Ordering::SeqCst) < 2
+                || cache.attribute(EMAIL).await.author_user_id.is_some()
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         },
@@ -214,7 +216,7 @@ async fn agent(f: &Fixture) -> IdentityClient {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn broker_uses_agent_owner_not_user_session_and_clears_after_deletion_or_failure() {
+async fn broker_uses_agent_owner_preserves_transient_failures_and_clears_after_deletion() {
     let f = fixture().await;
     public(f.run(
         &["git-identity", "register", "--email-stdin"],
@@ -241,7 +243,10 @@ async fn broker_uses_agent_owner_not_user_session_and_clears_after_deletion_or_f
         assert!(cache.attribute(EMAIL).await.author_user_id.is_some());
         f.state.git_identity_mode.store(mode, Ordering::SeqCst);
         assert!(cache.refresh(&client).await.is_err());
-        assert_eq!(cache.attribute(EMAIL).await.author_user_id, None);
+        assert_eq!(
+            cache.attribute(EMAIL).await.author_user_id.as_deref(),
+            Some("51")
+        );
     }
     f.state.git_identity_mode.store(0, Ordering::SeqCst);
     cache.refresh(&client).await.unwrap();
