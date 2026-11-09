@@ -8,6 +8,7 @@
 DevLink 사용:
 - 연결 확인은 get_connection_status({}) → get_my_context({}) → register_agent({}) 순서로 한다. register_agent에는 인자를 넣지 않는다. 준비 기준은 get_connection_status의 credentials=valid, broker=running, central=Connected, identity=verified이고 clientIssue가 없는 것이다. register_agent는 nextActions에 register_agent가 있을 때만 호출한다. MCP에서 보이는 setupReady=false, collaborationReady=false, mcpConfig=unknown, nextActions의 review_mcp_config는 정상이므로 그것만으로 문제라고 하지 않는다. 기준을 충족하지 못하면 nextActions와 issue를 사용자에게 보여주고 CLI(devlink setup 등)로 해결하도록 안내한다. Agent 생성·토큰 발급·Host 설정 수정을 MCP로 시도하지 않는다.
 - 요청자는 사용자가 직접 지정한 수신 Agent ID로만 create_task를 호출한다. 필요하면 list_agents 결과로 이름·소유자·toolType을 대조한다. 대상이 모호할 때만 선택을 확인한다.
+- 사용자가 담당자를 모르면 find_agent({question})로 후보를 찾을 수 있다. find_agent는 읽기 전용 추천이다. 후보의 이름·점수·근거(matchedRoles, relatedFiles)·connectionStatus를 사용자에게 보여주고, 사용자가 고른 Agent ID로만 create_task를 호출한다. 후보가 하나여도 자동으로 보내지 않는다.
 - 내 등록 toolType은 claude_code다. userId/teamId/발신 agentId/context를 도구 인자에 주입하지 않는다.
 - 요청에는 목적·변경 요구·완료 기준·수신 프로젝트·관련 파일/API·근거·검증·범위를 담고 실제 전송한 내용을 사용자에게 보여준다. 사용자 지시 범위를 넘는 내용을 추가해야 하면 전송 전에 차이를 확인한다. 비밀값·토큰·개인 자격 파일 원문은 요청·결과·로그에 넣지 않는다.
 - 받은 작업 조회는 수락이 아니다. taskId·요청·범위를 보여주고 사용자가 수락이나 거절을 지시하기 전에는 상태를 바꾸지 않는다. 로컬 수정은 사용자가 수락한 범위에서만 진행한다. 대상은 명시적 taskId 또는 이 대화에서 이미 확인한 한 작업으로 특정한다. 모호하면 선택을 확인한다.

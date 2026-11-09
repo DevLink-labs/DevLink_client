@@ -8,6 +8,8 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { BrokerClient } from '../dist/broker/client.js';
 import { BrokerHttp } from '../dist/broker/http.js';
+import { BrokerFault } from '../dist/broker/contracts.js';
+import { recoveryAdvice } from '../dist/broker/recovery.js';
 import { createServer } from '../dist/server.js';
 import { brokerEnvelopeSchema } from '../dist/broker/envelopes.js';
 import { fakeBroker } from './helpers/fake-broker.mjs';
@@ -198,6 +200,26 @@ test('update_agent keeps login, busy, binding and unconfirmed outcomes distinct 
     assert.equal(error.code, code, `${status}`); assert.equal(error.outcome, outcome, `${status}`);
     assert.equal(error.taskId, undefined); assert.equal(error.requestKey, undefined);
   }
+});
+
+test('find_agent keeps recommendation outages definite and validates before the broker (S15P31D108-188)', async (t) => {
+  const { broker, client } = await fixture(t);
+  for (const [status, remote, code, outcome] of [
+    [503, { scope: 'domain', code: 'GIT_ROUTING_UNAVAILABLE', outcome: 'rejected' }, 'GIT_ROUTING_UNAVAILABLE', 'rejected'],
+    [403, { scope: 'domain', code: 'FORBIDDEN', outcome: 'rejected' }, 'BROKER_FORBIDDEN', 'rejected'],
+    [400, { scope: 'domain', code: 'VALIDATION_FAILED', outcome: 'rejected' }, 'VALIDATION_FAILED', 'rejected'],
+    [502, { scope: 'transport', code: 'CENTRAL_UNAVAILABLE', outcome: 'unknown' }, 'CENTRAL_UNAVAILABLE', 'unknown'],
+  ]) {
+    broker.setHook(({ body, send }) => {
+      if (body.operation !== 'find_agent') return false;
+      send({ error: remote }, status); return true;
+    });
+    const error = await faultOf(client.execute('find_agent', { question: '로그인' }));
+    assert.equal(error.code, code, `${status}`); assert.equal(error.outcome, outcome, `${status}`);
+    assert.equal(error.taskId, undefined); assert.equal(error.requestKey, undefined);
+  }
+  const routing = recoveryAdvice(new BrokerFault('GIT_ROUTING_UNAVAILABLE', 'r'), 'find_agent');
+  assert.deepEqual(routing, { stage: 'central', nextActions: ['check_network_then_retry'] });
 });
 
 test('ambiguous envelopes, conflicting keys and invalid metadata fail safely', async (t) => {

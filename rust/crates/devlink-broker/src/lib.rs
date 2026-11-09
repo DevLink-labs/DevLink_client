@@ -1,6 +1,7 @@
 pub mod agent_api;
 pub mod agent_context;
 pub mod agent_profile;
+pub mod agent_recommendations;
 pub mod broker;
 pub mod broker_control;
 pub mod business_api;

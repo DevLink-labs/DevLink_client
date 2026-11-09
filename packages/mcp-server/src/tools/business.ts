@@ -21,6 +21,23 @@ const conversationText = providerText
   .refine((value) => !value.includes('\0'), 'Message must not contain NUL.');
 // Central isBlank treats some control characters as blank; Agent metadata rejects them all.
 const agentText = providerText.refine((value) => !/[\u0000-\u001F\u007F-\u009F]/.test(value), 'Text must not contain control characters.');
+// S15P31D108-188: the central recommendation strips Java whitespace (String.strip) and then
+// counts 1..1,000 code points. NBSP is not Java whitespace, so it is kept and counted.
+const javaWhitespace = /[\t-\r\u001C-\u001F \u1680\u2000-\u2006\u2008-\u200A\u2028\u2029\u205F\u3000]/;
+const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+function javaStrip(value: string): string {
+  // Index scan instead of an anchored trailing regex, which backtracks quadratically.
+  let start = 0, end = value.length;
+  while (start < end && javaWhitespace.test(value[start]!)) start++;
+  while (end > start && javaWhitespace.test(value[end - 1]!)) end--;
+  return value.slice(start, end);
+}
+// abort skips the refines once the cap fails; padding beyond it is never meaningful.
+const recommendationQuestion = z.string().max(16_000, { abort: true }).refine((value) => !loneSurrogate.test(value), 'Question must be valid Unicode.')
+  .refine((value) => {
+    const length = [...javaStrip(value)].length;
+    return length >= 1 && length <= 1_000;
+  }, 'Question must have 1 to 1,000 characters after trimming.');
 const eventId = z.string().regex(/^[1-9][0-9]{0,18}$/).refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n, 'Event ID must fit Java Long.');
 const brokerOutput = z.strictObject({ requestId: z.string(), mcpRequestId: z.union([z.string(), z.number()]).optional(),
   requestKey: z.string().optional(), data: z.record(z.string(), z.unknown()) });
@@ -54,6 +71,9 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       handler: (args, ctx) => broker.execute('update_agent', args, { signal: ctx.signal, mcpRequestId: ctx.mcpRequestId }),
     }),
+    tool('find_agent', 'Find which teammate Agents are most likely responsible for the work the user described, using the central team recommendation (role tags and recent Git activity; no LLM). Read-only: it never chooses a recipient, creates a task or changes anything. question is the user\'s description of the work (1 to 1,000 characters). repoKey is an optional hint (64 lowercase hex) and does not narrow the search. The result lists up to 5 candidates with score, per-factor scores, matchedRoles, relatedFiles and connectionStatus at evaluation time, or INSUFFICIENT_EVIDENCE with a reason. Present the candidates and let the user decide; never send a task to a candidate the user did not choose.', z.strictObject({
+      question: recommendationQuestion, repoKey: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    }), true),
     tool('create_task', 'Request work from a recipient agent. A delivery failure is separate from the central task status. Timeout does not cancel the task; do not blindly resend. Without requestKey every call is a new request. To retry a request whose outcome is unknown, call again with the requestKey from the earlier result or error (or a key you chose up front) and exactly the same arguments: the same task is returned instead of a duplicate. Different arguments under one key fail with REQUEST_KEY_CONFLICT.', z.strictObject({
       recipientAgentId: id, title: providerText.max(200), description: providerText.max(16_000), taskContext: providerText.max(16_000).optional(), requestKey,
     })),
