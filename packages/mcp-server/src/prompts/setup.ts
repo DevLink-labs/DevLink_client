@@ -6,23 +6,25 @@ import { connectionSchema, type nextAction } from '../broker/onboarding.js';
 type NextAction = z.infer<typeof nextAction>;
 type Connection = z.infer<typeof connectionSchema>;
 export const SETUP_PROMPT_NAME = 'devlink_setup';
+const cli = 'devlink --config "<PROFILE_CONFIG>"';
+const replacedConnectionGuidance = `Central replaced this broker's Agent connection and the broker stopped retrying. Check whether another broker is using this Agent and coordinate with its owner. After resolving the conflict, run \`${cli} stop\` and \`${cli} start\`, then reopen this Host.`;
 
 /** Fixed advice per diagnostic action. `user` steps are run by the person, never by the assistant. */
 export const setupGuidance: Readonly<Record<NextAction, { actor: 'user' | 'assistant_on_request'; text: string }>> = Object.freeze({
-  prepare_cli_profile: { actor: 'user', text: 'No DevLink broker profile is available to this MCP server. In your own terminal run `devlink setup` (it handles login, team, project, tool and Agent selection), then reopen this Host.' },
-  repair_private_file: { actor: 'user', text: 'The broker credential file was rejected or cannot be used. Check it with `devlink setup status` and repair it with the DevLink CLI; never paste its contents into chat. Then reopen this Host.' },
-  inspect_local_broker: { actor: 'user', text: 'The local DevLink broker did not answer. Check it with `devlink status` and start it with `devlink start` if it is stopped.' },
+  prepare_cli_profile: { actor: 'user', text: `No DevLink broker profile is available to this MCP server. In your own terminal run \`${cli} setup\` (it handles login, team, project, tool and Agent selection), then reopen this Host.` },
+  repair_private_file: { actor: 'user', text: `The broker credential file was rejected or cannot be used. Check it with \`${cli} setup status\` and repair it with the DevLink CLI. Keep its contents private and then reopen this Host.` },
+  inspect_local_broker: { actor: 'user', text: `The local DevLink broker did not answer. Check it with \`${cli} status\` and start it with \`${cli} start\` if it is stopped.` },
   check_network_then_retry: { actor: 'user', text: 'The broker cannot reach the DevLink central service. Check the network or central availability, then run this prompt again.' },
-  stop_then_reauthenticate_agent: { actor: 'user', text: 'Central rejected this Agent credential. In your own terminal run `devlink stop`, then `devlink agent token` to issue a new Agent token, then `devlink start`, and reopen this Host. Issuing a token is a deliberate step only you run; it is never done from chat.' },
-  inspect_profile_then_rebind: { actor: 'user', text: 'The verified identity or project differs from what this MCP process saw. Inspect it with `devlink setup status`. If it shows the Agent and project you intend, just reopen this Host. Otherwise run `devlink setup` again, or `devlink stop`, `devlink agent use --id <ID> --project <PATH>`, `devlink agent token`, `devlink start` (rebinding needs a stopped broker and a new Agent token), then reopen this Host.' },
+  stop_then_reauthenticate_agent: { actor: 'user', text: `Central rejected this Agent credential. In your own terminal run \`${cli} stop\`, then \`${cli} agent token\` to issue a new Agent token, then \`${cli} start\`, and reopen this Host.` },
+  inspect_profile_then_rebind: { actor: 'user', text: `The verified identity or project differs from what this MCP process saw. Inspect it with \`${cli} setup status\`. If it shows the Agent and project you intend, just reopen this Host. Otherwise run \`${cli} setup\` again, or \`${cli} stop\`, \`${cli} agent use --id <ID> --project <PATH>\`, \`${cli} agent token\`, \`${cli} start\` (rebinding needs a stopped broker and a new Agent token), then reopen this Host.` },
   inspect_connection_owner: { actor: 'user', text: 'Another MCP process owns this Agent session. Check whether that process is yours and still running. Only after it has stopped, wait for its lease (about 90 seconds) to expire, then reopen this Host. Do not force a takeover.' },
   check_provider_contract: { actor: 'user', text: 'The broker and this MCP server disagree on the protocol. Update DevLink so the broker and MCP server come from the same release.' },
-  repair_inbox_then_restart: { actor: 'user', text: 'The broker task inbox failed. Check `devlink status`, fix the reported inbox problem, then restart the broker with `devlink stop` and `devlink start`.' },
+  repair_inbox_then_restart: { actor: 'user', text: `The broker task inbox failed. Check \`${cli} status\`, fix the reported inbox problem, then restart the broker with \`${cli} stop\` and \`${cli} start\`.` },
   register_agent: { actor: 'assistant_on_request', text: 'Bind this Host session to your existing DevLink Agent. On request the assistant first calls get_my_context({}) and shows the Agent name, tool and project; only after you confirm that Agent does it call register_agent({}) with an empty object. This never creates an Agent or issues a token.' },
-  review_mcp_config: { actor: 'user', text: 'Review the DevLink MCP entry of this Host with `devlink setup status`. It should pass only the DEVLINK_BROKER_FILE path.' },
+  review_mcp_config: { actor: 'user', text: `Review the DevLink MCP entry of this Host with \`${cli} setup status\`. It should pass only the DEVLINK_BROKER_FILE path.` },
   open_or_restart_host: { actor: 'user', text: 'After the steps above, close and reopen this Host so the DevLink MCP server starts again.' },
-  inspect_owned_agents_then_use: { actor: 'user', text: 'An earlier Agent creation result is unknown. Check your Agents with `devlink agent list` and select the right one with `devlink setup --agent-id <ID>`; do not create another Agent.' },
-  retry_diagnosis: { actor: 'user', text: 'The diagnosis did not finish. Run this prompt again; if it repeats, check `devlink status`.' },
+  inspect_owned_agents_then_use: { actor: 'user', text: `An earlier Agent creation result is unknown. Check your Agents with \`${cli} agent list\` and select the existing Agent with \`${cli} setup --agent-id <ID>\`.` },
+  retry_diagnosis: { actor: 'user', text: `The diagnosis did not finish. Run this prompt again. If it repeats, check \`${cli} status\`.` },
 });
 
 export interface SetupPlan { ready: boolean; steps: NextAction[] }
@@ -68,10 +70,15 @@ export function renderSetup(data: Connection): string {
     lines.push('Needed steps, in order:');
     plan.steps.forEach((step, index) => {
       const guide = setupGuidance[step];
-      lines.push(`${index + 1}. [${step}] (${guide.actor === 'user' ? 'you run' : 'assistant, only when you ask'}) ${guide.text}`);
+      const text = step === 'inspect_connection_owner' && data.central === 'Replaced' ? replacedConnectionGuidance : guide.text;
+      lines.push(`${index + 1}. [${step}] (${guide.actor === 'user' ? 'you run' : 'assistant, only when you ask'}) ${text}`);
     });
   }
+  const hasCliCommands = lines.some((line) => line.includes(cli));
   lines.push('', ...rules);
+  if (hasCliCommands) {
+    lines.push('- Keep --config "<PROFILE_CONFIG>" in every CLI command you show. Tell the user to replace <PROFILE_CONFIG> with the absolute path of the CLI config file used to issue this Host\'s DEVLINK_BROKER_FILE. If it is unclear or this is a new setup, have them confirm the intended config file first. Use the default profile only if the user confirms it is the intended one.');
+  }
   return lines.join('\n');
 }
 

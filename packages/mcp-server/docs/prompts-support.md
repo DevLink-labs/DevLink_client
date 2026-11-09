@@ -156,22 +156,24 @@ MSYS_NO_PATHCONV=1 codex --no-daemon -a never exec --ignore-user-config --epheme
 
 `nextActions` 14종 각각에 고정 안내문이 있다(`setupGuidance`). `register_agent`만 "사용자가 요청할 때 assistant가 실행"이고 나머지는 모두 "사용자가 직접 실행"이다.
 
+아래 CLI 하위 명령은 모두 `devlink --config "<PROFILE_CONFIG>"` 뒤에 붙인다. `<PROFILE_CONFIG>`에는 이 Host의 `DEVLINK_BROKER_FILE`을 발행한 CLI 설정 파일의 절대 경로를 넣는다. `devlink --config "<PROFILE_CONFIG>" mcp path` 출력과 Host 설정의 경로를 대조할 수 있다. 경로가 불명확하거나 처음 설정할 때는 사용자가 대상 프로필을 확인한 뒤 진행한다. 기본 프로필도 사용자가 대상으로 확인한 경우에만 지정한다.
+
 | nextAction | 사용자에게 보여 주는 안내 요지 |
 | --- | --- |
-| `prepare_cli_profile` | 터미널에서 `devlink setup` 실행 후 Host 재시작 |
-| `repair_private_file` | `devlink setup status`로 자격 파일 확인·복구. 내용을 채팅에 붙이지 않음 |
-| `inspect_local_broker` | `devlink status`, 멈췄으면 `devlink start` |
+| `prepare_cli_profile` | 터미널에서 `setup` 실행 후 Host 재시작 |
+| `repair_private_file` | `setup status`로 자격 파일 확인·복구. 파일 내용은 비공개로 유지 |
+| `inspect_local_broker` | `status`로 확인하고 멈췄으면 `start` |
 | `check_network_then_retry` | 네트워크·중앙 상태 확인 후 prompt 재실행 |
-| `stop_then_reauthenticate_agent` | 사용자가 직접 `devlink stop` → `devlink agent token` → `devlink start` → Host 재시작. 토큰 발급은 채팅에서 하지 않음 |
-| `inspect_profile_then_rebind` | `devlink setup status`로 확인. 의도한 Agent·프로젝트면 Host만 재시작. 아니면 `devlink setup` 재실행, 또는 `devlink stop` → `devlink agent use --id <ID> --project <PATH>` → `devlink agent token` → `devlink start` 후 Host 재시작(`agent use`는 멈춘 브로커가 필요하고 Agent 토큰을 다시 요구함) |
-| `inspect_connection_owner` | 다른 소유 프로세스 확인. 멈춘 뒤에만 약 90초 lease 만료 대기 |
+| `stop_then_reauthenticate_agent` | 사용자가 직접 `stop` → `agent token` → `start` → Host 재시작 |
+| `inspect_profile_then_rebind` | `setup status`로 확인. 의도한 Agent·프로젝트면 Host만 재시작. 아니면 `setup` 재실행, 또는 `stop` → `agent use --id <ID> --project <PATH>` → `agent token` → `start` 후 Host 재시작(`agent use`는 멈춘 브로커가 필요하고 Agent 토큰을 다시 요구함) |
+| `inspect_connection_owner` | `central=Replaced`이면 같은 Agent를 사용하는 브로커가 있는지 확인하고 소유자와 조율한다. 충돌 해소 후 `stop` → `start`로 대상 브로커를 재시작하고 Host를 다시 연다. 로컬 MCP 세션 충돌이면 소유 프로세스가 멈춘 뒤 약 90초 lease 만료를 기다린다. |
 | `check_provider_contract` | 브로커와 MCP 서버를 같은 릴리스로 맞춤 |
-| `repair_inbox_then_restart` | `devlink status` 확인, 수리 후 `devlink stop`·`devlink start` |
+| `repair_inbox_then_restart` | `status` 확인, 수리 후 `stop` → `start` |
 | `register_agent` | 요청 시 `get_my_context({})`로 Agent 확인 → 사용자 확인 뒤 `register_agent({})` |
-| `review_mcp_config` | `devlink setup status`로 DevLink MCP 항목 확인 (위 규칙상 보통 표시되지 않음) |
+| `review_mcp_config` | `setup status`로 DevLink MCP 항목 확인 (위 규칙상 보통 표시되지 않음) |
 | `open_or_restart_host` | 앞 단계 뒤 Host 재시작 |
-| `inspect_owned_agents_then_use` | `devlink agent list` 확인 후 `devlink setup --agent-id <ID>`. 새로 만들지 않음 |
-| `retry_diagnosis` | prompt 재실행, 반복되면 `devlink status` |
+| `inspect_owned_agents_then_use` | `agent list` 확인 후 `setup --agent-id <ID>`로 기존 Agent 선택 |
+| `retry_diagnosis` | prompt 재실행, 반복되면 `status` |
 
 안내에 쓴 CLI 명령(`devlink setup`, `setup status`, `setup --agent-id`, `status`, `start`, `stop`, `agent list`, `agent use --id --project`, `agent token`)은 `rust/crates/devlink-cli`의 명령 정의에서 실제로 있는지 확인했다.
 

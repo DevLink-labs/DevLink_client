@@ -193,7 +193,7 @@ export async function verifySetupPrompt(options) {
           await save('missing', missing);
           const missingTurns = claudeTurns(missing.stdout).turns;
           assert.deepEqual(missingTurns[0].calls, [], 'Claude called a tool for missing credentials');
-          assert.match(missingTurns[0].finalText, /devlink setup/, 'Missing-credential guidance did not reach the model');
+          assert.match(missingTurns[0].finalText, /\bdevlink\s+--config\b[^\r\n]*\bsetup\b/, 'Missing-credential guidance lost the explicit profile');
           assert.deepEqual(arrivalsSince(broker, start), [], 'Missing credentials reached the broker');
           result.stages.push({ name: 'prompt-missing-credentials', passed: true, calls: 0, brokerArrivals: 0, finalText: missingTurns[0].finalText.slice(0, 600) });
         } else {

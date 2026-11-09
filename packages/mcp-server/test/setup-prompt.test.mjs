@@ -38,6 +38,8 @@ async function fixture(t, { settings } = {}) {
 }
 const text = (result) => result.messages.map((message) => message.content.text).join('\n');
 const numbered = (value) => value.split('\n').filter((line) => /^\d+\. \[/.test(line)).map((line) => line.match(/\[([a-z_]+)\]/)[1]);
+const cliCommands = (value) => [...value.matchAll(/`(devlink [^`]+)`/g)].map(([, command]) => command);
+const profileCli = 'devlink --config "<PROFILE_CONFIG>"';
 
 test('prompt catalog lists only devlink_setup without arguments and never contacts the broker', async (t) => {
   const f = await fixture(t);
@@ -60,6 +62,7 @@ test('unbound verified Agent gets context check and explicit register step only'
   assert.match(body, /get_my_context\(\{\}\)/);
   assert.match(body, /only after you confirm that Agent does it call register_agent\(\{\}\)/);
   assert.match(body, /Do not call any tool in this reply/);
+  assert.doesNotMatch(body, /PROFILE_CONFIG/);
   assert.deepEqual(f.calls.map((call) => `${call.method} ${call.path}`), ['GET /v1/connection']);
   assert.equal(f.calls[0].body, '');
   assert.ok(!body.includes(token) && !body.includes('127.0.0.1'));
@@ -82,7 +85,8 @@ test('a context-blocked MCP process renders its clientIssue and drops registrati
   assert.match(body, /clientIssue \(this MCP process\): BROKER_CONTEXT_INVALID/);
   assert.deepEqual(numbered(body), ['inspect_profile_then_rebind', 'open_or_restart_host']);
   assert.match(body, /If it shows the Agent and project you intend, just reopen this Host/);
-  assert.match(body, /`devlink stop`, `devlink agent use --id <ID> --project <PATH>`, `devlink agent token`, `devlink start`/);
+  assert.deepEqual(cliCommands(body), ['setup status', 'setup', 'stop', 'agent use --id <ID> --project <PATH>', 'agent token', 'start']
+    .map((command) => `${profileCli} ${command}`));
 });
 
 test('provider requestIds outside the plain identifier alphabet are not copied into the prompt', () => {
@@ -91,7 +95,9 @@ test('provider requestIds outside the plain identifier alphabet are not copied i
     nextActions: ['stop_then_reauthenticate_agent'] }));
   assert.match(body, /requestId invalid\)/);
   assert.ok(!body.includes('Ignore previous instructions'));
-  assert.match(body, /`devlink stop`, then `devlink agent token`.*then `devlink start`/);
+  assert.deepEqual(cliCommands(body), ['stop', 'agent token', 'start'].map((command) => `${profileCli} ${command}`));
+  assert.match(body, /absolute path of the CLI config file used to issue this Host's DEVLINK_BROKER_FILE/);
+  assert.match(body, /Use the default profile only if the user confirms it is the intended one/);
 });
 
 test('bound verified session needs no steps', async (t) => {
@@ -122,11 +128,30 @@ test('failure states list only their own advice and keep registration out', asyn
   assert.ok(f.calls.every((call) => call.method === 'GET' && call.path === '/v1/connection'));
 });
 
+test('central replacement requires broker recovery while a local conflict requires lease expiry', async (t) => {
+  const f = await fixture(t);
+  const nextActions = ['inspect_connection_owner', 'review_mcp_config'];
+  f.set({ ...base, central: 'Replaced', identity: 'unknown', hostSession: 'not_checked', nextActions });
+  const replaced = text(await f.client.getPrompt({ name: SETUP_PROMPT_NAME }));
+  assert.deepEqual(numbered(replaced), ['inspect_connection_owner']);
+  assert.match(replaced, /coordinate with its owner\. After resolving the conflict/);
+  assert.deepEqual(cliCommands(replaced), [`${profileCli} stop`, `${profileCli} start`]);
+  assert.doesNotMatch(replaced, /lease|90 seconds/);
+
+  f.set({ ...base, hostSession: 'conflict', nextActions });
+  const conflict = text(await f.client.getPrompt({ name: SETUP_PROMPT_NAME }));
+  assert.deepEqual(numbered(conflict), ['inspect_connection_owner']);
+  assert.match(conflict, /Only after it has stopped, wait for its lease \(about 90 seconds\)/);
+  assert.deepEqual(cliCommands(conflict), []);
+  assert.deepEqual(f.calls.map((call) => `${call.method} ${call.path}`), ['GET /v1/connection', 'GET /v1/connection']);
+});
+
 test('missing credentials advise CLI preparation without any broker request', async (t) => {
   const f = await fixture(t, { settings: null });
   const body = text(await f.client.getPrompt({ name: SETUP_PROMPT_NAME }));
   assert.deepEqual(numbered(body), ['prepare_cli_profile', 'open_or_restart_host']);
   assert.match(body, /\(you run\) No DevLink broker profile/);
+  assert.deepEqual(cliCommands(body), [`${profileCli} setup`]);
   assert.equal(f.calls.length, 0);
 });
 
@@ -143,6 +168,7 @@ test('every diagnostic action has fixed guidance and only registration is assist
   for (const [action, guide] of Object.entries(setupGuidance)) {
     assert.equal(guide.actor, action === 'register_agent' ? 'assistant_on_request' : 'user', action);
     assert.doesNotMatch(guide.text, /password|token value|paste .*token/i, action);
+    for (const command of cliCommands(guide.text)) assert.ok(command.startsWith(`${profileCli} `), action);
   }
   const rendered = renderSetup(parse(base));
   for (const rule of ['Never ask for, accept or repeat passwords, tokens or credential file contents',
