@@ -11,7 +11,7 @@ export const DEFAULT_ENTRY=fileURLToPath(new URL('../../dist/index.js',import.me
 // break the scripts (DevLink_client#88).
 export const REQUIRED_TOOLS=Object.freeze([
   'devlink_ping','get_my_context','get_connection_status',
-  'register_agent','list_agents','update_agent','create_task','update_task_status','complete_task',
+  'register_agent','list_agents','update_agent','find_agent','create_task','update_task_status','complete_task',
   'get_tasks','get_task_result','ask_question','answer_question','get_updates',
 ]);
 

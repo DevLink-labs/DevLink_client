@@ -1,0 +1,262 @@
+{
+  "$id": "urn:devlink:local-broker:v1:recommendation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "MATCHED",
+        "MULTIPLE_CANDIDATES",
+        "INSUFFICIENT_EVIDENCE"
+      ]
+    },
+    "evaluatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "insufficientReason": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "NO_ELIGIBLE_AGENTS",
+            "NO_MATCHING_EVIDENCE"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "gitCoverage": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "AVAILABLE",
+            "NOT_COLLECTED"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "NO_TEAM_REPOSITORIES",
+                "NO_RETAINED_OBSERVATIONS"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workingState": {
+          "type": "string",
+          "enum": [
+            "FRESH",
+            "STALE",
+            "NOT_COLLECTED"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "reason",
+        "workingState"
+      ],
+      "additionalProperties": false
+    },
+    "candidates": {
+      "maxItems": 5,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,18}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "part": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connectionStatus": {
+            "type": "string",
+            "enum": [
+              "ONLINE",
+              "OFFLINE"
+            ]
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "scores": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 60
+              },
+              "git": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 40
+              },
+              "working": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "frequency": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "recency": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10
+              }
+            },
+            "required": [
+              "role",
+              "git",
+              "working",
+              "frequency",
+              "recency"
+            ],
+            "additionalProperties": false
+          },
+          "matchedRoles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "relatedFiles": {
+            "maxItems": 5,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "repoId": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,18}$"
+                },
+                "relativePath": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "WORKING",
+                      "COMMIT"
+                    ]
+                  }
+                },
+                "observedAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "repoId",
+                "relativePath",
+                "sources",
+                "observedAt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "latestCommitAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workingObservedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "insufficientReason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "NO_MATCHING_EVIDENCE"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "agentId",
+          "name",
+          "part",
+          "connectionStatus",
+          "score",
+          "scores",
+          "matchedRoles",
+          "relatedFiles",
+          "latestCommitAt",
+          "workingObservedAt",
+          "insufficientReason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "status",
+    "evaluatedAt",
+    "insufficientReason",
+    "gitCoverage",
+    "candidates"
+  ],
+  "additionalProperties": false
+}

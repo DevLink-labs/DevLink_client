@@ -10,6 +10,9 @@ export type Tool = "codex" | "claude-code";
 
 export interface CliResult { code: number | null; stdout: string; stderr: string }
 
+/** SET-3-01 Agent duty: part and role tags for `agent.action=create`. */
+export interface AgentDuty { part?: "FRONTEND" | "BACKEND" | "INFRA" | "OTHER"; roles?: string[] }
+
 export interface SetupEvent { schemaVersion: number; type: string; step?: string; stepStatus?: string; exitCode?: number; data?: any; error?: any }
 
 /** Fake Host installs in the npm layout `setup` resolves (.cmd shim + known package entry + Node). */
@@ -136,7 +139,7 @@ export class Actor {
    * `setup --non-interactive --input <file> --output jsonl --password-stdin --node-path --mcp-entry`,
    * password on stdin only. Returns parsed JSONL events and the exit code.
    */
-  async desktopSetup(input: { email: string; password: string; teamId: number; mcpEntry: string; node: string }) {
+  async desktopSetup(input: { email: string; password: string; teamId: number; mcpEntry: string; node: string; duty?: AgentDuty }) {
     const name = basename(this.project).trim();
     const plan = {
       schemaVersion: 1,
@@ -146,7 +149,8 @@ export class Actor {
       team: { id: String(input.teamId) },
       project: { path: this.project, name },
       tool: { type: this.tool },
-      agent: { action: "create", name },
+      // SET-3-01 (contracts/setup/v1): part/roles are sent only when given, as the desktop app does.
+      agent: { action: "create", name, ...(input.duty?.part ? { part: input.duty.part } : {}), ...(input.duty?.roles ? { roles: input.duty.roles } : {}) },
       mcp: { mode: "apply", targetPath: this.targetPath },
     };
     const directory = await mkdtemp(join(dirname(this.config), "setup-input-"));

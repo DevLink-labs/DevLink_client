@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test as base, expect, type Browser, type Page } from "@playwright/test";
-import { Actor, type Tool } from "./client/actor.ts";
+import { Actor, type AgentDuty, type Tool } from "./client/actor.ts";
 import { McpSession } from "./client/mcp.ts";
 import { Secrets } from "./client/secrets.ts";
 import { WebSession } from "./client/web-session.ts";
@@ -35,8 +35,9 @@ interface Fixtures {
   newScreen: () => Promise<WorkspacePage>;
   connectMcp: (actor: Actor) => Promise<McpSession>;
   /** `webUserId` is the signed-in web user; the desktop app compares setup status against it. */
-  desktopSetup: (actor: Actor, user: UserSpec, teamId: number, webUserId: number) => Promise<ConnectedActor>;
-  seedTeam: () => Promise<{ teamId: number; teamName: string; a: ConnectedActor; b: ConnectedActor }>;
+  desktopSetup: (actor: Actor, user: UserSpec, teamId: number, webUserId: number, duty?: AgentDuty) => Promise<ConnectedActor>;
+  /** `duty` sets SET-3-01 part/roles per actor at Agent creation (3rd MVP scenarios). */
+  seedTeam: (duty?: { a?: AgentDuty; b?: AgentDuty }) => Promise<{ teamId: number; teamName: string; a: ConnectedActor; b: ConnectedActor }>;
 }
 
 /** Runs every cleanup step even when one fails, then throws all failures together. */
@@ -149,14 +150,14 @@ export const test = base.extend<Fixtures>({
    * the same order (JSONL result, then `setup status`).
    */
   desktopSetup: async ({ stack }, use) => {
-    await use(async (actor, user, teamId, webUserId) => {
+    await use(async (actor, user, teamId, webUserId, duty) => {
       await actor.initProfile();
       // The app detects installed tools when a folder is picked and only offers detected ones.
       expect(await actor.setupTools(), "setup tools detects the fake Host").toContain(actor.tool);
       // The app asks for the password (user.mode=login) when the CLI profile has no valid session.
       const session = await actor.authStatus();
       expect(session === null || ["logged_out", "expired"].includes(session.state ?? ""), `auth status before setup: ${session?.state}`).toBe(true);
-      const { events, code, plan } = await actor.desktopSetup({ email: user.email, password: user.password, teamId, mcpEntry: stack.mcpEntry, node: stack.node });
+      const { events, code, plan } = await actor.desktopSetup({ email: user.email, password: user.password, teamId, mcpEntry: stack.mcpEntry, node: stack.node, duty });
       actor.started = true;
       expect(events.length, "setup printed JSONL events").toBeGreaterThan(0);
       expect(events.every((event) => event.schemaVersion === 1), "every JSONL record is schemaVersion 1").toBe(true);
@@ -188,7 +189,7 @@ export const test = base.extend<Fixtures>({
 
   /** Fast path for S2/S3: REST signup + team, then the same desktop setup for both actors. */
   seedTeam: async ({ stack, secrets, newUser, newActor, desktopSetup }, use) => {
-    await use(async () => {
+    await use(async (duty) => {
       const users = { a: newUser("a"), b: newUser("b") };
       const sessions = { a: new WebSession(stack.centralUrl, secrets), b: new WebSession(stack.centralUrl, secrets) };
       const userIds = { a: 0, b: 0 };
@@ -200,8 +201,8 @@ export const test = base.extend<Fixtures>({
       const team = await sessions.a.send<{ teamId: number; inviteCode: string }>("POST", "/api/v1/teams", { name: teamName });
       secrets.add(team.inviteCode);
       await sessions.b.send("POST", "/api/v1/teams/join", { inviteCode: team.inviteCode });
-      const a = await desktopSetup(await newActor("a", "codex"), users.a, team.teamId, userIds.a);
-      const b = await desktopSetup(await newActor("b", "claude-code"), users.b, team.teamId, userIds.b);
+      const a = await desktopSetup(await newActor("a", "codex"), users.a, team.teamId, userIds.a, duty?.a);
+      const b = await desktopSetup(await newActor("b", "claude-code"), users.b, team.teamId, userIds.b, duty?.b);
       return { teamId: team.teamId, teamName, a, b };
     });
   },

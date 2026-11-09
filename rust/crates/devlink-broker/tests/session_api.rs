@@ -559,3 +559,123 @@ async fn http_session_changes_reach_central_presence_on_the_same_websocket() {
         .unwrap()
         .unwrap();
 }
+
+/// A child that stays alive until killed (stand-in for a Host-spawned MCP server).
+fn long_running_child() -> std::process::Child {
+    let mut command = if cfg!(windows) {
+        let mut c = std::process::Command::new("ping");
+        c.args(["-n", "60", "127.0.0.1"]);
+        c
+    } else {
+        let mut c = std::process::Command::new("sleep");
+        c.arg("60");
+        c
+    };
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// DevLink_client#108: Codex kills its MCP child without EOF, so the session is never released.
+/// With the owner's processId recorded, the session ends right after that process does: presence
+/// turns OFFLINE and another instance binds the Agent without waiting for the 90 s lease.
+#[tokio::test]
+async fn a_killed_owner_process_releases_its_session_before_the_lease() {
+    let f = Fixture::new(Arc::new(VerifiedTestIdentity::default())).await;
+    let mut child = long_running_child();
+    let (status, codex) = f
+        .send(
+            Method::POST,
+            "/v1/sessions",
+            json!({"requestId":"claim-codex","instanceId":"codex","mode":"recover","processId":child.id()}),
+        )
+        .await;
+    assert_eq!(status, 200, "{codex}");
+    let codex_id = codex["data"]["sessionId"].as_str().unwrap().to_owned();
+    let bind = |id: String, instance: &'static str| {
+        let f = &f;
+        async move {
+            f.send(
+                Method::POST,
+                &format!("/v1/sessions/{id}/bind"),
+                json!({"requestId":format!("bind-{instance}"),"instanceId":instance,"agentId":"11"}),
+            )
+            .await
+        }
+    };
+    assert_eq!(bind(codex_id.clone(), "codex").await.0, 200);
+    assert_eq!(f.central.presence().await, Some(PresenceStatus::Online));
+
+    let next = f.claim("next", "recover", None).await.1["data"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A live owner keeps the Agent.
+    assert_eq!(
+        bind(next.clone(), "next").await.1["error"]["code"],
+        "SESSION_CONFLICT"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    timeout(Duration::from_secs(5), async {
+        while f.central.presence().await != Some(PresenceStatus::Offline) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the cleanup tick ends the dead owner's session");
+    let bound = bind(next, "next").await;
+    assert_eq!(bound.0, 200, "{}", bound.1);
+    let stale = f
+        .send(
+            Method::POST,
+            &format!("/v1/sessions/{codex_id}/heartbeat"),
+            json!({"requestId":"late","instanceId":"codex"}),
+        )
+        .await;
+    assert_eq!(stale.1["error"]["code"], "SESSION_EXPIRED");
+    f.stop().await;
+}
+
+/// A processId that is not running (or not readable) records no owner: the lease rules stay.
+/// A non-numeric processId is rejected like any other malformed field.
+#[tokio::test]
+async fn an_unknown_process_id_keeps_the_lease_and_a_malformed_one_is_rejected() {
+    let f = Fixture::new(Arc::new(VerifiedTestIdentity::default())).await;
+    let mut ended = long_running_child();
+    let pid = ended.id();
+    ended.kill().unwrap();
+    ended.wait().unwrap();
+    let (status, ghost) = f
+        .send(
+            Method::POST,
+            "/v1/sessions",
+            json!({"requestId":"claim-ghost","instanceId":"ghost","mode":"recover","processId":pid}),
+        )
+        .await;
+    assert_eq!(status, 200, "{ghost}");
+    let id = ghost["data"]["sessionId"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let beat = f
+        .send(
+            Method::POST,
+            &format!("/v1/sessions/{id}/heartbeat"),
+            json!({"requestId":"beat","instanceId":"ghost"}),
+        )
+        .await;
+    assert_eq!(beat.0, 200, "{}", beat.1);
+    for bad in [json!("123"), json!(-1), json!(1.5), json!(null)] {
+        let (status, _) = f
+            .send(
+                Method::POST,
+                "/v1/sessions",
+                json!({"requestId":"claim-bad","instanceId":"bad","mode":"recover","processId":bad}),
+            )
+            .await;
+        assert_eq!(status, 400);
+    }
+    f.stop().await;
+}

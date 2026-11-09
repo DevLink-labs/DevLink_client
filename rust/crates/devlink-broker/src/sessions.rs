@@ -7,6 +7,7 @@
 
 use crate::{
     central::{CentralIdentity, CentralState, ConnectionStatus},
+    owner_process::OwnerProcess,
     protocol::PresenceStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error};
@@ -291,11 +292,22 @@ struct Entry {
     instance_id: Identifier,
     expires_at: Instant,
     replaced: bool,
+    /// MCP process that claimed the session, when it reported one (#108).
+    owner: Option<OwnerProcess>,
+}
+
+/// Decides whether a recorded owner process has ended; replaceable in unit tests.
+struct OwnerCheck(fn(&OwnerProcess) -> bool);
+impl Default for OwnerCheck {
+    fn default() -> Self {
+        Self(OwnerProcess::is_gone)
+    }
 }
 
 /// 인메모리 세션 레지스트리
 #[derive(Default)]
 struct Registry {
+    owner_gone: OwnerCheck,
     /// sessionId -> Entry
     sessions: HashMap<Identifier, Entry>,
     /// instanceId -> sessionId (인스턴스별 단일 활성 세션 매핑)
@@ -320,7 +332,11 @@ impl Registry {
     }
     /// 만료된 세션 정리
     fn expire(&mut self, now: Instant) {
-        self.sessions.retain(|_, entry| entry.expires_at > now);
+        // A session whose owner process has definitely ended expires now, not at the lease
+        // end: a Host that kills its MCP child gives it no chance to release (#108).
+        let gone = self.owner_gone.0;
+        self.sessions
+            .retain(|_, entry| entry.expires_at > now && !entry.owner.as_ref().is_some_and(gone));
         self.instances
             .retain(|_, id| self.sessions.contains_key(id));
         self.owners
@@ -424,6 +440,7 @@ impl Registry {
                 instance_id: instance,
                 expires_at: now + lease,
                 replaced: false,
+                owner: None,
             },
         );
         self.observed = true;
@@ -667,13 +684,30 @@ impl SessionManager {
         mode: ClaimMode,
         agent: Option<Identifier>,
     ) -> Result<Session, SessionError> {
+        self.claim_with_owner(instance, mode, agent, None).await
+    }
+
+    /// Like `claim`, recording the claiming MCP process so the session ends with it (#108).
+    /// The owner is set only on a session that has none; it never moves to another process.
+    pub async fn claim_with_owner(
+        &self,
+        instance: Identifier,
+        mode: ClaimMode,
+        agent: Option<Identifier>,
+        owner: Option<OwnerProcess>,
+    ) -> Result<Session, SessionError> {
         let principal = self.resolve(agent.as_ref()).await?;
         let mut registry = self.registry.lock().await;
         self.with_context(&mut registry, |registry, current| {
             let now = Instant::now();
             registry.expire(now);
             check_current_principal(&principal, current)?;
-            registry.claim(instance, mode, agent.as_ref(), principal, now, self.lease)
+            let session =
+                registry.claim(instance, mode, agent.as_ref(), principal, now, self.lease)?;
+            if let Some(entry) = registry.sessions.get_mut(&session.session_id) {
+                entry.owner = entry.owner.or(owner);
+            }
+            Ok(session)
         })
         .await
     }
@@ -1168,6 +1202,58 @@ mod tests {
             now,
             LEASE_DURATION,
         )
+    }
+
+    /// #108: a session whose recorded owner process ended is expired before its lease, so
+    /// another instance can bind the Agent; an owner that is still alive keeps it.
+    #[test]
+    fn a_session_whose_owner_process_ended_expires_before_the_lease() {
+        let now = Instant::now();
+        let mut registry = Registry {
+            owner_gone: OwnerCheck(|owner| *owner == OwnerProcess::synthetic(41, 7)),
+            ..Registry::default()
+        };
+        let dead = claim(&mut registry, "codex", ClaimMode::Recover, Some("12"), now).unwrap();
+        registry.sessions.get_mut(&dead.session_id).unwrap().owner =
+            Some(OwnerProcess::synthetic(41, 7));
+        let other = claim(&mut registry, "next", ClaimMode::Recover, None, now).unwrap();
+        // Before expire: the dead owner still blocks the bind.
+        assert!(matches!(
+            registry.bind(
+                &other.session_id,
+                &id("next"),
+                principal(Some("12")),
+                now,
+                LEASE_DURATION
+            ),
+            Err(SessionError::Conflict)
+        ));
+        registry.expire(now);
+        assert!(!registry.sessions.contains_key(&dead.session_id));
+        assert!(!registry.instances.contains_key(&id("codex")));
+        let bound = registry
+            .bind(
+                &other.session_id,
+                &id("next"),
+                principal(Some("12")),
+                now,
+                LEASE_DURATION,
+            )
+            .unwrap();
+        assert_eq!(bound.principal.agent_id, Some(id("12")));
+
+        // A live owner (and a session without an owner) keeps the normal lease rules.
+        let mut registry = Registry {
+            owner_gone: OwnerCheck(|_| false),
+            ..Registry::default()
+        };
+        let live = claim(&mut registry, "claude", ClaimMode::Recover, Some("12"), now).unwrap();
+        registry.sessions.get_mut(&live.session_id).unwrap().owner =
+            Some(OwnerProcess::synthetic(42, 9));
+        registry.expire(now + Duration::from_secs(1));
+        assert!(registry.sessions.contains_key(&live.session_id));
+        registry.expire(now + LEASE_DURATION);
+        assert!(!registry.sessions.contains_key(&live.session_id));
     }
 
     struct TestIdentity;

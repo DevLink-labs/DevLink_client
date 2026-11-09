@@ -3,7 +3,7 @@
   "server": {
     "repository": "https://github.com/SSAFY-URAYAHA/DevLink_server.git",
     "ref": "develop",
-    "commit": "aecdcc3db69254d1262eb7ec82809487717b7ec7"
+    "commit": "d945f8b76594d08a231676fa89d4f7445d303eb8"
   },
   "frontend": {
     "repository": "https://github.com/SSAFY-URAYAHA/DevLink_frontend.git",

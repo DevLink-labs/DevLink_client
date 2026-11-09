@@ -432,6 +432,17 @@ impl UserClient {
         self.post_prepared(path, body, prepared).await
     }
 
+    pub(crate) async fn put<T: DeserializeOwned>(&mut self, path: &str, body: Value) -> Result<T> {
+        let csrf = self.csrf().await?;
+        self.exchange(Method::PUT, path, Some(body), Some(csrf))
+            .await
+    }
+
+    pub(crate) async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+        let csrf = self.csrf().await?;
+        self.exchange(Method::DELETE, path, None, Some(csrf)).await
+    }
+
     pub(crate) async fn prepare_post(&mut self) -> Result<PreparedPost> {
         self.csrf().await.map(PreparedPost)
     }
@@ -569,6 +580,7 @@ fn rejection(status: u16, code: Option<&str>) -> anyhow::Error {
         Some("ACCESS_DENIED") => "ACCESS_DENIED",
         Some("RESOURCE_NOT_FOUND") => "RESOURCE_NOT_FOUND",
         Some("AGENT_ALREADY_EXISTS") if status == 409 => "AGENT_ALREADY_EXISTS",
+        Some("GIT_EMAIL_ALREADY_REGISTERED") if status == 409 => "GIT_EMAIL_ALREADY_REGISTERED",
         _ => match status {
             401 => "AUTHENTICATION_REQUIRED",
             403 => "ACCESS_DENIED",

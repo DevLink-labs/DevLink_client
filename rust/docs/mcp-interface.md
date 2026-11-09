@@ -2,7 +2,7 @@
 
 2026-10-30 현재 구현 기준. CLI는 독립 Rust 브로커를 제어하고 Host는 stdio MCP 프로세스를 제어한다. MCP는 인증된 loopback HTTP로 브로커를 호출하며 중앙 토큰과 WebSocket은 브로커가 관리한다. MCP 종료는 공유 브로커 종료로 이어지지 않는다.
 
-CLI/설정·자격 파일·세션 4개·업무 HTTP 경로(2026-11-09 기준 11개, `packages/mcp-server/src/broker/contracts.ts`의 `operationRoutes`)·중앙 신원·수신함/ACK provider는 구현되어 있다. MCP 도구의 최종 DTO 수렴(-97)과 실제 Host 전체 왕복(-66)은 별도다. [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 참고한다.
+CLI/설정·자격 파일·세션 4개·업무 HTTP 경로(2026-11-09 기준 12개, `packages/mcp-server/src/broker/contracts.ts`의 `operationRoutes`)·중앙 신원·수신함/ACK provider는 구현되어 있다. MCP 도구의 최종 DTO 수렴(-97)과 실제 Host 전체 왕복(-66)은 별도다. [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 참고한다.
 
 ## 세션·전송 규칙
 
@@ -83,6 +83,7 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | register_agent | /v1/agents/register | [기존 Agent 확인](business-relay.md) |
 | list_agents | /v1/agents/list | [팀 목록](business-relay.md) |
 | update_agent | /v1/agents/update | [Agent 정보 수정](agent-bootstrap.md#agent-정보-수정-s15p31d108-146) |
+| find_agent | /v1/agents/find | [담당 Agent 추천 중계](agent-recommendation.md) |
 | create_task | /v1/tasks/create | [작업 생성·requestKey](business-relay.md) |
 | update_task_status | /v1/tasks/status | [상태 변경](task-operations.md) |
 | complete_task | /v1/tasks/complete | [완료](task-operations.md) |

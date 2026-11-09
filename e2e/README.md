@@ -26,7 +26,7 @@ pwsh e2e/scripts/e2e-local.ps1 -PgBin C:\pg16\bin -SkipBuild -Grep S3
 | `src/client/actor.ts` | 액터별 `--config` 프로필, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `git init`한 프로젝트, 가짜 Host(npm 배치의 `codex.cmd`/`claude.cmd`, 버전 응답만 함, 자동 설정 지원 버전 Codex 0.166.0·Claude Code 2.1.317). 자식 환경에서 `DEVLINK_*`·`E2E_*` 제거. |
 | `src/client/mcp.ts` | `packages/mcp-server/scripts/lib/mcp-stdio.mjs`(실제 중앙 검증 스크립트와 공유)로 MCP stdio 연결. |
 | `src/pages/workspace.ts` | 역할·라벨 선택자 화면 객체. 새로고침 버튼을 누르며 `toPass`로 기다린다. |
-| `specs/` | S1~S3 (`@p0`). |
+| `specs/` | S1~S3 (`@p0`). S15 `find_agent` 실제 중앙 추천 중계와 후보에게 작업 전달·오프라인 후보 관찰(`@p1`, S15P31D108-188·-190). S16 3차 통합: setup part·roles → find_agent → 선택 → create_task → 수락·완료(`@p1`, S15P31D108-191). `E2E_REAL_HOSTS=1`이면 사용자 로그인을 쓰는 실제 Codex·Claude Code 턴도 실행한다(모델 비용 발생, [기록](../packages/mcp-server/docs/mvp3-integration.md)). |
 
 ## 시나리오
 

@@ -1,5 +1,6 @@
-//! Agent confirmation/list providers. This router never creates Agents or credentials;
-//! `update_agent` changes only the bound Agent's project name and role (S15P31D108-146).
+//! Agent confirmation/list/recommendation providers. This router never creates Agents or
+//! credentials; `update_agent` changes only the bound Agent's project name and role
+//! (S15P31D108-146), and `find_agent` only reads central recommendations (S15P31D108-188).
 use crate::{
     agent_profile::{self, Tool, UpdateFault, UpdateFaultKind, UpdateOptions},
     business_api::{self, BusinessRequest, LOCAL_BUDGET, session_error},
@@ -38,6 +39,7 @@ pub fn router(
         .route("/v1/agents/register", post(register))
         .route("/v1/agents/list", post(list))
         .route("/v1/agents/update", post(update))
+        .route("/v1/agents/find", post(find))
         .with_state(Api {
             token,
             sessions,
@@ -59,6 +61,13 @@ struct ConfirmArguments {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListArguments {}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FindArguments {
+    question: String,
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    repo_key: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateArguments {
@@ -256,6 +265,41 @@ fn context_error(error: crate::context_api::ContextFailure) -> TaskError {
             task_id: None,
         },
     }
+}
+/// S15P31D108-188: relay the central recommendation for the bound Agent's team.
+/// Read-only; the result never selects a recipient or creates a task.
+async fn find(State(api): State<Api>, request: Request) -> Response {
+    let deadline = Instant::now() + LOCAL_BUDGET;
+    let body: BusinessRequest<FindArguments> =
+        match session_api::read_authenticated(&api.token, request).await {
+            Ok(body) => body,
+            Err(response) => return *response,
+        };
+    let work = async {
+        body.validate("find_agent")?;
+        let question = crate::agent_recommendations::question(&body.arguments.question)
+            .ok_or(TaskError::rejected("VALIDATION_FAILED", 400))?;
+        let repo_key = body.arguments.repo_key.as_deref();
+        if repo_key.is_some_and(|key| !crate::agent_recommendations::repo_key(key)) {
+            return Err(TaskError::rejected("VALIDATION_FAILED", 400));
+        }
+        let actor = api
+            .sessions
+            .authorize(&body.context.session_id, &body.context.principal())
+            .await
+            .map_err(session_error)?;
+        let data = api.central.find_agents(&actor, question, repo_key).await?;
+        api.sessions
+            .authorize(&body.context.session_id, &actor)
+            .await
+            .map_err(session_error)?;
+        Ok(data)
+    };
+    let result = tokio::select! {
+        _ = api.cancel.cancelled() => Err(TaskError::unknown("CENTRAL_UNAVAILABLE")),
+        result = timeout_at(deadline, work) => result.unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT"))),
+    };
+    business_api::response(&body.request_id, None, result)
 }
 async fn list(State(api): State<Api>, request: Request) -> Response {
     let deadline = Instant::now() + LOCAL_BUDGET;
