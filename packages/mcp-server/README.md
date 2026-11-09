@@ -80,7 +80,7 @@ Codex는 같은 실행 명령을 `mcp_servers` 아래 인라인 테이블로 씁
 devlink = { command = 'C:\Program Files\nodejs\node.exe', args = ['C:\Users\me\DevLink\packages\mcp-server\dist\index.js', '--transport', 'stdio'], env = { DEVLINK_BROKER_FILE = 'C:\Users\me\.devlink\.devlink-runtime\broker.json' } }
 ```
 
-자동 적용은 setup이 실제로 검증한 Host 버전에서만 동작합니다(현재 develop 기준 Codex 0.166.0, Claude Code 2.1.310. 목록은 [setup 문서](../../rust/docs/setup.md)와 [제공 계약](../../contracts/setup/v1/mcp-config-provider.md)이 기준입니다). 지원하지 않는 버전이나 `--mcp-mode manual`에서는 setup이 파일을 쓰지 않고 위와 같은 항목과 적용 위치를 안내한 뒤 `SETUP_MANUAL_ACTION_REQUIRED`(종료 3)로 끝납니다. 이는 setup 미완료입니다. 사용자가 직접 프로젝트 설정에 추가한 뒤 `devlink setup status`와 [온보딩 3단계](docs/onboarding.md#connection-sequence-three-steps)로 확인합니다. 브로커가 실행 중이 아니면 MCP가 브로커에 연결할 수 없으므로 업무 도구는 성공하지 않습니다(`get_connection_status`로 확인).
+자동 적용은 setup이 실제로 검증한 Host 버전에서만 동작합니다(현재 develop 기준 Codex 0.166.0, Claude Code 2.1.317. 목록은 [setup 문서](../../rust/docs/setup.md)와 [제공 계약](../../contracts/setup/v1/mcp-config-provider.md)이 기준입니다). 지원하지 않는 버전이나 `--mcp-mode manual`에서는 setup이 파일을 쓰지 않고 위와 같은 항목과 적용 위치를 안내한 뒤 `SETUP_MANUAL_ACTION_REQUIRED`(종료 3)로 끝납니다. 이는 setup 미완료입니다. 사용자가 직접 프로젝트 설정에 추가한 뒤 `devlink setup status`와 [온보딩 3단계](docs/onboarding.md#connection-sequence-three-steps)로 확인합니다. 브로커가 실행 중이 아니면 MCP가 브로커에 연결할 수 없으므로 업무 도구는 성공하지 않습니다(`get_connection_status`로 확인).
 
 Host마다 별도 프로필 파일을 지정합니다. 한 프로필에는 Agent 하나가 묶이므로, 두 번째 Host는 `--config`로 다른 프로필(config.json)을 준비하고 그 프로필의 자격 파일 경로를 씁니다. `.devlink-runtime/runtime.json`의 `controlToken`은 CLI 제어용이며 MCP 자격 파일로 사용할 수 없습니다. 자격 파일은 프로세스마다 최초 업무 요청 시 한 번 읽습니다. 토큰 교체, 다른 팀·Agent로 전환할 때는 CLI에서 명시적으로 설정한 뒤 MCP 프로세스를 다시 시작합니다.
 
