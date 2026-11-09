@@ -21,7 +21,7 @@ export async function fakeBroker({ profiles } = {}) {
     try {
       let text = '';
       for await (const chunk of req) text += chunk;
-      const body = JSON.parse(text);
+      const body = req.method === 'GET' && !text ? {} : JSON.parse(text); // Bodyless GET diagnostics reach the hook.
       const path = req.url;
       calls.push({ path, body, method: req.method });
       const send = (data, status = 200) => {

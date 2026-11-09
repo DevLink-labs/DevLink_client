@@ -13,6 +13,7 @@
     "start": "node dist/index.js",
     "test": "npm run build && node scripts/export-contracts.mjs --check && node --test --test-concurrency=1 test/*.test.mjs",
     "test:hosts": "npm run build && node scripts/verify-hosts.mjs",
+    "test:setup-prompt": "npm run build && node scripts/verify-setup-prompt.mjs",
     "integration:check": "npm run build && node scripts/integration-readiness.mjs",
     "integration:rust": "npm run build && node scripts/verify-rust-readiness.mjs",
     "contracts:write": "npm run build && node scripts/export-contracts.mjs",
