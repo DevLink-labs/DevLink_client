@@ -34,7 +34,7 @@ $env:E2E_REAL_HOSTS = '1'; pwsh e2e/scripts/e2e-local.ps1 -SkipBuild -Grep "S16"
 | --- | --- | --- | --- | --- |
 | SET-3-01 part·roles를 setup으로 등록하고 중앙에 저장 | – | 통과 | 통과 | – (CLI 단계) |
 | SET-3-02 담당 정보 수정(-183) | – | 미구현 | 미검증 | 미검증 |
-| SET-3-03 Git 이메일(-184) | – | client PR #106 미병합 | 미검증 | 미검증 |
+| SET-3-03 Git 이메일(-184) | – | CLI 등록·조회 | Agent 대조용 SHA-256 확인 | – (CLI 단계) |
 | IDX-3-01~03 커밋·작업 파일 수집과 범위 제한(-185~-187) | – | 미구현 | 미검증 | 미검증 |
 | FIND-3-01 find\_agent 중계 | 통과 | 통과 | 통과 | 통과(도구 호출, 두 Host) |
 | FIND-3-02 결과 표시 | 통과(스키마) | 통과 | 통과 | 도구 결과 통과 / 표시 문구는 수동 확인 |
@@ -72,7 +72,7 @@ $env:E2E_REAL_HOSTS = '1'; pwsh e2e/scripts/e2e-local.ps1 -SkipBuild -Grep "S16"
 
 ## 발견한 문제
 
-- **[#108](https://github.com/SSAFY-URAYAHA/DevLink_client/issues/108)**: 같은 Agent의 Host 턴이 끝난 뒤 다음 바인딩까지 걸린 시간이 Host마다 크게 달랐다. 최종 코드로 연속 두 번 실행한 값이다.
+- **[#108](https://github.com/SSAFY-URAYAHA/DevLink_client/issues/108)**: 같은 Agent의 Host 턴이 끝난 뒤 다음 바인딩까지 걸린 시간이 Host마다 크게 달랐다. 아래 값은 세션 해제 수정 전 두 번 실행한 기록이다.
 
   | 직전 Host 턴 | 다음 바인딩까지 | 실행 중 MCP 프로세스 | 종료 시 MCP 프로세스 |
   | --- | --- | --- | --- |
@@ -82,13 +82,14 @@ $env:E2E_REAL_HOSTS = '1'; pwsh e2e/scripts/e2e-local.ps1 -SkipBuild -Grep "S16"
   - 검출기는 실행 중인 MCP 서버를 매번 잡았다(spec이 단언한다). 그래서 종료 시 0개는 프로세스가 실제로 끝났다는 뜻이다.
   - Codex는 MCP 프로세스가 끝났는데도 세션이 풀리지 않았다. MCP 세션을 해제하지 않고 끝내서, 90초 lease가 끝날 때까지 `SESSION_CONFLICT`가 나는 것으로 추정한다.
   - 대기 없이 연속 실행한 첫 시도는 두 도구 호출이 모두 거부됐다.
+  - 세션 해제 수정 [PR #111](https://github.com/SSAFY-URAYAHA/DevLink_client/pull/111)을 포함한 통합 후보를 격리 중앙에서 다시 실행했다. Codex 두 턴 뒤에는 각각 5초, Claude Code 두 턴 뒤에는 각각 4초 만에 다음 세션이 바인딩됐다.
 - MCP 클라이언트는 `SESSION_CONFLICT`를 종료 상태로 취급한다. 그래서 E2E는 바인딩을 시도할 때마다 새 MCP 세션을 연다.
 
 ## 남은 일
 
 - 선행 스토리가 병합되면 같은 시나리오에 다음을 추가한다.
-  - SET-3-03 Git 이메일, IDX-3-01~03 수집
+  - IDX-3-01~03 수집과 등록한 Git 신원의 작성자 대조
   - Git 근거만 / 역할+Git 두 경우
   - 업로드 페이로드 검사
-- 중앙 접속 상태 개선(-204)이 반영되면 `connectionStatus`를 다시 확인한다.
+- 고정 중앙 `d945f8b`의 S15에서 연결된 후보의 `ONLINE`과 브로커 중지 뒤의 `OFFLINE`을 확인했다.
 - 이 기록만으로 -191 수용 기준을 완료로 보지 않는다.

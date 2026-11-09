@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,9 +14,8 @@ import type { Secrets } from "../src/client/secrets.ts";
 
 // S15P31D108-191: 3rd MVP integration — part/roles at setup (SET-3-01) → find_agent (FIND-3-01/02)
 // → the user's pick → create_task (REQ-3-01) → accept → complete.
-// Not covered yet, recorded as unverified: Git e-mail (SET-3-03, client PR #106 not merged) and
-// commit/working-file collection (IDX-3-01..03, not implemented), so the Git-only and role+Git
-// cases and the upload-payload check cannot run.
+// SET-3-03 registers the Git identity used for attribution. The Git-only and role+Git cases and
+// the upload-payload check still depend on commit/working-file collection (IDX-3-01..03).
 //
 // E2E_REAL_HOSTS=1 additionally drives the real Codex (requester A) and Claude Code (receiver B) CLIs
 // with the user's own Host login and a DevLink-only MCP config, and verifies their tool events.
@@ -137,6 +136,24 @@ test("S16 3rd MVP: role tags → find_agent → pick → create_task → accept 
     }
   });
 
+  await test.step("SET-3-03: register Git email and verify the Agent comparison hash", async () => {
+    for (const { actor } of [a, b]) {
+      const localPart = randomUUID();
+      const email = `${localPart}@example.test`;
+      const hash = createHash("sha256").update(email).digest("hex");
+      // Scanning the unique local part catches email leaks without recording the comparison hash.
+      secrets.add(localPart);
+      secrets.add(hash);
+      const registered = await actor.json(["git-identity", "register", "--email-stdin"], { stdin: `${email}\n` });
+      expect(registered.registered).toBe(true);
+      const status = await actor.json(["git-identity", "status"]);
+      expect(status.registered).toBe(true);
+      const identity = await actor.central("/api/v1/agents/me/git-identity");
+      expect(identity.registered).toBe(true);
+      expect(identity.gitEmailHash === hash).toBe(true);
+    }
+  });
+
   await test.step("case role tags only (Git not collected): the tagged teammate is MATCHED", async () => {
     const found = (await mcp.a.call("find_agent", { question: "로그인 오류를 고쳐줄 담당자" })).data;
     records.push(caseRecord("roleTagsOnly+gitNotCollected", found));
@@ -182,7 +199,6 @@ test("S16 3rd MVP: role tags → find_agent → pick → create_task → accept 
     const unverified = {
       gitOnly: "IDX-3-01..03 collection not implemented (S15P31D108-185..187)",
       roleAndGit: "IDX-3-01..03 collection not implemented (S15P31D108-185..187)",
-      gitEmail: "SET-3-03 client not merged (PR #106, S15P31D108-184)",
       uploadPayloadHasNoAbsolutePathDiffOrEmail: "no upload exists yet",
     };
     test.info().annotations.push({ type: "s16:cases", description: JSON.stringify(records) });
