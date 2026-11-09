@@ -1,0 +1,27 @@
+name: "♻️ 리팩토링"
+description: "기존 코드의 구조와 품질을 개선합니다."
+title: "[refactor] "
+labels: ["refactor"]
+
+body:
+    - type: textarea
+      id: improvement-target
+      attributes:
+          label: "개선 대상"
+          value: |
+              -
+
+    - type: textarea
+      id: improvement-description
+      attributes:
+          label: "개선 내용"
+          value: |
+              -
+
+    - type: textarea
+      id: task-list
+      attributes:
+          label: "작업 목록"
+          value: |
+              - [ ]
+              - [ ]

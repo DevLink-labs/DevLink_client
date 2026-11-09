@@ -43,6 +43,8 @@ pub struct Config {
     /// 보낸 작업에 이 시간(분) 동안 완료·실패·거절 알림이 없으면 로컬 지연 알림을 남김 (기본값: 30, 0이면 끔)
     #[serde(default = "task_overdue_minutes")]
     pub task_overdue_minutes: u64,
+    #[serde(default)]
+    pub dependency_remote: String,
 }
 
 pub(crate) const DEFAULT_LOCAL_PORT: u16 = 43127;
@@ -98,6 +100,7 @@ impl Default for Config {
             auth_timeout_ms: auth_timeout(),
             task_message_sync_interval_ms: task_message_sync_interval(),
             task_overdue_minutes: task_overdue_minutes(),
+            dependency_remote: String::new(),
         }
     }
 }
@@ -109,6 +112,18 @@ impl Config {
     /// - `reconnect_*`: 범위 및 max >= initial 조건 확인
     /// - `auth_timeout_ms`: 100ms ~ 60000ms 범위 확인
     pub fn validate(&self) -> Result<()> {
+        if self.dependency_remote.starts_with('-')
+            || self.dependency_remote.len() > 64
+            || !self
+                .dependency_remote
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        {
+            return Err(invalid(
+                "dependencyRemote",
+                "dependencyRemote must be a Git remote name or empty",
+            ));
+        }
         let url = url::Url::parse(&self.server_url)
             .map_err(|_| invalid("serverUrl", "serverUrl must be a valid ws:// or wss:// URL"))?;
         if !matches!(url.scheme(), "ws" | "wss")
