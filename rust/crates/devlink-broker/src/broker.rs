@@ -279,6 +279,7 @@ pub async fn run(path: &Path) -> Result<()> {
         if timeout(Duration::from_secs(1), task).await.is_err() {
             abort.abort();
         }
+    }
     let abort_git_identity = git_identity_sync.abort_handle();
     if timeout(Duration::from_secs(1), git_identity_sync)
         .await
