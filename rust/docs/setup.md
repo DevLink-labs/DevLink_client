@@ -20,6 +20,7 @@ devlink setup --tool codex
 devlink setup --tool claude-code --tool-path "C:\tools\Claude Code\claude.exe"
 # 신규 생성 요청은 최초 토큰 발급 1회까지 포함한다.
 devlink setup --tool codex --create-agent
+devlink setup --tool codex --create-agent --part BACKEND --roles API,인증
 # 기존 본인 Agent 선택 또는 생성 결과 불명 복구
 devlink setup --tool codex --agent-id 34
 # 기존 ID의 토큰이 없거나 인증 거부된 경우에만 1회 발급 허용
@@ -52,6 +53,16 @@ Codex에서 해당 프로젝트를 열고 신뢰 여부를 묻는 메시지가 �
 기본 실행기는 validate에서 프로젝트 경로를 사전 검사한 뒤 설정을 준비한다. 파일이 없으면 별도 init 없이 기본값을 비공개 권한으로 생성하고 `succeeded/applied/reused:false`로 기록한다. 유효한 기존 설정 파일은 보존하고 `succeeded/not_applied/reused:true`로 기록한다. authenticate에서 정상 세션을 서버로 확인해 재사용하거나 필요한 경우만 로그인한다. select_team에서 현재 가입 팀을 검증하고 선택한다. bind_project에서 프로젝트 디렉터리를 재검사하고 기존 Agent 프로필과 비교한 뒤 표시명·Agent명·역할을 검증한다. select_tool에서 설치된 도구를 탐지·선택한다. 이후 register_agent에서 기존 Agent를 재확인하거나 명시적 생성/ID 선택을 처리한다. 선택이 없으면 SETUP_INPUT_REQUIRED/종료 2, 생성 결과 불명이면 SETUP_REGISTRATION_UNKNOWN/종료 3, 기존 토큰의 발급 허용이 없거나 발급 결과가 불명이면 SETUP_TOKEN_REQUIRED/종료 3을 반환한다. ready 프로필은 start_broker → configure_mcp로 진행한다. MCP 설정을 적용/재사용한 뒤 verify_connection에서 브로커·중앙·Agent 신원·자격·MCP 설정을 확인한다. 검증 오류의 `mcpConfig`에 적용 결과와 백업·재시작 안내를 보존한다. TTY도 로그인 입력도 없는 미로그인 실행은 authenticate에서 종료 4와 필요한 입력 descriptor를 반환한다. 앞서 완료한 설정 준비·확인된 세션/팀/도구 변경은 유지한다. 기존 개별 명령도 계속 사용할 수 있다.
 
 `SETUP_STEP_UNAVAILABLE`은 작업 02의 실행 기반에 추가한 코드다. recovery.action은 `use_individual_commands`, automatic/retryable은 false이며, 단계 어댑터가 연결된 빌드 또는 기존 개별 명령을 사용하도록 안내한다. 목표 규격에 대한 이번 구현의 보충 사항은 이 rust 문서에서 관리한다.
+
+## SET-3-01 담당 파트와 역할 태그
+
+`setup`과 `agent create`는 `--part FRONTEND|BACKEND|INFRA|OTHER` 및 `--roles <TAG>`를 지원한다. 태그는 옵션 반복 또는 쉼표로 구분한다. 예: `--roles API,인증 --roles 테스트`. `roleDescription`은 기존 문자열 설명으로 유지한다.
+
+파트 생략은 `OTHER`, 태그 생략은 `[]`이다. 새 Agent의 대화형 setup은 생략한 값을 질문하며 Enter로 기본값을 선택한다. 기존 프로필을 재사용할 때 생략한 담당 정보는 저장값을 유지한다. 기존 Agent를 선택하는 `--agent-id`에는 담당 정보를 함께 지정할 수 없다.
+
+비대화형 입력은 `agent` 안에 `"part":"BACKEND","roles":["API","인증"]`를 추가한다. `action=use`에서는 두 필드를 금지한다. 태그는 최대 10개, 정규화 전 각 문자열이 공백만으로 구성되지 않은 UTF-16 64자 이하여야 한다. 서버와 동일하게 앞뒤 U+0000–U+0020과 중복을 제거하고 순서를 유지한다. 잘못된 값은 중앙 호출 전에 거부하며 JSONL 오류에도 입력 원문을 출력하지 않는다.
+
+중앙 생성 요청과 조회 DTO·로컬 프로필에 담당 정보를 보존한다. 이전 프로필/응답에 필드가 없으면 `OTHER`·`[]`로 읽는다. 서버가 요청한 담당 정보를 반영하지 않은 생성 응답은 성공으로 처리하지 않고 결과 불명으로 남긴다. 서버 계약 근거는 로컬에 확보된 `DevLink_server` 커밋 `42e4ea0`이며, 서버 변경 병합·배포 후 실제 중앙 조회로 일치를 확인해야 한다.
 
 ## 코드 경계
 

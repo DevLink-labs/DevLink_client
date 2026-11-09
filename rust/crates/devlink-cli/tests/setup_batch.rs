@@ -268,7 +268,8 @@ async fn verify_unattended_login_and_reuse(runtime: Option<(PathBuf, PathBuf)>) 
         "schemaVersion":1, "serverUrl":config.server_url,
         "user":{"mode":"login","email":"input@example.test"},
         "team":{"id":"71"}, "project":{"path":project,"name":"Batch project"},
-        "tool":{"type":"codex"}, "agent":{"action":"create","name":"Batch agent"},
+        "tool":{"type":"codex"}, "agent":{"action":"create","name":"Batch agent",
+            "part":"BACKEND","roles":[" API ","API","인증"],"roleDescription":"기존 역할 설명"},
         "mcp":{"mode":"manual"}, "timeoutMs":300000
     });
     let run = |plan: &Value, format: &str| {
@@ -296,6 +297,10 @@ async fn verify_unattended_login_and_reuse(runtime: Option<(PathBuf, PathBuf)>) 
         .unwrap();
     let login = child.wait_with_output().unwrap();
     assert_eq!(login.status.code(), Some(3), "{}", text(&login));
+    let stored = app.state.agents.lock().unwrap().get(&201).cloned().unwrap();
+    assert_eq!(stored["part"], "BACKEND");
+    assert_eq!(stored["roles"], json!(["API", "인증"]));
+    assert_eq!(stored["roleDescription"], "기존 역할 설명");
     let logins = || {
         app.state
             .calls

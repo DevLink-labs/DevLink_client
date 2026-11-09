@@ -56,6 +56,8 @@ devlink [--config <FILE>] setup status --output json
 | `agent.id` | use일 때 필수, create일 때 금지 | 이름 일치로 ID를 추정하지 않음 |
 | `agent.name` | create일 때 필수, use일 때 금지 | 중앙 표시명 |
 | `agent.roleDescription` | create일 때 선택 문자열 | 생략은 없음. use는 중앙 메타데이터를 변경하지 않음 |
+| `agent.part` | create일 때 선택, `FRONTEND / BACKEND / INFRA / OTHER` | 생략은 `OTHER`. 대소문자까지 정확히 일치해야 하며 use에서는 금지 |
+| `agent.roles` | create일 때 선택 문자열 배열 | 생략은 `[]`. 최대 10개, 각 태그는 공백만으로 구성할 수 없고 UTF-16 64자 이하. use에서는 금지 |
 | `agent.issueToken` | use일 때 선택 boolean, 기본 false | 토큰이 없거나 무효이면 true일 때만 발급/회전. create에서는 금지. true인 호출을 네트워크 오류 후 자동 반복하지 않음 |
 | `mcp.mode` | `apply | replace | manual`, 필수 | apply는 기존 DevLink 항목이 다르면 충돌로 보존. replace는 백업 후 DevLink 항목만 현재 프로필로 교체. manual은 설정 안내만 반환하고 종료 3 |
 | `mcp.targetPath` | apply·replace일 때 필수 절대 경로 | 선택 도구와 일치하는 프로젝트 범위 설정 파일. 전역 파일·프로젝트 밖 경로는 거부. manual에서는 금지 |
@@ -91,9 +93,19 @@ ID는 `1..9223372036854775807` 범위의 정규 십진 **문자열**이다. 선�
 {
   "action": "create",
   "name": "DevLink 작업 Agent",
-  "roleDescription": "프로젝트 작업과 검증"
+  "roleDescription": "프로젝트 작업과 검증",
+  "part": "BACKEND",
+  "roles": ["API", "인증"]
 }
 ```
+
+### SET-3-01 담당 정보 계약
+
+서버 메타데이터 API 변경 커밋 `42e4ea0`의 생성 DTO·서비스를 기준으로 한다. 태그 제한은 정규화 전 입력에 적용하며, 각 문자열의 앞뒤 U+0000–U+0020을 제거하고 중복을 첫 등장 순서로 제거한다. `roleDescription`과 `roles`는 독립된 필드다. null, 비문자열 요소, 소문자 파트 등은 중앙 호출 전에 거부한다. 생성 요청과 중앙 응답의 담당 정보가 다르면 생성 결과 불명으로 보존하며 자동 생성 재시도나 토큰 발급을 진행하지 않는다.
+
+대화형 setup은 새 Agent 생성 시 생략된 담당 파트와 역할 태그를 질문한다. 빈 파트 입력은 `OTHER`, 빈 태그 입력은 `[]`이다. `--part BACKEND --roles API,인증`으로 지정할 수도 있다. 기존 Agent 재사용에서는 저장된 담당 정보를 유지하고, `--agent-id`와 담당 정보 옵션을 함께 지정할 수 없다. JSONL 진행·최종 응답 형식과 계약 버전은 유지한다.
+
+데스크톱의 `ProjectConnectView`는 폴더 선택 후 AI 도구·담당 파트·역할 태그를 입력받아 명시적으로 연결을 시작한다. `setup.run` 네 번째 인자와 `desktop/setup-ipc.js`를 통해 동일한 `agent.part`·`agent.roles` 필드를 전달하고 검증한다. 비밀번호 재입력과 연결 재시도에도 담당 정보를 유지한다. 입력 화면에서 지정하지 않은 필드는 생략해 CLI가 신규 등록 시 `OTHER`·`[]`, 기존 프로필 재사용 시 저장값을 사용하도록 한다. 이 계약은 서버 변경 배포를 전제로 하며, 로컬 mock 회귀 통과와 실제 중앙 서버에서의 저장·조회 확인은 구분한다.
 
 ## 3. 단계와 상태
 
