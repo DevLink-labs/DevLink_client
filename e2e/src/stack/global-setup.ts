@@ -96,14 +96,9 @@ export default async function globalSetup(_config: FullConfig) {
   await makePrivateDirectory(runRoot);
   // setup rejects an MCP entry whose directory other accounts can modify, so run a private copy.
   const mcpRuntime = join(runRoot, "mcp-runtime");
-  for (const part of ["dist", "package.json", "node_modules"]) {
-    await cp(join(mcpPackage, part), join(mcpRuntime, part), {
-      recursive: true,
-      filter: (source) => !/[\\/]node_modules[\\/](typescript|@typescript|@types)([\\/]|$)/.test(source),
-    });
-  }
 
   let postgres: Postgres | undefined, central: Central | undefined, proxy: StaticProxy | undefined;
+  const stackSecrets = new Secrets();
   // Runs every step even if one fails, then reports all failures.
   const teardown = async () => {
     const failures: unknown[] = [];
@@ -114,38 +109,46 @@ export default async function globalSetup(_config: FullConfig) {
     if (failures.length) throw new AggregateError(failures, `E2E stack teardown failed: ${failures.map((f) => (f as Error).message).join("; ")}`);
   };
   try {
+    for (const part of ["dist", "package.json", "node_modules"]) {
+      await cp(join(mcpPackage, part), join(mcpRuntime, part), {
+        recursive: true,
+        filter: (source) => !/[\\/]node_modules[\\/](typescript|@typescript|@types)([\\/]|$)/.test(source),
+      });
+    }
     postgres = await startPostgres(pgBin, await (async () => { const d = join(runRoot, "postgres"); await makePrivateDirectory(d); return d; })());
     proxy = await startStaticProxy(dist);
     central = await startCentral({ java, jar, directory: runRoot, postgres, frontendOrigin: proxy.origin });
     proxy.setTarget(central.url);
-    const health = await fetch(`${proxy.origin}/api/v1/health`).then((r) => r.json()) as { success?: boolean };
+    const health = await fetch(`${proxy.origin}/api/v1/health`, { signal: AbortSignal.timeout(5_000) }).then((r) => r.json()) as { success?: boolean };
     if (health.success !== true) throw new Error("Frontend proxy cannot reach central");
+
+    const receipt = {
+      runId, startedAt: new Date().toISOString(), mode: latest ? "latest" : "locked",
+      serverCommit, frontendCommit, clientCommit: headOf(repoRoot), clientDirty, ...clientArtifacts,
+      postgres: { port: postgres.port, version: 16 },
+      central: { url: central.url, pid: central.pid, java, profile: "default", timezone: "UTC" },
+      frontend: { origin: proxy.origin, dist: basename(dist) },
+    };
+    await writeFile(join(runRoot, "stack-receipt.json"), JSON.stringify(receipt, null, 2));
+
+    Object.assign(process.env, {
+      E2E_RUN_ROOT: runRoot,
+      E2E_FRONTEND_URL: proxy.origin,
+      E2E_CENTRAL_URL: central.url,
+      E2E_DEVLINK_CLI_PATH: cli,
+      E2E_MCP_ENTRY: join(mcpRuntime, "dist", "index.js"),
+    });
+    // Stack secrets stay in this runner process, out of Chromium and CLI environments.
+    stackSecrets.add(postgres.password);
+    stackSecrets.add(central.cursorSecret);
   } catch (error) {
-    await teardown().catch(() => undefined);
+    try {
+      await teardown();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "E2E stack startup and teardown failed");
+    }
     throw error;
   }
-
-  const receipt = {
-    runId, startedAt: new Date().toISOString(), mode: latest ? "latest" : "locked",
-    serverCommit, frontendCommit, clientCommit: headOf(repoRoot), clientDirty, ...clientArtifacts,
-    postgres: { port: postgres.port, version: 16 },
-    central: { url: central.url, pid: central.pid, java, profile: "default", timezone: "UTC" },
-    frontend: { origin: proxy.origin, dist: basename(dist) },
-  };
-  await writeFile(join(runRoot, "stack-receipt.json"), JSON.stringify(receipt, null, 2));
-
-  Object.assign(process.env, {
-    E2E_RUN_ROOT: runRoot,
-    E2E_FRONTEND_URL: proxy.origin,
-    E2E_CENTRAL_URL: central.url,
-    E2E_DEVLINK_CLI_PATH: cli,
-    E2E_MCP_ENTRY: join(mcpRuntime, "dist", "index.js"),
-  });
-  // Stack secrets stay in this runner process (not in env, so Chromium/CLI children never see them);
-  // after the run, prove they are absent from everything the run keeps.
-  const stackSecrets = new Secrets();
-  stackSecrets.add(postgres.password);
-  stackSecrets.add(central.cursorSecret);
   return async () => {
     const failures: unknown[] = [];
     await teardown().catch((error) => failures.push(error));

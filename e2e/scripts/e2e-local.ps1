@@ -48,11 +48,15 @@ function Sync-Checkout([string]$Name, $Entry) {
   if (-not (Test-Path -LiteralPath (Join-Path $dir '.git'))) {
     Invoke-Checked "git init $Name" { git init -q $dir }
   }
+  # Check before changing revisions so a reused stack never discards local work.
+  $status = git -C $dir status --porcelain
+  if ($LASTEXITCODE -ne 0) { throw "[$Name] cannot inspect $dir" }
+  if ($status) { throw "[$Name] $dir has local changes; the pinned checkout must be clean." }
   $head = (git -C $dir rev-parse -q --verify HEAD 2>$null)
   if ($head -ne $Entry.commit) {
     Write-Host "[$Name] fetching $($Entry.commit)"
     Invoke-Checked "git fetch $Name" { git -C $dir fetch -q --depth 1 $Entry.repository $Entry.commit }
-    Invoke-Checked "git checkout $Name" { git -C $dir checkout -q --force FETCH_HEAD }
+    Invoke-Checked "git checkout $Name" { git -C $dir checkout -q --detach --no-overwrite-ignore FETCH_HEAD }
   }
   # Build outputs (build/, dist/, node_modules/) are ignored by each repo; any other change is not the pinned source.
   if (git -C $dir status --porcelain) { throw "[$Name] $dir has local changes; the pinned checkout must be clean." }
