@@ -16,6 +16,7 @@ pub mod inbox;
 pub mod local;
 pub mod mcp_config;
 pub mod notifications;
+pub mod owner_process;
 pub mod private_file;
 pub mod protocol;
 pub mod sent_tasks;

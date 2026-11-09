@@ -52,6 +52,10 @@ struct ClaimRequest {
     /// 선택적 대상 Agent 식별자
     #[serde(default, deserialize_with = "crate::sessions::present")]
     agent_id: Option<Identifier>,
+    /// Optional OS process ID of the claiming MCP server. The broker records that process and
+    /// ends the session as soon as it has exited, instead of waiting for the lease (#108).
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    process_id: Option<u32>,
 }
 
 /// POST /v1/sessions/:id/bind 요청 바디
@@ -205,7 +209,13 @@ async fn claim(State(api): State<Api>, request: Request) -> Response {
     };
     match api
         .sessions
-        .claim(body.instance_id, body.mode, body.agent_id)
+        .claim_with_owner(
+            body.instance_id,
+            body.mode,
+            body.agent_id,
+            body.process_id
+                .and_then(crate::owner_process::OwnerProcess::identify),
+        )
         .await
     {
         Ok(session) => {

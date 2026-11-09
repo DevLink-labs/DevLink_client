@@ -225,3 +225,48 @@ test('private settings snapshot works on this OS; invalid snapshots expose no fi
   await assert.rejects(readBrokerSettings(file.path), (e) => e.code === 'CREDENTIAL_FILE_INVALID' && !String(e).includes('do-not-leak'));
   await assert.rejects(readBrokerSettings('relative.json'), code('CREDENTIAL_FILE_INVALID'));
 });
+
+test('the claim reports this process ID; an older broker that rejects it gets one claim without it (#108)', async (t) => {
+  const { broker, client } = await fixture(t);
+  await client.execute('list_agents', {});
+  const first = broker.calls.find((c) => c.path === '/v1/sessions');
+  assert.equal(first.body.processId, process.pid);
+
+  const old = await fixture(t);
+  // An older broker: deny_unknown_fields rejects processId with 400 VALIDATION_FAILED before creating anything.
+  old.broker.setHook(({ path, body, send }) => {
+    if (path !== '/v1/sessions' || !('processId' in body)) return false;
+    send({ requestId: body.requestId, error: { code: 'VALIDATION_FAILED', scope: 'domain', outcome: 'rejected' } }, 400);
+    return true;
+  });
+  await old.client.execute('list_agents', {});
+  const claims = old.broker.calls.filter((c) => c.path === '/v1/sessions');
+  assert.equal(claims.length, 2);
+  assert.equal(claims[0].body.processId, process.pid);
+  assert.equal('processId' in claims[1].body, false);
+  assert.equal(claims[1].body.requestId, claims[0].body.requestId);
+
+  // Both attempts rejected (e.g. a body timeout or another invalid field): keep sending processId.
+  const flaky = await fixture(t, { retryBaseMs: 10_000 });
+  let rejections = 2;
+  flaky.broker.setHook(({ path, body, send }) => {
+    if (path !== '/v1/sessions' || rejections === 0) return false;
+    rejections -= 1;
+    send({ requestId: body.requestId, error: { code: 'VALIDATION_FAILED', scope: 'domain', outcome: 'rejected' } }, 400);
+    return true;
+  });
+  await assert.rejects(flaky.client.execute('list_agents', {}), code('VALIDATION_FAILED'));
+  await flaky.client.execute('list_agents', {});
+  const flakyClaims = flaky.broker.calls.filter((c) => c.path === '/v1/sessions');
+  assert.deepEqual(flakyClaims.map((c) => 'processId' in c.body), [true, false, true]);
+
+  // Any other rejection is not retried without the field.
+  const strict = await fixture(t);
+  strict.broker.setHook(({ path, body, send }) => {
+    if (path !== '/v1/sessions') return false;
+    send({ requestId: body.requestId, error: { code: 'FORBIDDEN', scope: 'domain', outcome: 'rejected' } }, 403);
+    return true;
+  });
+  await assert.rejects(strict.client.execute('list_agents', {}));
+  assert.equal(strict.broker.calls.filter((c) => c.path === '/v1/sessions').length, 1);
+});

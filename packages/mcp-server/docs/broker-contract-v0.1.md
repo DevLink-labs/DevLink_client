@@ -23,7 +23,7 @@ HTTP는 포트가 명시된 리터럴 `127.0.0.1`, 평문 로컬 HTTP, 루트 UR
 
 | 요청 | 입력(body에는 requestId 필수) | 성공 data |
 | --- | --- | --- |
-| POST `/v1/sessions` | `instanceId`, `mode: fresh / recover`, 선택 `agentId` | `sessionId`, `principal: {userId, teamId, agentId?}` |
+| POST `/v1/sessions` | `instanceId`, `mode: fresh / recover`, 선택 `agentId`, 선택 `processId` | `sessionId`, `principal: {userId, teamId, agentId?}` |
 | POST `/v1/sessions/:sessionId/bind` | `instanceId`, `agentId` | 동일 sessionId와 바인딩된 principal |
 | POST `/v1/sessions/:sessionId/heartbeat` | `instanceId` | 객체 |
 | DELETE `/v1/sessions/:sessionId` | `instanceId` | 객체 |
@@ -35,6 +35,7 @@ HTTP는 포트가 명시된 리터럴 `127.0.0.1`, 평문 로컬 HTTP, 루트 UR
 - 브로커 재시작으로 휘발 상태가 사라지면 먼저 유효하게 복구한 쪽이 소유한다. 과거 마지막 소유자를 복원한다는 보장은 없다.
 - 오래된 heartbeat/delete는 새 세션에 영향을 주면 안 된다. sessionId와 instanceId를 함께 검증한다.
 - MCP heartbeat 기본 30초, 브로커 수신 시계 기준 lease 90초. 클라이언트 시각은 만료 판정에 사용하지 않는다.
+- MCP는 claim에 자기 `processId`(`process.pid`)를 넣는다. 브로커는 그 프로세스가 끝나면 lease를 기다리지 않고 세션을 끝낸다. Host가 MCP를 정상 종료 없이 끝내는 경우(Codex on Windows, #108) 대비다. `processId`를 모르는 구버전 브로커는 400 `VALIDATION_FAILED`로 거부하며 아무것도 만들지 않으므로, MCP는 그때 한 번만 이 필드 없이 다시 claim한다. 그 재시도가 성공했을 때만 그 프로세스에서 더 보내지 않으며, 재시도도 실패하면 다음 claim에서 다시 보낸다. 본문 시간 초과(408)·크기 초과(413)·Content-Type 오류(415)도 `VALIDATION_FAILED`이므로, 그런 일시 오류 뒤 재시도가 성공하면 그 프로세스에서는 꺼진다(로컬 loopback의 작은 본문이라 실제로는 예상하지 않는다). 자세한 규칙은 [로컬 세션](../../../rust/docs/local-sessions.md#소유권과-수명).
 - 연결 실패·타임아웃·세션 만료 시 세션만 최대 5회 지수 backoff(1초부터 최대 30초)로 복구한다. 업무 요청은 자동 재전송하지 않는다. 소유권 충돌·교체·인증 거절·잘못된 자격 파일은 자동 복구를 멈춘다.
 
 ## 업무 경로
