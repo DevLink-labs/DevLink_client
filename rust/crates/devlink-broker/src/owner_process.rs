@@ -47,10 +47,11 @@ impl OwnerProcess {
 #[cfg(windows)]
 fn probe(pid: u32) -> Probe {
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, GetLastError, STILL_ACTIVE,
+        CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForSingleObject,
     };
     if pid == 0 {
         return Probe::Unknown;
@@ -58,7 +59,11 @@ fn probe(pid: u32) -> Probe {
     // SAFETY: the handle is checked for null, used only with these query functions, and closed
     // once; every out-parameter is a valid local.
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        );
         if handle.is_null() {
             // No process with this ID. Access denied and other errors are not proof of exit.
             return if GetLastError() == ERROR_INVALID_PARAMETER {
@@ -67,26 +72,24 @@ fn probe(pid: u32) -> Probe {
                 Probe::Unknown
             };
         }
-        let mut code = 0u32;
         let empty = FILETIME {
             dwLowDateTime: 0,
             dwHighDateTime: 0,
         };
         let (mut created, mut exited, mut kernel, mut user) = (empty, empty, empty, empty);
-        let has_code = GetExitCodeProcess(handle, &mut code) != 0;
         let has_times =
             GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0;
+        // A process handle is signaled at exit. GetProcessTimes leaves the exit time
+        // undefined for live processes, and an exit code of 259 is legal.
+        let state = WaitForSingleObject(handle, 0);
         CloseHandle(handle);
-        // A recorded exit time is the definite signal; the exit code covers a missing time.
-        // (A process that really exits with 259 = STILL_ACTIVE is caught by the exit time.)
-        let has_exited = has_times && (exited.dwLowDateTime != 0 || exited.dwHighDateTime != 0);
-        if has_exited || (has_code && code != STILL_ACTIVE as u32) {
-            return Probe::Gone;
+        match state {
+            WAIT_OBJECT_0 => Probe::Gone,
+            WAIT_TIMEOUT if has_times => Probe::Running(
+                (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+            ),
+            _ => Probe::Unknown,
         }
-        if !has_code || !has_times {
-            return Probe::Unknown;
-        }
-        Probe::Running((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 }
 
