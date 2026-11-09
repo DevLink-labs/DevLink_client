@@ -273,7 +273,8 @@ fn remote_identity(raw: &str) -> Result<String> {
 async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>> {
     use std::process::Stdio;
     timeout(Duration::from_secs(15), async {
-        let mut child = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(root)
             .args(args)
@@ -286,9 +287,11 @@ async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("Cannot start Git")?;
+            .kill_on_drop(true);
+        // 백그라운드 브로커는 콘솔이 없어서, 플래그 없이 git을 띄우면 3초마다 콘솔 창이 깜박인다.
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        let mut child = command.spawn().context("Cannot start Git")?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("Cannot read Git output")?;
         let mut bytes = Vec::new();
