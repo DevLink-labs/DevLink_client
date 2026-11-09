@@ -62,9 +62,17 @@ pub struct MockState {
     pub agent_context_calls: Arc<AtomicUsize>,
     pub csrf_failure: Arc<AtomicBool>,
     pub csrf_mode: Arc<AtomicU8>,
+    pub pause_csrf: Arc<AtomicBool>,
+    pub csrf_entered: Arc<tokio::sync::Notify>,
+    pub csrf_resume: Arc<tokio::sync::Notify>,
     pub pause_token: Arc<AtomicBool>,
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
+    /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404
+    pub update_mode: Arc<AtomicU8>,
+    pub pause_update_reply: Arc<AtomicBool>,
+    pub update_entered: Arc<tokio::sync::Notify>,
+    pub update_resume: Arc<tokio::sync::Notify>,
 }
 
 pub fn success(value: Value) -> Response {
@@ -86,6 +94,10 @@ fn user(state: &MockState) -> Value {
 async fn csrf(State(state): State<MockState>, headers: HeaderMap) -> Response {
     assert!(!headers.contains_key("authorization"));
     state.calls.lock().unwrap().push("csrf".into());
+    if state.pause_csrf.load(Ordering::SeqCst) {
+        state.csrf_entered.notify_one();
+        state.csrf_resume.notified().await;
+    }
     if state.csrf_failure.load(Ordering::SeqCst) {
         return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
     }
@@ -224,7 +236,14 @@ async fn agent_create(
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["name", "projectName", "roleDescription", "toolType"]
+        [
+            "name",
+            "part",
+            "projectName",
+            "roleDescription",
+            "roles",
+            "toolType"
+        ]
     );
     let fixed = [
         agent_for(&state, 301).unwrap(),
@@ -251,6 +270,12 @@ async fn agent_create(
             body["projectName"].clone(),
         );
         agent["roleDescription"] = body["roleDescription"].clone();
+        agent["part"] = body["part"].clone();
+        agent["roles"] = body["roles"].clone();
+        if state.create_mode.load(Ordering::SeqCst) == 5 {
+            agent.as_object_mut().unwrap().remove("part");
+            agent.as_object_mut().unwrap().remove("roles");
+        }
         stored.insert(id, agent.clone());
         agent
     };
@@ -323,6 +348,59 @@ async fn agent_get(
     agent_for(&state, id)
         .map(success)
         .unwrap_or_else(|| failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"))
+}
+/// Mirrors central AgentService.update: owner-only, null keeps, only the profile fields.
+async fn agent_update(
+    Path(id): Path<u64>,
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    assert!(authorized(&state, &headers, true));
+    let keys = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter()
+            .all(|k| k == "projectName" || k == "roleDescription"),
+        "{keys:?}"
+    );
+    state
+        .calls
+        .lock()
+        .unwrap()
+        .push(format!("agent_update:{}", keys.join(",")));
+    match state.update_mode.load(Ordering::SeqCst) {
+        1 => return failure(StatusCode::INTERNAL_SERVER_ERROR, "UNTRUSTED"),
+        3 => return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED"),
+        4 => return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),
+        _ => {}
+    }
+    let reply = {
+        let mut agents = state.agents.lock().unwrap();
+        let Some(agent) = agents.get_mut(&id) else {
+            return failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND");
+        };
+        if agent["ownerUserId"] != user(&state)["userId"] {
+            return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
+        }
+        for key in &keys {
+            agent[key.as_str()] = body[key.as_str()].clone();
+        }
+        let mut reply = agent.clone();
+        if state.update_mode.load(Ordering::SeqCst) == 2 {
+            reply["projectName"] = json!("changed by provider");
+        }
+        reply
+    };
+    if state.pause_update_reply.load(Ordering::SeqCst) {
+        state.update_entered.notify_one();
+        state.update_resume.notified().await;
+    }
+    success(reply)
 }
 async fn agent_token(
     Path(id): Path<u64>,
@@ -585,7 +663,7 @@ impl Fixture {
                 "/api/v1/agents/teams/{id}",
                 get(agent_list).post(agent_create),
             )
-            .route("/api/v1/agents/{id}", get(agent_get))
+            .route("/api/v1/agents/{id}", get(agent_get).patch(agent_update))
             .route("/api/v1/agents/{id}/token", post(agent_token))
             .route("/api/v1/agents/me", get(agent_context))
             .route("/ws/broker", get(websocket))

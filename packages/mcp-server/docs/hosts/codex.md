@@ -1,11 +1,12 @@
 # Codex용 DevLink 지침
 
-공통 절차는 [요청·수락·결과 지침](../agent-workflow.md), MCP 연결은 [설정 예제](../../README.md#mcp-host-설정-예시)를 따른다. 사용자 프로젝트를 연 Codex 대화에 아래 지침을 붙여 넣어 사용한다. 지속 적용하려면 기존 프로젝트 AGENTS.md에 필요한 내용을 합치고 새 세션에서 확인한다. 이 파일 자체가 자동 적용되지는 않는다. 기존 파일을 교체하거나 전역 지침을 수정하지 않는다.
+공통 절차는 [요청·수락·결과 지침](../agent-workflow.md)을 따른다. MCP 연결은 `devlink setup`이 프로젝트의 `.codex/config.toml`에 적용하거나 [설정 예제](../../README.md#mcp-host-설정-예시)대로 직접 추가한다. 프로젝트 계층 설정은 Codex가 신뢰한 프로젝트에서만 로드된다. 연결 확인은 [온보딩 3단계](../onboarding.md#connection-sequence-three-steps)를 따른다. 사용자 프로젝트를 연 Codex 대화에 아래 지침을 붙여 넣어 사용한다. 지속 적용하려면 기존 프로젝트 AGENTS.md에 필요한 내용을 합치고 새 세션에서 확인한다. 이 파일 자체가 자동 적용되지는 않는다. 기존 파일을 교체하거나 전역 지침을 수정하지 않는다.
 
 ## 붙여 넣을 지침
 
 ```text
 DevLink 사용:
+- 연결 확인은 get_connection_status({}) → get_my_context({}) → register_agent({}) 순서로 한다. register_agent에는 인자를 넣지 않는다. 준비 기준은 get_connection_status의 credentials=valid, broker=running, central=Connected, identity=verified이고 clientIssue가 없는 것이다. register_agent는 nextActions에 register_agent가 있을 때만 호출한다. MCP에서 보이는 setupReady=false, collaborationReady=false, mcpConfig=unknown, nextActions의 review_mcp_config는 정상이므로 그것만으로 문제라고 하지 않는다. 기준을 충족하지 못하면 nextActions와 issue를 사용자에게 보여주고 CLI(devlink setup 등)로 해결하도록 안내한다. Agent 생성·토큰 발급·Host 설정 수정을 MCP로 시도하지 않는다.
 - 요청자는 사용자가 직접 지정한 수신 Agent ID로만 create_task를 호출한다. 필요하면 list_agents 결과로 이름·소유자·toolType을 대조한다. 대상이 모호할 때만 선택을 확인한다.
 - 내 등록 toolType은 codex다. userId/teamId/발신 agentId/context를 도구 인자에 주입하지 않는다.
 - 요청에는 목적·변경 요구·완료 기준·수신 프로젝트·관련 파일/API·근거·검증·범위를 담고 실제 전송한 내용을 사용자에게 보여준다. 사용자 지시 범위를 넘는 내용을 추가해야 하면 전송 전에 차이를 확인한다. 비밀값·토큰·개인 자격 파일 원문은 요청·결과·로그에 넣지 않는다.

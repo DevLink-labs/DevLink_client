@@ -1,6 +1,6 @@
 # CLI·브로커 진행 현황
 
-정리일: 2026-10-30 (Asia/Seoul). 현재 코드와 기존 검증 기록을 기준으로 정리했다. 이번 문서 정리는 새 기능 시험이나 외부 이슈의 완료 처리에 해당하지 않는다. 상세 계약은 [문서 안내](docs/README.md), 실행별 증거는 [검증 요약](docs/verification.md)을 따른다.
+정리일: 2026-10-30 (Asia/Seoul). 2026-11-09 갱신: 이 표는 10-30 시점 기록이다. 이후 `devlink setup`(로그인·팀·프로젝트·Agent·토큰·브로커·프로젝트 MCP 설정 적용, [setup](docs/setup.md)), 질문·답변과 도착 동기화([task-messages](docs/task-messages.md)), Host 훅(`devlink updates-hook`·`hooks`, [update-hook](docs/update-hook.md)), Agent 정보 수정(`agent update`)이 추가됐다. 최신 범위는 각 문서를 따른다. 아래 표와 문장은 2026-10-30 당시 코드와 기존 검증 기록을 기준으로 정리한 것이다. 이번 문서 정리는 새 기능 시험이나 외부 이슈의 완료 처리에 해당하지 않는다. 상세 계약은 [문서 안내](docs/README.md), 실행별 증거는 [검증 요약](docs/verification.md)을 따른다.
 
 ## 구현된 범위
 
@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | CLI·설정·브로커 수명주기 | init/start/stop/status/config, 독립 프로세스·OS 잠금·복구 | Windows CLI 회귀 확인. 부팅 자동 실행·서비스 등록은 별도 |
 | 사용자·팀·Agent 준비 | 로그인·세션, 팀 생성/가입/선택, Agent 생성/기존 ID 선택·토큰·프로젝트 바인딩 | 기능별 직접 HTTP/CLI·실제 중앙 검증 범위는 해당 문서 참고 |
-| MCP 자격·권한 | broker.json 원자 발행, localToken 유지·명시적 회전, controlToken 분리, Agent ID 반영 | Host별 자동 설치·설정 병합 및 Unix 실행 검증은 별도 |
+| MCP 자격·권한 | broker.json 원자 발행, localToken 유지·명시적 회전, controlToken 분리, Agent ID 반영 | 프로젝트 Host 설정 병합은 이후 `devlink setup`으로 추가(11-09 갱신). Unix 실행 검증은 별도 |
 | 중앙 WebSocket·신원 | Bearer Upgrade, READY, /api/v1/agents/me 대조, generation·인증 무효화, heartbeat·재접속 | 고정 중앙과 실제 세션·presence 검증 기록 있음. 운영 배포 전체를 의미하지 않음 |
 | 로컬 세션(-92) | 생성/bind/heartbeat/DELETE, fresh/recover 소유권, 90초 lease·presence | SDK→Rust와 고정 중앙·DB 검증 기록 있음. 실제 Host 업무 수용과 구분 |
 | Agent 확인·목록·생성(-93) | 검증된 actor, Agent Bearer, requestKey 보관·재사용, 공식 생성 URL·REJECTED 응답 | 중앙 -67/-71 오프라인 정책과 -68 동시 생성의 최종 수용은 별도 |

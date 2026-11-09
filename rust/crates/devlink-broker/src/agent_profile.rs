@@ -2,6 +2,7 @@
 pub mod registration;
 pub mod tokens;
 use crate::{
+    agent_metadata::{AgentPart, normalize_roles},
     config::{self, Config},
     credentials, private_file, teams,
     user_auth::{self, UserClient},
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -41,6 +42,10 @@ pub struct Agent {
     pub owner_user_id: u64,
     pub name: String,
     pub role_description: Option<String>,
+    #[serde(default)]
+    pub part: AgentPart,
+    #[serde(default)]
+    pub roles: Vec<String>,
     pub tool_type: Tool,
     pub project_name: String,
     pub status: String,
@@ -59,6 +64,8 @@ impl Agent {
 pub struct CreateOptions {
     pub name: String,
     pub role_description: Option<String>,
+    pub part: AgentPart,
+    pub roles: Vec<String>,
     pub tool: Tool,
     pub project_name: String,
     pub project: PathBuf,
@@ -247,6 +254,8 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
                 project_name: agent.project_name.clone(),
                 agent_name: agent.name.clone(),
                 role_description: agent.role_description.clone(),
+                part: agent.part,
+                roles: agent.roles.clone(),
             }),
             State::CreatePending {
                 name, project_name, ..
@@ -254,6 +263,8 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
                 project_name: project_name.clone(),
                 agent_name: name.clone(),
                 role_description: None,
+                part: AgentPart::default(),
+                roles: Vec::new(),
             }),
             State::Vacant => None,
         };
@@ -302,14 +313,18 @@ fn stopped(config_path: &Path) -> Result<crate::broker_control::StoppedGuard> {
     })
 }
 
-/// Local-machine, per-central-user lock. It is not a claim of server-wide policy.
-fn owner_lock(origin: &str, user: u64) -> Result<File> {
-    try_owner_lock(origin, user)?.context(
-        "Another broker or setup operation is active for this central user on this machine",
-    )
+pub struct OwnerGuard {
+    _legacy: File,
+    _agent: Option<File>,
 }
 
-fn try_owner_lock(origin: &str, user: u64) -> Result<Option<File>> {
+/// Agent별 중복 실행·토큰 변경 방지. 공유 잠금으로 구버전의 계정 단위 잠금과 호환.
+fn owner_lock(origin: &str, user: u64, agent: Option<u64>) -> Result<OwnerGuard> {
+    try_owner_lock(origin, user, agent)?
+        .context("Another broker or setup operation is active for this Agent on this machine")
+}
+
+fn try_owner_lock(origin: &str, user: u64, agent: Option<u64>) -> Result<Option<OwnerGuard>> {
     let digest = Sha256::digest(format!("{origin}\0{user}"));
     let directory = dirs::data_local_dir()
         .context("Cannot locate private broker owner directory")?
@@ -321,7 +336,32 @@ fn try_owner_lock(origin: &str, user: u64) -> Result<Option<File>> {
     if std::fs::symlink_metadata(&lock).is_ok() {
         credentials::verify_path_safety(&lock)?;
     }
-    config::try_lock(&lock)
+    let legacy = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock)?;
+    match fs2::FileExt::try_lock_shared(&legacy) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let agent = if let Some(id) = agent {
+        let lock = directory.join(format!("{digest:x}.agent-{id}.lock"));
+        let Some(guard) = config::try_lock(&lock)? else {
+            return Ok(None);
+        };
+        Some(guard)
+    } else {
+        None
+    };
+    Ok(Some(OwnerGuard {
+        _legacy: legacy,
+        _agent: agent,
+    }))
 }
 
 fn rotate_mcp_if_present(config_path: &Path) -> Result<()> {
@@ -406,7 +446,8 @@ pub async fn list(config_path: &Path) -> Result<Vec<Agent>> {
     Ok(agents)
 }
 
-pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value> {
+pub async fn create(config_path: &Path, mut options: CreateOptions) -> Result<Value> {
+    options.roles = normalize_roles(&options.roles)?;
     ensure!(
         !options.name.trim().is_empty()
             && options.name.encode_utf16().count() <= 100
@@ -441,7 +482,9 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
             agent.name == options.name
                 && agent.tool_type == options.tool
                 && agent.project_name == options.project_name
-                && agent.role_description == options.role_description,
+                && agent.role_description == options.role_description
+                && agent.part == options.part
+                && agent.roles == options.roles,
             "Existing profile metadata differs; no Agent was created"
         );
         owned(&mut client, team.team_id, agent.agent_id).await?;
@@ -456,7 +499,7 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         return Ok(existing.summary(true));
     }
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), user)?;
+    let _owner = owner_lock(client.central_origin(), user, None)?;
     let prepared = client.prepare_post().await?;
     let mut profile = Profile {
         schema_version: 1,
@@ -471,7 +514,7 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         },
     };
     save(config_path, &profile)?; // Crash/unknown HTTP outcome must never trigger another creation.
-    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name}),prepared).await;
+    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name,"part":options.part,"roles":options.roles}),prepared).await;
     let agent = match result {
         Ok(agent) => agent,
         Err(error) => {
@@ -485,10 +528,15 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         }
     };
     agent.owned(user, team.team_id)?;
+    ensure!(
+        agent.part == options.part && agent.roles == options.roles,
+        "Agent creation metadata not confirmed; inspect agent list before retrying"
+    );
     profile.state = State::NeedsToken {
         agent: agent.clone(),
     };
     save(config_path,&profile).map_err(|_|anyhow::anyhow!("Agent {} created; local save failed. Recover with explicit agent use, never create again blindly",agent.agent_id))?;
+    let _agent_owner = owner_lock(&profile.origin, profile.user_id, Some(agent.agent_id))?;
     issue(config_path, &mut client, &mut profile, agent).await
 }
 
@@ -524,7 +572,7 @@ pub async fn use_agent(config_path: &Path, id: u64, local_project: Option<&Path>
         return Ok(old.summary(true));
     }
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), client.user()?.user_id)?;
+    let _owner = owner_lock(client.central_origin(), client.user()?.user_id, Some(id))?;
     let profile = Profile {
         schema_version: 1,
         origin: client.central_origin().to_owned(),
@@ -554,8 +602,249 @@ pub async fn token(config_path: &Path) -> Result<Value> {
         .agent_id;
     let agent = owned(&mut client, team.team_id, id).await?;
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), client.user()?.user_id)?;
+    let _owner = owner_lock(client.central_origin(), client.user()?.user_id, Some(id))?;
     issue(config_path, &mut client, &mut profile, agent).await
+}
+
+/// S15P31D108-146: the only Agent fields a bound profile may change. Name, tool,
+/// owner and team stay fixed, and no Agent or credential is created.
+pub struct UpdateOptions {
+    pub project_name: Option<String>,
+    pub role_description: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateFaultKind {
+    /// Local validation failed; nothing was sent.
+    Invalid,
+    /// The bound profile is missing, unknown, or belongs to another principal/Agent.
+    Binding,
+    /// The update was sent but the response did not confirm the requested state.
+    Unconfirmed,
+}
+/// Typed, value-free update failure so callers can classify it without parsing text.
+#[derive(Debug)]
+pub struct UpdateFault {
+    pub kind: UpdateFaultKind,
+    message: &'static str,
+}
+impl std::fmt::Display for UpdateFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for UpdateFault {}
+fn update_fault(kind: UpdateFaultKind, message: &'static str) -> anyhow::Error {
+    UpdateFault { kind, message }.into()
+}
+
+pub struct UpdateResult {
+    pub agent: Agent,
+    pub changed: Vec<&'static str>,
+    /// False when the central update succeeded but the local display cache was not rewritten.
+    pub local_profile_synced: bool,
+}
+impl UpdateResult {
+    pub fn summary(&self) -> Value {
+        json!({"agent":self.agent,"updated":!self.changed.is_empty(),"changedFields":self.changed,
+            "credentialsRotated":false,"localProfileSynced":self.local_profile_synced})
+    }
+}
+
+/// Central `isBlank` treats some control characters as blank, so they are rejected here.
+fn valid_text(value: &str, limit: usize) -> bool {
+    !value.trim().is_empty()
+        && value.encode_utf16().count() <= limit
+        && !value.chars().any(char::is_control)
+}
+
+/// Change the bound Agent's project name or role through the central owner session.
+/// Only fields that differ from the live central value are sent. `expected_agent`
+/// pins the caller's verified Agent (the broker session) to the bound profile.
+pub async fn update(
+    config_path: &Path,
+    options: UpdateOptions,
+    expected_agent: Option<u64>,
+) -> Result<UpdateResult> {
+    prepare_update(config_path, options, expected_agent)
+        .await?
+        .commit()
+        .await
+}
+
+/// Holds the account lock and prepared CSRF privately until the caller has fenced
+/// its MCP session. No Debug/Serialize implementation may expose these credentials.
+pub(crate) struct PreparedUpdate {
+    config_path: PathBuf,
+    client: UserClient,
+    profile: Profile,
+    current: Agent,
+    options: UpdateOptions,
+    body: serde_json::Map<String, Value>,
+    changed: Vec<&'static str>,
+    csrf: Option<user_auth::PreparedPost>,
+}
+
+pub(crate) async fn prepare_update(
+    config_path: &Path,
+    options: UpdateOptions,
+    expected_agent: Option<u64>,
+) -> Result<PreparedUpdate> {
+    use UpdateFaultKind::{Binding, Invalid};
+    if (options.project_name.is_none() && options.role_description.is_none())
+        || options
+            .project_name
+            .as_deref()
+            .is_some_and(|v| !valid_text(v, 120))
+        || options
+            .role_description
+            .as_deref()
+            .is_some_and(|v| !valid_text(v, 255))
+    {
+        return Err(update_fault(
+            Invalid,
+            "Invalid Agent update: pass a non-blank --project-name (up to 120) or --role-description (up to 255)",
+        ));
+    }
+    let mut client = UserClient::authenticated(config_path).await?;
+    let team = teams::require_selected(config_path, &mut client).await?;
+    let user = client.user()?.user_id;
+    let profile = load(config_path)?.ok_or_else(|| {
+        update_fault(
+            Binding,
+            "AGENT_PROFILE_REQUIRED: bind an owned Agent first; no Agent was updated",
+        )
+    })?;
+    if profile.origin != client.central_origin()
+        || profile.user_id != user
+        || profile.team_id != team.team_id
+    {
+        return Err(update_fault(
+            Binding,
+            "Selected team/user differs from bound Agent; no Agent was updated",
+        ));
+    }
+    let Some(bound) = profile.agent() else {
+        return Err(update_fault(
+            Binding,
+            "AGENT_CREATION_UNKNOWN: inspect agent list and use an explicit owned ID; no Agent was updated",
+        ));
+    };
+    let id = bound.agent_id;
+    if expected_agent.is_some_and(|expected| expected != id) {
+        return Err(update_fault(
+            Binding,
+            "The session Agent differs from the bound profile; no Agent was updated",
+        ));
+    }
+    let current = owned(&mut client, team.team_id, id).await?;
+    let mut body = serde_json::Map::new();
+    let mut changed = Vec::new();
+    if let Some(project) = &options.project_name
+        && *project != current.project_name
+    {
+        body.insert("projectName".into(), json!(project));
+        changed.push("projectName");
+    }
+    if let Some(role) = &options.role_description
+        && current.role_description.as_ref() != Some(role)
+    {
+        body.insert("roleDescription".into(), json!(role));
+        changed.push("roleDescription");
+    }
+    let csrf = if changed.is_empty() {
+        None
+    } else {
+        Some(client.prepare_patch().await?)
+    };
+    Ok(PreparedUpdate {
+        config_path: config_path.to_owned(),
+        client,
+        profile,
+        current,
+        options,
+        body,
+        changed,
+        csrf,
+    })
+}
+
+impl PreparedUpdate {
+    /// Dispatch immediately after the caller's final authorization. Once sent,
+    /// preserve a confirmed result even if that session is subsequently replaced.
+    pub(crate) async fn commit(mut self) -> Result<UpdateResult> {
+        let id = self.current.agent_id;
+        let agent = if let Some(csrf) = self.csrf {
+            let updated: Agent = self.client
+            .patch_prepared(&format!("/api/v1/agents/{id}"), Value::Object(self.body), csrf)
+            .await
+            .map_err(|error| {
+                if user_auth::rejection_status(&error).is_some_and(|s| (400..500).contains(&s)) {
+                    error
+                } else {
+                    error.context(
+                        "Agent update not confirmed; the outcome is unknown. Inspect agent status before retrying",
+                    )
+                }
+            })?;
+            let confirmed = updated
+                .owned(self.profile.user_id, self.profile.team_id)
+                .is_ok()
+                && updated.agent_id == id
+                && updated.name == self.current.name
+                && updated.tool_type == self.current.tool_type
+                && self
+                    .options
+                    .project_name
+                    .as_ref()
+                    .is_none_or(|p| *p == updated.project_name)
+                && self
+                    .options
+                    .role_description
+                    .as_ref()
+                    .is_none_or(|r| updated.role_description.as_ref() == Some(r));
+            if !confirmed {
+                return Err(update_fault(
+                    UpdateFaultKind::Unconfirmed,
+                    "Central Agent update response does not match the request; the outcome is unknown. Inspect agent status before retrying",
+                ));
+            }
+            updated
+        } else {
+            self.current
+        };
+        let local_profile_synced = sync_cached_agent(&self.config_path, &self.profile, &agent);
+        Ok(UpdateResult {
+            agent,
+            changed: self.changed,
+            local_profile_synced,
+        })
+    }
+}
+
+/// Only the two editable fields are cached: identity, root, token and volatile
+/// status stay, so an unchanged value never rewrites the profile. A profile changed
+/// by another operation is left alone and reported as unsynced.
+fn sync_cached_agent(config_path: &Path, before: &Profile, agent: &Agent) -> bool {
+    let Ok(Some(mut current)) = load(config_path) else {
+        return false;
+    };
+    if current != *before {
+        return false;
+    }
+    match &mut current.state {
+        State::Ready { agent: cached, .. } | State::NeedsToken { agent: cached } => {
+            if cached.project_name == agent.project_name
+                && cached.role_description == agent.role_description
+            {
+                return true;
+            }
+            cached.project_name = agent.project_name.clone();
+            cached.role_description = agent.role_description.clone();
+        }
+        _ => return false,
+    }
+    save(config_path, &current).is_ok()
 }
 
 pub async fn status(config_path: &Path) -> Result<Value> {
@@ -599,7 +888,7 @@ pub async fn reset_pending(config_path: &Path, accept_duplicate_risk: bool) -> R
         "Only an unknown creation can be reset; known Agent IDs must be reused"
     );
     let _control = stopped(config_path)?;
-    let _owner = owner_lock(client.central_origin(), client.user()?.user_id)?;
+    let _owner = owner_lock(client.central_origin(), client.user()?.user_id, None)?;
     profile.state = State::Vacant;
     save(config_path, &profile)?;
     Ok(
@@ -644,7 +933,7 @@ pub fn stored_token(config_path: &Path) -> Result<Option<String>> {
 
 pub struct BrokerIdentity {
     pub token: String,
-    pub _owner: File,
+    pub _owner: OwnerGuard,
 }
 pub fn startup_allowance(config_path: &Path) -> Duration {
     if std::fs::symlink_metadata(path(config_path)).is_ok() {
@@ -678,7 +967,7 @@ pub async fn prepare_broker(config_path: &Path) -> Result<Option<BrokerIdentity>
             .is_some_and(|a| a.agent_id == agent.agent_id),
         "Agent profile token identity mismatch"
     );
-    let owner = owner_lock(&profile.origin, profile.user_id)?;
+    let owner = owner_lock(&profile.origin, profile.user_id, Some(agent.agent_id))?;
     ensure!(
         load(config_path)?.as_ref() == Some(&profile),
         "Agent profile changed during startup; retry explicitly"
@@ -687,4 +976,102 @@ pub async fn prepare_broker(config_path: &Path) -> Result<Option<BrokerIdentity>
         token,
         _owner: owner,
     }))
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    #[test]
+    fn agent_guards_coexist_but_exclude_same_agent_and_legacy_exclusive_guard() {
+        let origin = format!("http://lock-test-{}.invalid/", uuid::Uuid::new_v4());
+        let first = owner_lock(&origin, 51, Some(201)).unwrap();
+        let second = owner_lock(&origin, 51, Some(301)).unwrap();
+        assert!(try_owner_lock(&origin, 51, Some(201)).unwrap().is_none());
+        let digest = Sha256::digest(format!("{origin}\0{}", 51));
+        let directory = dirs::data_local_dir()
+            .unwrap()
+            .join("DevLink/broker-owners");
+        let legacy = directory.join(format!("{digest:x}.lock"));
+        assert!(config::try_lock(&legacy).unwrap().is_none());
+        drop(first);
+        drop(second);
+        let old = config::lock(&legacy).unwrap();
+        assert!(try_owner_lock(&origin, 51, Some(201)).unwrap().is_none());
+        assert!(try_owner_lock(&origin, 51, None).unwrap().is_none());
+        drop(old);
+        for name in [
+            format!("{digest:x}.lock"),
+            format!("{digest:x}.agent-201.lock"),
+            format!("{digest:x}.agent-301.lock"),
+        ] {
+            std::fs::remove_file(directory.join(name)).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod update_cache_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, Profile, Agent) {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.json");
+        let agent = Agent {
+            agent_id: 201,
+            team_id: 71,
+            owner_user_id: 51,
+            name: "Cache fixture".into(),
+            role_description: None,
+            part: AgentPart::default(),
+            roles: Vec::new(),
+            tool_type: Tool::Codex,
+            project_name: "Before".into(),
+            status: "ONLINE".into(),
+            last_seen_at: None,
+            created_at: "2026-11-08T00:00:00Z".into(),
+        };
+        let before = Profile {
+            schema_version: 1,
+            origin: "http://127.0.0.1:8080/".into(),
+            user_id: 51,
+            team_id: 71,
+            project_root: root.path().canonicalize().unwrap().to_str().unwrap().into(),
+            state: State::Ready {
+                agent: agent.clone(),
+                token: "synthetic-cache-token".into(),
+            },
+        };
+        save(&config, &before).unwrap();
+        let mut updated = agent;
+        updated.project_name = "Central value".into();
+        (root, config, before, updated)
+    }
+
+    #[test]
+    fn changed_profile_is_reported_unsynced_and_preserved_byte_for_byte() {
+        let (_root, config, before, updated) = fixture();
+        let mut concurrent = before.clone();
+        if let State::Ready { agent, .. } = &mut concurrent.state {
+            agent.role_description = Some("Concurrent value".into());
+        }
+        save(&config, &concurrent).unwrap();
+        let bytes = std::fs::read(path(&config)).unwrap();
+        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert_eq!(std::fs::read(path(&config)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn missing_or_corrupt_profile_is_reported_unsynced_without_recreating_it() {
+        let (_root, config, before, updated) = fixture();
+        std::fs::write(path(&config), b"corrupt-private-profile").unwrap();
+        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert_eq!(
+            std::fs::read(path(&config)).unwrap(),
+            b"corrupt-private-profile"
+        );
+        std::fs::remove_file(path(&config)).unwrap();
+        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert!(!path(&config).exists());
+    }
 }

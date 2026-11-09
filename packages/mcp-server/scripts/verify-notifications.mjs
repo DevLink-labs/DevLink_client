@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {Client} from '@modelcontextprotocol/client';
 import {getDefaultEnvironment,StdioClientTransport} from '@modelcontextprotocol/client/stdio';
+import {assertRequiredTools} from './lib/mcp-stdio.mjs';
 
 const base=new URL(process.env.DEVLINK_TEST_CENTRAL_URL??'');
 assert(base.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(base.hostname)&&base.pathname==='/'&&!base.search&&!base.hash&&!base.username&&!base.password,'Only an isolated loopback server is allowed');
@@ -75,7 +76,7 @@ async function start(p) {
  p.stderr='';p.stderrOverflow=false;
  transport.stderr.on('data',chunk=>{if(p.stderr.length+chunk.length<=2_000_000)p.stderr+=chunk.toString();else p.stderrOverflow=true;});
  await client.connect(transport);p.client=client;
- const names=(await client.listTools()).tools.map(t=>t.name);assert.equal(names.length,10);p.toolNames=names;
+ p.toolNames=await assertRequiredTools(client);
  const registered=await call(p,'register_agent',{name:p.name,toolType:p.tool});
  assert.equal(registered.data.agentId,String(p.agent.agentId));
  await until(()=>central(p,'/api/v1/agents/me'),a=>a.status==='ONLINE','ONLINE presence '+p.label);
@@ -91,7 +92,14 @@ async function detail(p,taskId){return (await call(p,'get_task_result',{taskId})
 function knownGuidance(p,text){const names=[...text.matchAll(/\b([a-z_]+)\(/g)].map(m=>m[1]);assert(names.length>=2);for(const name of names)assert(p.toolNames.includes(name),'Unknown tool in fallback guidance: '+name);}
 async function notifications(p){const output=await run(p,['notifications','--limit','1024']);knownGuidance(p,output.nextAction);for(const n of output.notifications)knownGuidance(p,n.nextAction);return output.notifications;}
 async function notice(p,taskId,status){return until(()=>notifications(p),items=>items.some(n=>n.taskId===taskId&&n.status===status),'notification '+taskId+' '+status);}
-async function create(sender,receiver,title){return (await call(sender,'create_task',{recipientAgentId:String(receiver.agent.agentId),title,description:'Synthetic notification contract verification'})).data.taskId;}
+async function create(sender,receiver,title) {
+  const {data:{taskId}}=await call(sender,'create_task',{
+    recipientAgentId:String(receiver.agent.agentId),title,description:'Synthetic notification contract verification',
+  });
+  // ACK persistence updates the task version. Wait before the first mutation reads it.
+  await until(()=>detail(receiver,taskId),task=>task.events.some(event=>event.eventType==='ACK_RECEIVED'),'durable inbox ACK');
+  return taskId;
+}
 async function update(receiver,taskId,status,extra={}){
  const before=await detail(receiver,taskId);const version=Number(before.version);assert(Number.isSafeInteger(version));
  return central(receiver,'/api/v1/tasks/'+taskId+'/status',{status,version,...extra},'PATCH');

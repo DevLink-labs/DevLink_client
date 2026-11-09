@@ -180,6 +180,8 @@ fn matches_metadata(agent: &Agent, expected: &RegistrationContext) -> bool {
     agent.name == expected.project.metadata.agent_name
         && agent.project_name == expected.project.metadata.project_name
         && agent.role_description == expected.project.metadata.role_description
+        && agent.part == expected.project.metadata.part
+        && agent.roles == expected.project.metadata.roles
         && agent.tool_type == tool(expected)
 }
 pub(super) fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), Failure> {
@@ -198,6 +200,7 @@ fn validate_owned_agent(agent: &Agent, expected: &RegistrationContext) -> Result
         return Err(failure(FailureKind::Forbidden));
     }
     if agent.name.trim().is_empty()
+        || normalize_roles(&agent.roles).is_err()
         || agent.name.encode_utf16().count() > 100
         || agent.project_name.trim().is_empty()
         || agent.project_name.encode_utf16().count() > 120
@@ -230,6 +233,8 @@ pub(super) fn summary(profile: &Profile, reused: bool) -> Registration {
             agent_name: agent.name.clone(),
             project_name: agent.project_name.clone(),
             role_description: agent.role_description.clone(),
+            part: agent.part,
+            roles: agent.roles.clone(),
         }),
     }
 }
@@ -304,6 +309,8 @@ pub async fn ensure_tracked(
             project_name: Some(expected.project.metadata.project_name.clone()),
             agent_name: Some(expected.project.metadata.agent_name.clone()),
             role_description: expected.project.metadata.role_description.clone(),
+            part: Some(expected.project.metadata.part),
+            roles: Some(expected.project.metadata.roles.clone()),
         })
         .map_err(|_| failure(FailureKind::BindingConflict))?;
     }
@@ -393,9 +400,11 @@ pub async fn ensure_tracked(
                 a.name != agent.name
                     || a.project_name != agent.project_name
                     || a.role_description != agent.role_description
+                    || a.part != agent.part
+                    || a.roles != agent.roles
                     || a.tool_type != agent.tool_type
             }) {
-                let _guard = require_mutation(path, &expected.origin, expected.user_id)?;
+                let _guard = require_mutation(path, &expected.origin, expected.user_id, Some(id))?;
                 check_binding(path, expected)?;
                 let mut refreshed = old.clone();
                 match &mut refreshed.state {
@@ -416,7 +425,7 @@ pub async fn ensure_tracked(
             check_binding(path, expected)?;
             return Ok(summary(old, true));
         }
-        let _owner = require_mutation(path, &expected.origin, expected.user_id)?;
+        let _owner = require_mutation(path, &expected.origin, expected.user_id, Some(id))?;
         check_binding(path, expected)?;
         let profile = Profile {
             schema_version: 1,
@@ -440,7 +449,7 @@ pub async fn ensure_tracked(
         result.outcome = Mutation::Applied;
         return Ok(result);
     }
-    let _owner = require_mutation(path, &expected.origin, expected.user_id)?;
+    let _owner = require_mutation(path, &expected.origin, expected.user_id, None)?;
     let prepared = client.prepare_post().await.map_err(central)?;
     check_binding(path, expected)?;
     let metadata = &expected.project.metadata;
@@ -466,7 +475,8 @@ pub async fn ensure_tracked(
         .post_prepared::<Agent>(
             &format!("/api/v1/agents/teams/{}", expected.team_id),
             json!({"name":metadata.agent_name,"projectName":metadata.project_name,
-            "roleDescription":metadata.role_description,"toolType":tool(expected)}),
+            "roleDescription":metadata.role_description,"toolType":tool(expected),
+            "part":metadata.part,"roles":metadata.roles}),
             prepared,
         )
         .await;
@@ -524,14 +534,15 @@ pub(super) fn require_mutation(
     path: &Path,
     origin: &str,
     user: u64,
-) -> Result<(File, File), Failure> {
+    agent: Option<u64>,
+) -> Result<(File, OwnerGuard), Failure> {
     // Keep the broker lock, rather than only probing it: a foreground broker must
     // not start between the stopped check and durable profile publication.
     let lock = config::state_directory(path).join("broker.lock");
     let broker = config::try_lock(&lock)
         .map_err(|_| failure(FailureKind::Storage))?
         .ok_or_else(|| failure(FailureKind::BrokerBusy))?;
-    let owner = try_owner_lock(origin, user)
+    let owner = try_owner_lock(origin, user, agent)
         .map_err(|_| failure(FailureKind::Storage))?
         .ok_or_else(|| failure(FailureKind::BrokerBusy))?;
     Ok((broker, owner))

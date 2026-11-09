@@ -371,6 +371,7 @@ dependencies = [
  "devlink-broker",
  "futures-util",
  "libc",
+ "reqwest",
  "rpassword",
  "serde",
  "serde_json",

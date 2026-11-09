@@ -13,8 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const CODEX_VERSION: &str = "0.166.0";
-pub const CLAUDE_VERSION: &str = "2.1.310";
+pub const CODEX_VERSIONS: &[&str] = &["0.166.0"];
+pub const CLAUDE_VERSIONS: &[&str] = &["2.1.317"];
 const LIMIT: usize = 1024 * 1024;
 type Result<T> = std::result::Result<T, ConfigError>;
 
@@ -25,10 +25,10 @@ pub struct VerifiedHost {
 impl VerifiedHost {
     pub fn new(tool: ToolType, version: &str) -> Result<Self> {
         let expected = match tool {
-            ToolType::Codex => CODEX_VERSION,
-            ToolType::ClaudeCode => CLAUDE_VERSION,
+            ToolType::Codex => CODEX_VERSIONS,
+            ToolType::ClaudeCode => CLAUDE_VERSIONS,
         };
-        if version != expected {
+        if !expected.contains(&version) {
             return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
         }
         Ok(Self { tool })
@@ -210,11 +210,24 @@ pub(crate) fn preflight_paths(
 /// Read-only validation before Agent/token creation. The future credential path
 /// is checked without requiring or creating a descriptor. Host formats stay here.
 pub fn preflight(input: PlanInput, inspect_target: bool) -> Result<()> {
+    preflight_with_replacement(input, inspect_target, false)
+}
+
+pub(crate) fn preflight_with_replacement(
+    input: PlanInput,
+    inspect_target: bool,
+    replace_devlink: bool,
+) -> Result<()> {
     let input = storage::normalize(input.tool_type, input)?;
     if inspect_target {
         let before = storage::read(&input.target)?;
         let proposed = format::entry(&input);
-        let merged = match format::merge(input.tool, before.as_deref(), &proposed) {
+        let merged = match format::merge_with_replacement(
+            input.tool,
+            before.as_deref(),
+            &proposed,
+            replace_devlink,
+        ) {
             Ok((Change::Conflict, _)) => Err(ConfigError::new("SETUP_MCP_CONFIG_CONFLICT")),
             result => result,
         };
@@ -292,9 +305,26 @@ impl McpConfig {
         }
     }
     pub fn plan(&mut self, input: PlanInput) -> Result<ConfigPlan> {
+        self.plan_with_replacement(input, false)
+    }
+
+    pub fn plan_replacing_devlink(&mut self, input: PlanInput) -> Result<ConfigPlan> {
+        self.plan_with_replacement(input, true)
+    }
+
+    fn plan_with_replacement(
+        &mut self,
+        input: PlanInput,
+        replace_devlink: bool,
+    ) -> Result<ConfigPlan> {
         let input = storage::normalize(self.host.tool, input)?;
         let before = storage::read(&input.target)?;
-        let (change, after) = format::merge(input.tool, before.as_deref(), &format::entry(&input))?;
+        let (change, after) = format::merge_with_replacement(
+            input.tool,
+            before.as_deref(),
+            &format::entry(&input),
+            replace_devlink,
+        )?;
         if after.len() > LIMIT {
             return Err(ConfigError::new("SETUP_MCP_CONFIG_WRITE_FAILED"));
         }

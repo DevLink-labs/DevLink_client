@@ -1,5 +1,55 @@
 # MCP onboarding (S15P31D108-140)
 
+## Before MCP is connected
+
+Prepare the profile with the CLI, not with MCP tools. The recommended path is
+`devlink setup` (or the [DevLink_frontend desktop app](https://github.com/SSAFY-URAYAHA/DevLink_frontend/tree/main/desktop)
+that runs it): it covers login, team and project selection, Agent create (with its
+first token) or use of an existing Agent (a token is issued only when missing or
+rejected, and only when explicitly allowed), broker start and, when allowed, the
+project Host config described in [the MCP README](../README.md#mcp-host-설정-예시).
+See [setup](../../../rust/docs/setup.md). The equivalent manual path is init → auth
+login → team select → agent create/use with an explicitly chosen project/tool →
+start, then configure the Host with only the absolute `DEVLINK_BROKER_FILE` path.
+Restart (reopen) the Host after its config changes. Inspect owned Agents and pending
+state before an explicit recovery; never automatically repeat creation or token
+issuance after an unknown result. MCP tools never create an Agent, issue or rotate
+a token, or edit Host config.
+
+## Connection sequence (three steps)
+
+Call these in order after the Host has loaded the `devlink` server. Only step 3
+binds this MCP process; steps 1 and 2 are read-only and may be repeated.
+
+| Step | Input | Success condition | Result to check | If it fails |
+| --- | --- | --- | --- | --- |
+| 1. `get_connection_status` | `{}` | `credentials=valid`, `broker=running`, `central=Connected`, `identity=verified` | `hostSession` (`unbound` before step 3), `nextActions`, `issue`, and `clientIssue` (present only when this MCP process is already blocked; it must be absent) | If any success condition fails, follow the other `nextActions` (for example `prepare_cli_profile`, `inspect_local_broker`, `repair_private_file`); fix with the CLI, then restart the Host. `review_mcp_config` is always added when the broker answers and alone is not a failure. Do not call step 3 while `register_agent` is absent from `nextActions`. |
+| 2. `get_my_context` | `{}` | `identity=verified` and `agent` matches the Agent you prepared | `principal`, `agent` (`source: central_agents_me`), `project` (`bound_profile` or `unavailable`), `hostSession` | `identity: unavailable` means the broker answered but is not connected to central; return to step 1. A changed profile/project/origin is an error: re-inspect and rebind with the CLI, then restart. |
+| 3. `register_agent` | `{}` | Success result with `data.agentId` equal to step 2 `principal.agentId` | Rerun step 1: `hostSession=bound` and `register_agent` no longer in `nextActions` | `SESSION_CONFLICT`: another live process owns this Agent; see *inspect_connection_owner* below. `VALIDATION_FAILED` only appears if optional name/toolType/role were passed and differ from central. Never retry by creating a new Agent. |
+
+`setupReady` and `mcpConfig` describe the environment: this broker endpoint cannot
+see the Host config, so `mcpConfig=unknown`, `setupReady=false` and therefore
+`collaborationReady=false` are normal from MCP, even after a successful bind, and
+do not mean registration failed. Use `devlink setup status` for the combined setup
+view. A bound session is not a completed task roundtrip either.
+
+Step 1 before registration (synthetic values):
+
+```json
+{"requestId":"connection-1","data":{"observedAt":"2026-11-09T01:00:00.000Z","mcp":"running","broker":"running","central":"Connected","identity":"verified","credentials":"valid","mcpConfig":"unknown","hostSession":"unbound","setupReady":false,"collaborationReady":false,"nextActions":["register_agent","review_mcp_config"]}}
+```
+
+Step 3 (synthetic values; `data` is the confirmed central Agent, and `status`/`lastSeenAt`
+are whatever central reported at confirmation time). Central spells `toolType` in
+upper case here while step 2 uses the lower-case MCP form; compare the two steps by
+`agentId`:
+
+```json
+{"requestId":"register-1","data":{"agentId":"12","teamId":"1","ownerUserId":"3","name":"worker","roleDescription":null,"toolType":"CODEX","projectName":"example","status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-11-09T00:55:00"}}
+```
+
+## Current context (S15P31D108-140)
+
 `get_my_context({})` reads the existing Rust broker through `GET /v1/context`.
 It does not claim, bind, renew a lease, publish presence, or change work.
 The endpoint accepts only MCP `localToken` Bearer authentication; any Origin is rejected.
@@ -79,11 +129,8 @@ invocation. Registration/context execution errors also include stage/nextActions
 while retaining the original safe error envelope. Timeout/partial diagnosis never
 schedules recovery, claims, binds, renews a lease, or changes work/presence.
 
-Before MCP is connected: run CLI init → auth login → team select → agent create/use
-with an explicitly chosen project/tool; run start, then configure the Host using
-only the absolute DEVLINK_BROKER_FILE path and restart the Host. Inspect owned
-Agents/pending state before an explicit recovery; never automatically repeat
-creation or token issuance after an unknown result.
+For the preparation before MCP is connected, see
+[Before MCP is connected](#before-mcp-is-connected).
 
 Exported `snapshot.schema.json` describes Rust data and `connection.schema.json`
 adds the proven MCP process state. Readiness formulas also run in Zod at runtime.
@@ -170,6 +217,19 @@ After config inspection, reopen the trusted Host and explicitly call the two rea
 tools and register_agent({}). File applied, Host connected and task roundtrip are
 separate checks. Other MCP items/settings remain present; JSON large numbers
 retain their original values, and only the safe DevLink diff is exposed.
+
+### -143 documentation alignment (2026-11-09, Asia/Seoul)
+
+Base: client develop c4c751d. The README Host examples, the three-step connection
+table, Host paste-in guidance and `register_agent({})` examples were aligned with
+the current `devlink setup` output and broker code. MCP full regression: 181 passed
+(includes export-contracts --check and workflow example tests). The step 1 example
+was parsed by the runtime connection schema; the step 3 keys equal the Rust public
+Agent fields. Claude Code CLI cross-review used actual model `claude-opus-5-5`,
+effort `high`, in two rounds: round 1 had no must-fix and six should-fix items, all
+applied; round 2 had no must-fix and one should-fix (clientIssue / register_agent
+precondition in the paste-in guidance), applied. No real Host was run for this
+documentation change; actual two-Host acceptance remains -144.
 
 ## Actual Host verification
 

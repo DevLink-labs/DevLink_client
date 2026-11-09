@@ -17,7 +17,7 @@ const packageDirectory = fileURLToPath(new URL('../', import.meta.url));
 const entryPath = join(packageDirectory, 'dist/index.js');
 const names = { codex: 'codex.exe', claude: 'claude.exe' };
 
-async function ownedProcesses(marker, kill = false) {
+export async function ownedProcesses(marker, kill = false) {
   // Only a marker generated for this invocation is used; never kill by executable name alone.
   assert.match(marker, /^devlink-host64-[0-9a-f-]{36}$/);
   const script = `$ErrorActionPreference='Stop'

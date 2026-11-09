@@ -269,6 +269,68 @@ struct ResumingExecutor {
     requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
+struct RoutingExecutor {
+    inner: Executor,
+    answers: usize,
+}
+impl StepExecutor for RoutingExecutor {
+    type Data = Vec<Step>;
+    async fn execute(&mut self, step: Step, context: &SetupContext) -> StepResult {
+        if step == Step::RegisterAgent && self.answers < 2 {
+            let mut required = SetupError::new(ErrorCode::InputRequired, step, Outcome::NotApplied);
+            required.required_inputs.push(RequiredInput {
+                field: if self.answers == 0 {
+                    "agent.action"
+                } else {
+                    "agent.part"
+                },
+                kind: InputKind::Selection,
+                secret: false,
+                source: InputSource::Input,
+            });
+            return StepResult::InputRequired(required);
+        }
+        self.inner.execute(step, context).await
+    }
+    fn can_resolve_input(&self) -> bool {
+        true
+    }
+    fn input_is_interactive(&self) -> bool {
+        true
+    }
+    async fn resolve_input(&mut self, _: &SetupError) -> Result<(), SetupError> {
+        self.answers += 1;
+        Ok(())
+    }
+    fn finish(self) -> Self::Data {
+        self.inner.finish()
+    }
+}
+
+#[tokio::test]
+async fn interactive_agent_action_then_metadata_each_emit_waiting_input_and_resume() {
+    let context = context();
+    let executor = RoutingExecutor {
+        inner: executor(&context),
+        answers: 0,
+    };
+    let mut events = Vec::new();
+    let result = run(&context, executor, |event| {
+        events.push(event.clone());
+        Ok(())
+    })
+    .await;
+    assert_eq!(result.exit_code, 0);
+    let waiting: Vec<_> = events
+        .iter()
+        .filter(|e| e.step_status == StageStatus::WaitingInput)
+        .collect();
+    assert_eq!(waiting.len(), 2);
+    assert_eq!(waiting[0].required_inputs[0].field, "agent.action");
+    assert_eq!(waiting[1].required_inputs[0].field, "agent.part");
+    assert_eq!(result.sequence, 23);
+}
+
 impl StepExecutor for ResumingExecutor {
     type Data = Vec<Step>;
     async fn execute(&mut self, step: Step, context: &SetupContext) -> StepResult {

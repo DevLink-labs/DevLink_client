@@ -1,5 +1,7 @@
-//! Agent confirmation/list providers. This router never creates or updates Agents.
+//! Agent confirmation/list providers. This router never creates Agents or credentials;
+//! `update_agent` changes only the bound Agent's project name and role (S15P31D108-146).
 use crate::{
+    agent_profile::{self, Tool, UpdateFault, UpdateFaultKind, UpdateOptions},
     business_api::{self, BusinessRequest, LOCAL_BUDGET, session_error},
     session_api,
     sessions::{Identifier, SessionManager},
@@ -12,7 +14,7 @@ use axum::{
     routing::post,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -35,6 +37,7 @@ pub fn router(
     Router::new()
         .route("/v1/agents/register", post(register))
         .route("/v1/agents/list", post(list))
+        .route("/v1/agents/update", post(update))
         .with_state(Api {
             token,
             sessions,
@@ -56,6 +59,128 @@ struct ConfirmArguments {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListArguments {}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateArguments {
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    project_name: Option<String>,
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    role_description: Option<String>,
+}
+
+/// The central PATCH accepts only the owner's user session, so this route uses the
+/// CLI login on this machine. The verified session Agent must be the bound Agent.
+async fn update(State(api): State<Api>, request: Request) -> Response {
+    let deadline = Instant::now() + LOCAL_BUDGET;
+    let body: BusinessRequest<UpdateArguments> =
+        match session_api::read_authenticated(&api.token, request).await {
+            Ok(body) => body,
+            Err(response) => return *response,
+        };
+    let result = tokio::select! {
+        _ = api.cancel.cancelled() => Err(TaskError::unknown("CENTRAL_UNAVAILABLE")),
+        result = timeout_at(deadline, change(&api, &body)) => result.unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT"))),
+    };
+    business_api::response(&body.request_id, None, result)
+}
+async fn change(api: &Api, body: &BusinessRequest<UpdateArguments>) -> Result<Value, TaskError> {
+    body.validate("update_agent")?;
+    guard_profile(api).await?;
+    let actor = api
+        .sessions
+        .authorize(&body.context.session_id, &body.context.principal())
+        .await
+        .map_err(session_error)?;
+    let agent = actor
+        .agent_id
+        .clone()
+        .ok_or(TaskError::rejected("FORBIDDEN", 403))?;
+    api.context
+        .verify_registered_agent(&actor, &agent)
+        .map_err(context_error)?;
+    let expected = agent
+        .as_str()
+        .parse::<u64>()
+        .map_err(|_| TaskError::rejected("FORBIDDEN", 403))?;
+    let options = UpdateOptions {
+        project_name: body.arguments.project_name.clone(),
+        role_description: body.arguments.role_description.clone(),
+    };
+    let prepared =
+        agent_profile::prepare_update(api.context.config_path(), options, Some(expected))
+            .await
+            .map_err(update_error)?;
+    // User/team/Agent/CSRF preflight may have yielded to a fresh claim, release,
+    // or binding change. Fence again before sending any mutation (also for no-op
+    // reads). Do not fence after dispatch: a confirmed mutation stays confirmed.
+    api.central.confirm_agent(&actor).await?;
+    guard_profile(api).await?;
+    api.sessions
+        .authorize(&body.context.session_id, &actor)
+        .await
+        .map_err(session_error)?;
+    let result = prepared.commit().await.map_err(update_error)?;
+    let agent = &result.agent;
+    let tool = match agent.tool_type {
+        Tool::Codex => "codex",
+        Tool::ClaudeCode => "claude_code",
+    };
+    Ok(
+        json!({"agent":{"agentId":agent.agent_id.to_string(),"teamId":agent.team_id.to_string(),
+            "name":agent.name,"roleDescription":agent.role_description,"toolType":tool,
+            "projectName":agent.project_name},
+        "updated":!result.changed.is_empty(),"changedFields":result.changed,
+        "credentialsRotated":false,"localProfileSynced":result.local_profile_synced}),
+    )
+}
+/// Value-free classification. A failure after the PATCH was sent stays unknown.
+fn update_error(error: anyhow::Error) -> TaskError {
+    use crate::user_auth::{ApiRejection, AuthFault, AuthFaultKind as K};
+    let login = || TaskError::rejected("USER_LOGIN_REQUIRED", 412);
+    if let Some(fault) = error.chain().find_map(|e| e.downcast_ref::<UpdateFault>()) {
+        return match fault.kind {
+            UpdateFaultKind::Invalid => TaskError::rejected("VALIDATION_FAILED", 400),
+            UpdateFaultKind::Binding => TaskError::rejected("FORBIDDEN", 403),
+            UpdateFaultKind::Unconfirmed => TaskError::unknown("CENTRAL_PROTOCOL_ERROR"),
+        };
+    }
+    if let Some(rejection) = error.chain().find_map(|e| e.downcast_ref::<ApiRejection>()) {
+        return match rejection.status {
+            401 => login(),
+            400 => TaskError::rejected("VALIDATION_FAILED", 400),
+            403 => TaskError::rejected("FORBIDDEN", 403),
+            404 => TaskError::rejected("RESOURCE_NOT_FOUND", 404),
+            status @ 402..=499 => TaskError::rejected("CENTRAL_REQUEST_REJECTED", status),
+            _ => TaskError::unknown("CENTRAL_UNAVAILABLE"),
+        };
+    }
+    if let Some(fault) = error.chain().find_map(|e| e.downcast_ref::<AuthFault>()) {
+        return match fault.kind {
+            K::Busy | K::ConfigBusy | K::BrokerBusy => {
+                TaskError::rejected("LOCAL_ACCOUNT_BUSY", 409)
+            }
+            K::Unavailable => TaskError::unknown("CENTRAL_UNAVAILABLE"),
+            K::Protocol => TaskError::unknown("CENTRAL_PROTOCOL_ERROR"),
+            K::IdentityMismatch | K::SessionConflict => login(),
+            _ => context_error(crate::context_api::ContextFailure::LocalUnavailable),
+        };
+    }
+    let text = error.to_string();
+    if [
+        "USER_LOGIN_REQUIRED",
+        "USER_SESSION_EXPIRED",
+        "Local user session cannot be used",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        return login();
+    }
+    if text.contains("TEAM_SELECTION_REQUIRED") || text.contains("ACCESS_DENIED") {
+        return TaskError::rejected("FORBIDDEN", 403);
+    }
+    context_error(crate::context_api::ContextFailure::LocalUnavailable)
+}
 
 async fn register(State(api): State<Api>, request: Request) -> Response {
     let deadline = Instant::now() + LOCAL_BUDGET;

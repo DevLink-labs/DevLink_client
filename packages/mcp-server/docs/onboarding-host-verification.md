@@ -8,7 +8,7 @@ stories complete. Existing first-MVP work/result roundtrip checks remain separat
 ## Preparation
 
 - Node 24+, Python 3.11+ (`tomllib`), a built Rust CLI and `mcp-config` example.
-- Codex 0.166.0 and Claude Code 2.1.310 with usable existing logins. Claude uses
+- Codex 0.166.0 and Claude Code 2.1.317 with usable existing logins. Claude uses
   exactly `claude-opus-5-5` / `high`; Codex preserves the user's configured model.
 - A dedicated IPv4 loopback central server with disposable DB data. Record its
   exact 40-character source commit. Production URLs are rejected.

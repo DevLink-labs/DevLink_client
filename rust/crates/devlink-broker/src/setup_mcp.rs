@@ -23,13 +23,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum Mode {
     #[default]
     Apply,
+    Replace,
     Manual,
 }
 pub fn parse_mode(value: &str) -> std::result::Result<Mode, &'static str> {
     match value {
         "apply" => Ok(Mode::Apply),
+        "replace" => Ok(Mode::Replace),
         "manual" => Ok(Mode::Manual),
-        _ => Err("Choose apply or manual"),
+        _ => Err("Choose apply, replace or manual"),
     }
 }
 #[derive(Clone, Default)]
@@ -129,6 +131,9 @@ pub struct Preparation {
     plan: Option<ConfigPlan>,
     manual: ManualConfig,
     fingerprint: Fingerprint,
+    replace_devlink: bool,
+    /// An unverified Host already holds this profile's exact entry, applied by hand.
+    manually_applied: bool,
     /// The devlink executable, for comparing installed Host hooks with this profile.
     devlink: PathBuf,
 }
@@ -140,7 +145,7 @@ impl Preparation {
         &self.manual
     }
     pub fn requires_manual(&self) -> bool {
-        self.provider.is_none()
+        self.provider.is_none() && !self.manually_applied
     }
     pub async fn apply(self) -> Result<ConfigurationResult> {
         tokio::task::spawn_blocking(move || {
@@ -149,26 +154,41 @@ impl Preparation {
             if fingerprints(&prepared.context, &prepared.input)? != prepared.fingerprint {
                 return Err(error("SETUP_PROFILE_CONFLICT"));
             }
-            let provider = prepared
-                .provider
-                .as_mut()
-                .ok_or_else(|| error("SETUP_MANUAL_ACTION_REQUIRED"))?;
-            let plan = prepared
-                .plan
-                .as_ref()
-                .ok_or_else(|| error("SETUP_MCP_CONFIG_CONFLICT"))?;
-            let applied = provider.apply(&plan.plan_id, plan.expected_digest.as_deref())?;
-            let inspection = provider
-                .inspect(InspectionInput {
-                    tool_type: prepared.input.tool_type,
-                    target_path: prepared.input.target_path,
-                    broker_file: prepared.input.broker_file,
-                    executable: prepared.input.executable,
-                })
-                .map_err(|_| ConfigError::uncertain("not_needed", applied.backup_path.clone()))?;
-            if inspection.status != InspectionStatus::Applied {
-                return Err(ConfigError::uncertain("not_needed", applied.backup_path));
-            }
+            let inspection_input = InspectionInput {
+                tool_type: prepared.input.tool_type,
+                target_path: prepared.input.target_path.clone(),
+                broker_file: prepared.input.broker_file.clone(),
+                executable: prepared.input.executable.clone(),
+            };
+            let applied = if let Some(provider) = prepared.provider.as_mut() {
+                let plan = prepared
+                    .plan
+                    .as_ref()
+                    .ok_or_else(|| error("SETUP_MCP_CONFIG_CONFLICT"))?;
+                let applied = provider.apply(&plan.plan_id, plan.expected_digest.as_deref())?;
+                let inspection = provider.inspect(inspection_input).map_err(|_| {
+                    ConfigError::uncertain("not_needed", applied.backup_path.clone())
+                })?;
+                if inspection.status != InspectionStatus::Applied {
+                    return Err(ConfigError::uncertain("not_needed", applied.backup_path));
+                }
+                applied
+            } else if prepared.manually_applied {
+                // Nothing is written; the hand-applied entry must still match under the locks.
+                let inspection =
+                    McpConfig::inspect_for(prepared.input.tool_type, inspection_input)?;
+                if inspection.status != InspectionStatus::Applied {
+                    return Err(error("SETUP_MCP_CONFIG_CONFLICT"));
+                }
+                ConfigApplyResult {
+                    status: ApplyStatus::Unchanged,
+                    target_path: inspection.target_path,
+                    backup_path: None,
+                    restart_required: false,
+                }
+            } else {
+                return Err(error("SETUP_MANUAL_ACTION_REQUIRED"));
+            };
             let next = if applied.restart_required {
                 "restart_host_then_register_agent"
             } else {
@@ -412,18 +432,21 @@ pub async fn preflight(
     options: Options,
     executable: PathBuf,
 ) -> Result<()> {
-    let inspect_target = options.mode == Mode::Apply && context.mcp_automatic_supported;
+    let inspect_target = options.mode != Mode::Manual && context.mcp_automatic_supported;
+    let replace_devlink = options.mode == Mode::Replace;
     let input = tokio::task::spawn_blocking(move || {
         let input = runtime_input(&context, &options, &executable)?;
-        mcp_config::preflight(input.clone(), inspect_target)?;
+        mcp_config::preflight_with_replacement(input.clone(), inspect_target, replace_devlink)?;
         Ok::<_, ConfigError>(input)
     })
     .await
     .map_err(|_| error("SETUP_INTERNAL_ERROR"))??;
     probe_runtime(&input.executable).await?;
-    tokio::task::spawn_blocking(move || mcp_config::preflight(input, inspect_target))
-        .await
-        .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
+    tokio::task::spawn_blocking(move || {
+        mcp_config::preflight_with_replacement(input, inspect_target, replace_devlink)
+    })
+    .await
+    .map_err(|_| error("SETUP_INTERNAL_ERROR"))?
 }
 
 /// Check paths before authentication, when the saved Host is not yet scoped.
@@ -459,12 +482,13 @@ pub async fn prepare(
     options: Options,
     executable: PathBuf,
 ) -> Result<Preparation> {
+    let automatic = options.mode != Mode::Manual;
     let mut prepared = tokio::task::spawn_blocking(move || {
         let _guards = check_context(&context)?;
         let input = runtime_input(&PreflightContext::from(&context), &options, &executable)?;
         let manual = mcp_config::manual_config(input.clone())?;
         let fingerprint = fingerprints(&context, &input)?;
-        let provider = if options.mode == Mode::Apply {
+        let provider = if options.mode != Mode::Manual {
             context.tool.verified_host().ok().map(McpConfig::new)
         } else {
             None
@@ -476,6 +500,8 @@ pub async fn prepare(
             plan: None,
             manual,
             fingerprint,
+            replace_devlink: options.mode == Mode::Replace,
+            manually_applied: false,
             devlink: executable,
         })
     })
@@ -488,7 +514,35 @@ pub async fn prepare(
             return Err(error("SETUP_PROFILE_CONFLICT"));
         }
         if let Some(provider) = &mut prepared.provider {
-            prepared.plan = Some(provider.plan(prepared.input.clone())?);
+            prepared.plan = Some(if prepared.replace_devlink {
+                provider.plan_replacing_devlink(prepared.input.clone())?
+            } else {
+                provider.plan(prepared.input.clone())?
+            });
+        } else if automatic {
+            // Unverified Host: a rerun after the manual guidance passes as unchanged
+            // only when the target already holds exactly this profile's entry.
+            let inspection = McpConfig::inspect_for(
+                prepared.input.tool_type,
+                InspectionInput {
+                    tool_type: prepared.input.tool_type,
+                    target_path: prepared.input.target_path.clone(),
+                    broker_file: prepared.input.broker_file.clone(),
+                    executable: prepared.input.executable.clone(),
+                },
+            );
+            if inspection.is_ok_and(|inspection| inspection.status == InspectionStatus::Applied) {
+                prepared.manually_applied = true;
+                prepared.plan = Some(ConfigPlan {
+                    plan_id: String::new(),
+                    tool_type: prepared.input.tool_type,
+                    target_path: prepared.input.target_path.clone(),
+                    expected_digest: None,
+                    change: Change::Unchanged,
+                    diff: None,
+                    restart_required: false,
+                });
+            }
         }
         Ok(prepared)
     })

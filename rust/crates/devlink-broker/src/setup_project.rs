@@ -1,4 +1,5 @@
 //! Read-only project preparation. Local paths never belong to registration metadata.
+use crate::agent_metadata::{AgentPart, normalize_roles};
 use crate::{agent_profile, config};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,8 @@ pub struct ProjectOptions {
     pub project_name: Option<String>,
     pub agent_name: Option<String>,
     pub role_description: Option<String>,
+    pub part: Option<AgentPart>,
+    pub roles: Option<Vec<String>>,
 }
 
 /// Only this metadata may be used in a central registration request.
@@ -19,6 +22,8 @@ pub struct AgentMetadata {
     #[serde(rename = "name")]
     pub agent_name: String,
     pub role_description: Option<String>,
+    pub part: AgentPart,
+    pub roles: Vec<String>,
 }
 
 // Deliberately not Serialize: a registration request must select public metadata.
@@ -90,6 +95,9 @@ fn defaults(options: &ProjectOptions) -> Result<PreparedProject, Failure> {
             .clone()
             .unwrap_or_else(|| truncate(folder, 100)),
         role_description: options.role_description.clone(),
+        part: options.part.unwrap_or_default(),
+        roles: normalize_roles(options.roles.as_deref().unwrap_or_default())
+            .map_err(|_| failure(FailureKind::InvalidMetadata, None, "agent.roles"))?,
     };
     Ok(PreparedProject {
         root,
@@ -110,6 +118,8 @@ fn truncate(value: &str, limit: usize) -> String {
 }
 
 fn validate_metadata(metadata: &AgentMetadata) -> Result<(), Failure> {
+    normalize_roles(&metadata.roles)
+        .map_err(|_| failure(FailureKind::InvalidMetadata, None, "agent.roles"))?;
     for (value, limit, field) in [
         (metadata.project_name.as_str(), 120, "project.name"),
         (metadata.agent_name.as_str(), 100, "agent.name"),
@@ -170,6 +180,12 @@ pub fn prepare(config_path: &Path, options: &ProjectOptions) -> Result<PreparedP
             }
             if options.role_description.is_none() {
                 prepared.metadata.role_description = metadata.role_description;
+            }
+            if options.part.is_none() {
+                prepared.metadata.part = metadata.part;
+            }
+            if options.roles.is_none() {
+                prepared.metadata.roles = metadata.roles;
             }
         }
         prepared.reused = true;

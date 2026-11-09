@@ -234,6 +234,10 @@ pub enum AgentCommand {
         project: PathBuf,
         #[arg(long)]
         role_description: Option<String>,
+        #[arg(long, default_value = "OTHER", value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: devlink_broker::agent_metadata::AgentPart,
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Vec<String>,
     },
     /// List the selected team's Agents; only your own ID can be bound
     List,
@@ -246,6 +250,14 @@ pub enum AgentCommand {
     },
     /// Explicitly issue/rotate the current Agent token while its broker is stopped
     Token,
+    /// Change the bound Agent's project name or role; never creates an Agent or token
+    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description"])))]
+    Update {
+        #[arg(long)]
+        project_name: Option<String>,
+        #[arg(long)]
+        role_description: Option<String>,
+    },
     /// Show public profile metadata and verify a stored central token
     Status,
     /// Clear only an unknown creation after manual server inspection; never retries
@@ -525,6 +537,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     project_name,
                     project,
                     role_description,
+                    part,
+                    roles,
                 } => {
                     agent_profile::create(
                         &path,
@@ -534,6 +548,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                             project_name,
                             project,
                             role_description,
+                            part,
+                            roles,
                         },
                     )
                     .await?
@@ -543,6 +559,19 @@ pub async fn run(cli: Cli) -> Result<()> {
                     agent_profile::use_agent(&path, id, project.as_deref()).await?
                 }
                 AgentCommand::Token => agent_profile::token(&path).await?,
+                AgentCommand::Update {
+                    project_name,
+                    role_description,
+                } => agent_profile::update(
+                    &path,
+                    agent_profile::UpdateOptions {
+                        project_name,
+                        role_description,
+                    },
+                    None,
+                )
+                .await?
+                .summary(),
                 AgentCommand::Status => agent_profile::status(&path).await?,
                 AgentCommand::ResetPending {
                     accept_duplicate_risk,
