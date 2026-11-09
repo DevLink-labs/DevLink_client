@@ -13,6 +13,8 @@ pub mod config;
 pub mod connection_api;
 pub mod context_api;
 pub mod credentials;
+mod dependency_graph;
+pub use dependency_graph::dependency_repo_key;
 pub mod git_identity;
 pub mod inbox;
 pub mod local;

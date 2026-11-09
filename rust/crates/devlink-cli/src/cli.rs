@@ -72,6 +72,11 @@ pub enum Commands {
     Stop,
     /// Show local broker and central WebSocket state
     Status,
+    /// Print the team repository key for a Git remote
+    DependencyRepoKey {
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Read or update non-secret settings (changes apply after restart)
     Config {
         #[command(subcommand)]
@@ -493,6 +498,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
+        Commands::DependencyRepoKey { remote } => {
+            let root = std::env::current_dir().context("Cannot read the working directory")?;
+            println!(
+                "{}",
+                devlink_broker::dependency_repo_key(&root, &remote).await?
+            );
+        }
         Commands::Hooks { command } => hooks_command(&path, command)?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
