@@ -97,11 +97,15 @@ async function start(p) {
 }
 async function call(p,name,args,expectedCode){return callTool(p.client,name,args,expectedCode);}
 async function detail(p,taskId){return (await call(p,'get_task_result',{taskId})).data;}
+async function acknowledgedDetail(p,taskId) {
+  // The ACK transaction also advances the task version.
+  return until(()=>detail(p,taskId),task=>task.events.some(event=>event.eventType==='ACK_RECEIVED'),'durable inbox ACK');
+}
 async function exchange(sender,receiver,label) {
  const args={recipientAgentId:String(receiver.agent.agentId),title:'  '+label+' 컨텍스트  ',description:'  요청 설명\n한글/emoji 🧪  ',taskContext:'  project='+receiver.label+'\nfiles=src/context.txt\nnonce='+randomUUID()+'\n수신자에게만 전달  '};
  const made=await call(sender,'create_task',args);assert.equal(made.data.status,'PENDING');assert(made.requestKey);
  const taskId=made.data.taskId;
- await until(()=>detail(sender,taskId),d=>d.events.some(e=>e.eventType==='ACK_RECEIVED'),'durable inbox ACK');
+ await acknowledgedDetail(sender,taskId);
  const inbox=await run(receiver,['inbox','list','--limit','1024']);
  const receipt=inbox.find(item=>String(item.message.payload.task_id)===taskId);
  assert(receipt,'target receiver did not persist the context message');
@@ -142,13 +146,13 @@ try {
  const list=listed.agents??listed.items;assert(Array.isArray(list)&&list.some(i=>i.agentId===String(a.agent.agentId))&&list.some(i=>i.agentId===String(b.agent.agentId)));
  await exchange(a,b,'A→B');await exchange(b,a,'B→A');
  const failed=await call(a,'create_task',{recipientAgentId:String(b.agent.agentId),title:'Failure semantics',description:'A synthetic failure report'});
- let d=await detail(b,failed.data.taskId);
+ let d=await acknowledgedDetail(b,failed.data.taskId);
  const accepted=await call(b,'update_task_status',{taskId:d.taskId,version:d.version,status:'IN_PROGRESS'});
  const reason='  실패 사유\n부분 수정 없음  ';
  await call(b,'update_task_status',{taskId:d.taskId,version:accepted.data.version,status:'FAILED',failureReason:reason,partiallyModified:false});
  d=await detail(a,d.taskId);assert.equal(d.failureReason,reason);assert.equal(d.partiallyModified,false);
  const rejection=await call(a,'create_task',{recipientAgentId:String(b.agent.agentId),title:'Rejection read',description:'Synthetic central-only rejection to test REJECTED filter'});
- d=await detail(b,rejection.data.taskId);
+ d=await acknowledgedDetail(b,rejection.data.taskId);
  assert(typeof d.version==='string'&&/^(0|[1-9][0-9]*)$/.test(d.version),'SDK versions must remain canonical strings');
  const rejectionVersion=BigInt(d.version);
  assert(rejectionVersion<=BigInt(Number.MAX_SAFE_INTEGER),'Synthetic central rejection requires a safe numeric wire version');
