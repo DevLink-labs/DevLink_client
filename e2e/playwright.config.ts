@@ -1,0 +1,35 @@
+import { defineConfig, devices } from "@playwright/test";
+
+// On failure Playwright writes an aria snapshot (input values included) into error-context.md after our
+// fixtures' secret scan. This switch only skips the snapshot taken when a context closes; a failing
+// locator assertion still attaches its own. Those are handled by clearSecrets() after each submit and
+// by the runner's digest scan (see README "비밀정보").
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
+
+export default defineConfig({
+  testDir: "./specs",
+  outputDir: "./test-results",
+  globalSetup: "./src/stack/global-setup.ts",
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  forbidOnly: !!process.env.CI,
+  timeout: 240_000,
+  expect: { timeout: 10_000 },
+  reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
+  use: {
+    ...devices["Desktop Chrome"],
+    viewport: { width: 1440, height: 960 },
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul",
+    reducedMotion: "reduce",
+    actionTimeout: 10_000,
+    navigationTimeout: 20_000,
+    // Traces record fill() arguments and login bodies (passwords), which the secret scan cannot
+    // inspect inside zips. Opt in with E2E_TRACE=1 when debugging and delete them afterwards.
+    trace: process.env.E2E_TRACE === "1" ? "retain-on-failure" : "off",
+    video: "retain-on-failure",
+    screenshot: "only-on-failure",
+  },
+  projects: [{ name: "chromium", use: { browserName: "chromium" } }],
+});
