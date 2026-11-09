@@ -31,6 +31,9 @@ pub const AGENT_SECRET: &str = "synthetic-agent-token-never-print";
 
 #[derive(Clone, Default)]
 pub struct MockState {
+    pub git_hashes: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
+    pub git_identity_mode: Arc<AtomicU8>,
+    pub git_identity_calls: Arc<AtomicUsize>,
     pub expired: Arc<AtomicBool>,
     pub logout_error: Arc<AtomicBool>,
     pub redirect_login: Arc<AtomicBool>,
@@ -77,6 +80,72 @@ pub struct MockState {
 
 pub fn success(value: Value) -> Response {
     Json(json!({"success":true,"data":value,"code":null,"message":null})).into_response()
+}
+
+async fn git_status(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    assert!(authorized(&state, &headers, false));
+    let id = user(&state)["userId"].as_u64().unwrap();
+    let registered = state.git_hashes.lock().unwrap().contains_key(&id);
+    success(
+        json!({"registered":registered,"registeredAt":if registered {json!("2026-11-09T00:00:00Z")} else {Value::Null}}),
+    )
+}
+
+async fn git_register(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    assert!(authorized(&state, &headers, true));
+    state.calls.lock().unwrap().push("git_register".into());
+    let email = body["gitEmail"].as_str().unwrap();
+    assert_eq!(body.as_object().unwrap().len(), 1);
+    if state.git_identity_mode.load(Ordering::SeqCst) == 9 {
+        return Json(json!({"success":false,"data":null,"code":"GIT_EMAIL_ALREADY_REGISTERED","message":email})).into_response();
+    }
+    let id = user(&state)["userId"].as_u64().unwrap();
+    let hash = devlink_broker::git_identity::email_hash(email);
+    let mut hashes = state.git_hashes.lock().unwrap();
+    if hashes
+        .iter()
+        .any(|(owner, value)| *owner != id && *value == hash)
+    {
+        return failure(StatusCode::CONFLICT, "GIT_EMAIL_ALREADY_REGISTERED");
+    }
+    hashes.insert(id, hash);
+    success(json!({"registered":true,"registeredAt":"2026-11-09T00:00:00Z"}))
+}
+
+async fn git_delete(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    assert!(authorized(&state, &headers, true));
+    state.calls.lock().unwrap().push("git_delete".into());
+    let id = user(&state)["userId"].as_u64().unwrap();
+    state.git_hashes.lock().unwrap().remove(&id);
+    success(json!({"registered":false,"registeredAt":null}))
+}
+
+async fn git_comparison(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    assert!(!headers.contains_key("cookie"));
+    let auth = headers.get("authorization").unwrap().to_str().unwrap();
+    let token = auth.strip_prefix("Bearer ").unwrap();
+    let id = state.tokens.lock().unwrap().get(token).copied().unwrap();
+    let agent = agent_for(&state, id).unwrap();
+    let owner = agent["ownerUserId"].as_u64().unwrap();
+    state.git_identity_calls.fetch_add(1, Ordering::SeqCst);
+    let mode = state.git_identity_mode.load(Ordering::SeqCst);
+    if mode == 2 {
+        return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
+    }
+    let hash = state.git_hashes.lock().unwrap().get(&owner).cloned();
+    let mut data = json!({"registered":hash.is_some(),"gitEmailHash":hash,"hashAlgorithm":"SHA-256","normalization":"TRIM_LOWERCASE"});
+    match mode {
+        1 => data["hashAlgorithm"] = json!("UNKNOWN"),
+        3 => data["gitEmailHash"] = json!("invalid"),
+        4 => data["registered"] = json!(false),
+        5 => data["normalization"] = json!("UNKNOWN"),
+        _ => {}
+    }
+    success(data)
 }
 pub fn failure(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"success":false,"data":null,"code":code,"message":format!("{COOKIE} {PASSWORD}")}))).into_response()
@@ -659,6 +728,11 @@ impl Fixture {
         let address = listener.local_addr().unwrap();
         let state = MockState::default();
         let app = Router::new()
+            .route(
+                "/api/v1/auth/users/me/git-identity",
+                get(git_status).put(git_register).delete(git_delete),
+            )
+            .route("/api/v1/agents/me/git-identity", get(git_comparison))
             .route(
                 "/api/v1/agents/teams/{id}",
                 get(agent_list).post(agent_create),

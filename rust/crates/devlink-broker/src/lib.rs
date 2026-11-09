@@ -12,6 +12,7 @@ pub mod config;
 pub mod connection_api;
 pub mod context_api;
 pub mod credentials;
+pub mod git_identity;
 pub mod inbox;
 pub mod local;
 pub mod mcp_config;
