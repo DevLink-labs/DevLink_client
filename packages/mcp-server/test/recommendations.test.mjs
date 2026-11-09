@@ -100,3 +100,23 @@ test('results that break the contract or leak extra fields become protocol error
     assert.ok(!JSON.stringify(result).includes('secret token value'));
   }
 });
+
+test('a candidate the user picks becomes the create_task recipient; find_agent alone never creates a task (S15P31D108-190)', async (t) => {
+  const { broker, client } = await connected(t);
+  const data = recommendationExamples.multipleRoleOnly;
+  broker.setBusinessHook(({ path, send }) => path === operationRoutes.find_agent && (send({ data }), true));
+  const found = await client.callTool({ name: 'find_agent', arguments: { question: '로그인 화면 담당자' } });
+  assert.equal(found.isError, undefined);
+  assert.equal(broker.calls.filter(({ path }) => path === operationRoutes.create_task).length, 0);
+  // The Host shows both candidates; the user picks the second (OFFLINE) one.
+  const picked = found.structuredContent.data.candidates[1];
+  assert.equal(picked.connectionStatus, 'OFFLINE');
+  broker.setBusinessHook(null);
+  const made = await client.callTool({ name: 'create_task', arguments: {
+    recipientAgentId: picked.agentId, title: '로그인 화면 수정', description: '이메일 형식 검사', requestKey: 'pick-1' } });
+  assert.equal(made.isError, undefined);
+  const creates = broker.calls.filter(({ path }) => path === operationRoutes.create_task);
+  assert.equal(creates.length, 1);
+  assert.deepEqual(creates[0].body.arguments, { recipientAgentId: '21', title: '로그인 화면 수정', description: '이메일 형식 검사', requestKey: 'pick-1' });
+  assert.equal(creates[0].body.context.agentId, 'registered-agent');
+});
