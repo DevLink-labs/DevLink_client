@@ -1,0 +1,20 @@
+name: "✨ 기능 개발"
+description: "새로운 기능을 개발합니다."
+title: "[feat] "
+labels: ["feature"]
+
+body:
+  - type: textarea
+    id: work-description
+    attributes:
+      label: "작업 내용"
+      value: |
+        -
+
+  - type: textarea
+    id: task-list
+    attributes:
+      label: "작업 목록"
+      value: |
+        - [ ]
+        - [ ]

@@ -159,6 +159,22 @@ pub async fn run(path: &Path) -> Result<()> {
         Duration::from_millis(config.task_message_sync_interval_ms),
         cancel.clone(),
     ));
+    let dependency_sync = if config.dependency_remote.is_empty() {
+        None
+    } else {
+        crate::agent_profile::inspection_binding(path)
+            .ok()
+            .flatten()
+            .map(|binding| {
+                tokio::spawn(crate::dependency_graph::run(
+                    binding,
+                    config.dependency_remote.clone(),
+                    central_state.clone(),
+                    task_client.clone(),
+                    cancel.clone(),
+                ))
+            })
+    };
 
     // 보낸 작업의 로컬 지연 알림 판정 (taskOverdueMinutes, 0이면 끔)
     // Off (0) records nothing, so enabling it later does not flag old tasks at once.
@@ -258,6 +274,12 @@ pub async fn run(path: &Path) -> Result<()> {
 
     // 중앙 서버 태스크 종료 요청 및 대기 (최대 2초 후 강제 취소)
     cancel.cancel();
+    if let Some(task) = dependency_sync {
+        let abort = task.abort_handle();
+        if timeout(Duration::from_secs(1), task).await.is_err() {
+            abort.abort();
+        }
+    }
     let abort_git_identity = git_identity_sync.abort_handle();
     if timeout(Duration::from_secs(1), git_identity_sync)
         .await
