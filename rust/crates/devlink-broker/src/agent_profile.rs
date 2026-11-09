@@ -2,6 +2,7 @@
 pub mod registration;
 pub mod tokens;
 use crate::{
+    agent_metadata::{AgentPart, normalize_roles},
     config::{self, Config},
     credentials, private_file, teams,
     user_auth::{self, UserClient},
@@ -41,6 +42,10 @@ pub struct Agent {
     pub owner_user_id: u64,
     pub name: String,
     pub role_description: Option<String>,
+    #[serde(default)]
+    pub part: AgentPart,
+    #[serde(default)]
+    pub roles: Vec<String>,
     pub tool_type: Tool,
     pub project_name: String,
     pub status: String,
@@ -59,6 +64,8 @@ impl Agent {
 pub struct CreateOptions {
     pub name: String,
     pub role_description: Option<String>,
+    pub part: AgentPart,
+    pub roles: Vec<String>,
     pub tool: Tool,
     pub project_name: String,
     pub project: PathBuf,
@@ -247,6 +254,8 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
                 project_name: agent.project_name.clone(),
                 agent_name: agent.name.clone(),
                 role_description: agent.role_description.clone(),
+                part: agent.part,
+                roles: agent.roles.clone(),
             }),
             State::CreatePending {
                 name, project_name, ..
@@ -254,6 +263,8 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
                 project_name: project_name.clone(),
                 agent_name: name.clone(),
                 role_description: None,
+                part: AgentPart::default(),
+                roles: Vec::new(),
             }),
             State::Vacant => None,
         };
@@ -435,7 +446,8 @@ pub async fn list(config_path: &Path) -> Result<Vec<Agent>> {
     Ok(agents)
 }
 
-pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value> {
+pub async fn create(config_path: &Path, mut options: CreateOptions) -> Result<Value> {
+    options.roles = normalize_roles(&options.roles)?;
     ensure!(
         !options.name.trim().is_empty()
             && options.name.encode_utf16().count() <= 100
@@ -470,7 +482,9 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
             agent.name == options.name
                 && agent.tool_type == options.tool
                 && agent.project_name == options.project_name
-                && agent.role_description == options.role_description,
+                && agent.role_description == options.role_description
+                && agent.part == options.part
+                && agent.roles == options.roles,
             "Existing profile metadata differs; no Agent was created"
         );
         owned(&mut client, team.team_id, agent.agent_id).await?;
@@ -500,7 +514,7 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         },
     };
     save(config_path, &profile)?; // Crash/unknown HTTP outcome must never trigger another creation.
-    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name}),prepared).await;
+    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name,"part":options.part,"roles":options.roles}),prepared).await;
     let agent = match result {
         Ok(agent) => agent,
         Err(error) => {
@@ -514,6 +528,10 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         }
     };
     agent.owned(user, team.team_id)?;
+    ensure!(
+        agent.part == options.part && agent.roles == options.roles,
+        "Agent creation metadata not confirmed; inspect agent list before retrying"
+    );
     profile.state = State::NeedsToken {
         agent: agent.clone(),
     };
@@ -1005,6 +1023,8 @@ mod update_cache_tests {
             owner_user_id: 51,
             name: "Cache fixture".into(),
             role_description: None,
+            part: AgentPart::default(),
+            roles: Vec::new(),
             tool_type: Tool::Codex,
             project_name: "Before".into(),
             status: "ONLINE".into(),

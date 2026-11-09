@@ -120,6 +120,8 @@ struct Agent {
     id: Field<Id>,
     name: Field<String>,
     role_description: Field<String>,
+    part: Field<devlink_broker::agent_metadata::AgentPart>,
+    roles: Field<Vec<String>>,
     issue_token: Field<bool>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -241,7 +243,9 @@ impl Input {
             || (use_agent
                 && (self.project.name.0.is_some()
                     || self.agent.name.0.is_some()
-                    || self.agent.role_description.0.is_some()))
+                    || self.agent.role_description.0.is_some()
+                    || self.agent.part.0.is_some()
+                    || self.agent.roles.0.is_some()))
             || (self.mcp.mode.0 == Some(McpMode::Manual) && self.mcp.target_path.0.is_some())
             || self
                 .project
@@ -264,6 +268,9 @@ impl Input {
             || bad_text(&self.project.name.0, 120, false)
             || bad_text(&self.agent.name.0, 100, false)
             || bad_text(&self.agent.role_description.0, 255, true)
+            || self.agent.roles.0.as_ref().is_some_and(|roles| {
+                devlink_broker::agent_metadata::normalize_roles(roles).is_err()
+            })
         {
             return Err(invalid());
         }
@@ -306,6 +313,8 @@ impl Input {
                 project_name: self.project.name.0,
                 agent_name: self.agent.name.0,
                 role_description: self.agent.role_description.0,
+                part: self.agent.part.0,
+                roles: self.agent.roles.0,
             },
             tool: match self.tool.kind.0.ok_or_else(invalid)? {
                 Host::Codex => ToolType::Codex,

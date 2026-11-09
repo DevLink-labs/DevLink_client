@@ -161,10 +161,15 @@ pub(super) async fn run_controlled<E: StepExecutor>(
                     required.outcome = combine(stages[index].outcome, required.outcome);
                     stages[index].outcome = required.outcome;
                     let explicit_agent_recovery = required.step == Step::RegisterAgent
-                        && matches!(
+                        && (matches!(
                             required.code,
                             ErrorCode::AgentAlreadyExists | ErrorCode::TokenRequired
-                        )
+                        ) || (required.code == ErrorCode::InputRequired
+                            && !required.required_inputs.is_empty()
+                            && required
+                                .required_inputs
+                                .iter()
+                                .all(|input| matches!(input.field, "agent.part" | "agent.roles"))))
                         && executor.input_is_interactive();
                     if (input_resolved && !explicit_agent_recovery)
                         || required.outcome == Outcome::Unknown
