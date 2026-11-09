@@ -70,20 +70,14 @@ pub fn inspect(path: &Path, options: &setup_mcp::Options, executable: &Path) -> 
     {
         return Err(ConfigError::new("SETUP_PROFILE_CONFLICT"));
     }
-    let context = setup_mcp::PreflightContext {
-        config_path: path.into(),
-        project: PathBuf::from(&binding.project_root),
-        tool_type: binding.tool,
-        host_launcher: None,
-        mcp_automatic_supported: false,
-    };
+    let project = PathBuf::from(&binding.project_root);
     let selected = crate::setup_tools::inspect(
         path,
         &crate::setup_tools::SelectionBinding {
             origin: binding.origin.clone(),
             user_id: binding.user_id,
             team_id: binding.team_id,
-            project_root: context.project.clone(),
+            project_root: project.clone(),
         },
     )
     .map_err(|_| ConfigError::new("SETUP_PROFILE_CONFLICT"))?;
@@ -93,6 +87,16 @@ pub fn inspect(path: &Path, options: &setup_mcp::Options, executable: &Path) -> 
     {
         return Err(ConfigError::new("SETUP_PROFILE_CONFLICT"));
     }
+    // 저장된 Node 기반 Host의 런처를 setup과 같이 MCP 런타임 후보로 사용
+    let context = setup_mcp::PreflightContext {
+        config_path: path.into(),
+        project,
+        tool_type: binding.tool,
+        host_launcher: selected
+            .preferred()
+            .map(|tool| tool.executable.command.clone()),
+        mcp_automatic_supported: false,
+    };
     let mut guide = Guide {
         user_id: binding.user_id.to_string(),
         team_id: binding.team_id.to_string(),
@@ -118,6 +122,17 @@ pub fn inspect(path: &Path, options: &setup_mcp::Options, executable: &Path) -> 
         Err(error) if error.code == "SETUP_TOOL_UNAVAILABLE" => return Ok(guide),
         Err(error) => return Err(error),
     };
+    // 저장된 런처는 runtime_input의 명시적 옵션 검사에 포함되지 않는다.
+    if [
+        input.executable.command.as_path(),
+        Path::new(&input.executable.args[0]),
+    ]
+    .into_iter()
+    .any(|file| {
+        matches!(std::fs::symlink_metadata(file), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    }) {
+        return Ok(guide);
+    }
     let before = fingerprint(path, &input)?;
     if private_file::read_bytes(&credentials::path(path), 16_384)
         .map_err(|e| ConfigError::unsafe_at(&credentials::path(path), e))?
@@ -206,6 +221,18 @@ pub(super) fn classify(input: &Normalized, bytes: Option<&[u8]>) -> Result<Class
             }
         }
     };
+    let json_root = match input.tool {
+        ToolType::ClaudeCode => {
+            let format::Unique(root) = serde_json::from_slice(bytes)
+                .map_err(|_| ConfigError::new("SETUP_MCP_CONFIG_CONFLICT"))?;
+            // 자격 파일을 Host 설정으로 잘못 복사한 경우 일치 여부와 관계없이 차단
+            if root.get("localToken").is_some() && root.get("brokerUrl").is_some() {
+                return Err(ConfigError::new("SETUP_UNSAFE_FILE"));
+            }
+            Some(root)
+        }
+        ToolType::Codex => None,
+    };
     if existing.as_ref() == Some(&wanted) {
         return Ok(("matches", "none", vec![], "already_applied"));
     }
@@ -219,14 +246,8 @@ pub(super) fn classify(input: &Normalized, bytes: Option<&[u8]>) -> Result<Class
     } else {
         "add_entry"
     };
-    match input.tool {
-        ToolType::ClaudeCode => {
-            let format::Unique(root) = serde_json::from_slice(bytes)
-                .map_err(|_| ConfigError::new("SETUP_MCP_CONFIG_CONFLICT"))?;
-            // 자격 파일을 Host 설정으로 잘못 복사하지 않도록 차단
-            if root.get("localToken").is_some() && root.get("brokerUrl").is_some() {
-                return Err(ConfigError::new("SETUP_UNSAFE_FILE"));
-            }
+    match json_root {
+        Some(root) => {
             let (scope, value, kind) = if root.get("mcpServers").is_some() {
                 ("entry", serde_json::json!({"devlink":wanted}), kind)
             } else {
@@ -249,7 +270,7 @@ pub(super) fn classify(input: &Normalized, bytes: Option<&[u8]>) -> Result<Class
                 "merge_json_property",
             ))
         }
-        ToolType::Codex => {
+        None => {
             let doc = std::str::from_utf8(bytes)
                 .unwrap()
                 .parse::<toml_edit::DocumentMut>()

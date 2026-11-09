@@ -62,6 +62,31 @@ fn guide_classifies_json_without_exposing_existing_values_or_writing_files() {
 }
 
 #[test]
+fn guide_rejects_copied_credentials_even_when_devlink_entry_matches() {
+    let f = Fixture::new();
+    let input = storage::normalize(ToolType::ClaudeCode, f.input(ToolType::ClaudeCode)).unwrap();
+    let (_, applied) = format::merge(input.tool, None, &format::entry(&input)).unwrap();
+    let mut root: serde_json::Value = serde_json::from_slice(&applied).unwrap();
+    root["localToken"] = json!("SECRET");
+    root["brokerUrl"] = json!("http://127.0.0.1:43127");
+    let leaked = serde_json::to_vec(&root).unwrap();
+    assert_eq!(
+        format::configured_entry(input.tool, &leaked).unwrap(),
+        Some(format::entry(&input))
+    );
+    assert_eq!(
+        guide::classify(&input, Some(&leaked)).unwrap_err().code,
+        "SETUP_UNSAFE_FILE"
+    );
+    assert_eq!(
+        format::merge(input.tool, Some(&leaked), &format::entry(&input))
+            .unwrap_err()
+            .code,
+        "SETUP_UNSAFE_FILE"
+    );
+}
+
+#[test]
 fn guide_codex_table_and_inline_snippets_preserve_other_settings() {
     let f = Fixture::new();
     let input = storage::normalize(ToolType::Codex, f.input(ToolType::Codex)).unwrap();

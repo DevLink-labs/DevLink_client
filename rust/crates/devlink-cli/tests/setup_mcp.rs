@@ -1164,6 +1164,29 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
         .unwrap();
     let requests_after = app.state.calls.lock().unwrap().len();
     let _ = app.run(&["stop"], None);
+    // 안내 조회도 --node-path 없이 저장된 Host 옆 Node를 PATH의 Node보다 우선 사용
+    let guides = [&path, &competing_path].map(|search| {
+        Command::new(env!("CARGO_BIN_EXE_devlink"))
+            .arg("--config")
+            .arg(&app.path)
+            .args(["setup", "mcp-guide", "--output", "json", "--mcp-entry"])
+            .arg(&entry)
+            .env("PATH", search)
+            .env_remove("DEVLINK_TOKEN")
+            .env_remove("DEVLINK_BROKER_FILE")
+            .env_remove("NODE_OPTIONS")
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    });
+    for guide in &guides {
+        assert_eq!(guide.status.code(), Some(0), "{}", text(guide));
+        let value: Value = serde_json::from_slice(&guide.stdout).unwrap();
+        assert_eq!(value["data"]["availability"], "ready", "{}", text(guide));
+        assert_eq!(value["data"]["fileState"], "matches", "{}", text(guide));
+        assert_no_secrets(guide);
+    }
     for (output, status) in [(&first_setup, "applied"), (&reuse, "unchanged")] {
         assert_eq!(output.status.code(), Some(0), "{}", text(output));
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -1187,4 +1210,34 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
     assert_eq!(requests_after, requests_before);
     assert_eq!(app.state.create_calls.load(Ordering::SeqCst), 1);
     assert_eq!(app.state.token_calls.load(Ordering::SeqCst), 1);
+
+    // 저장된 Node가 삭제되면 권한 오류 대신 런타임 준비를 안내한다.
+    fs::remove_file(&node).unwrap();
+    let missing_node = Command::new(env!("CARGO_BIN_EXE_devlink"))
+        .arg("--config")
+        .arg(&app.path)
+        .args(["setup", "mcp-guide", "--output", "json", "--mcp-entry"])
+        .arg(&entry)
+        .env("PATH", &path)
+        .env_remove("DEVLINK_TOKEN")
+        .env_remove("DEVLINK_BROKER_FILE")
+        .env_remove("NODE_OPTIONS")
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        missing_node.status.code(),
+        Some(0),
+        "{}",
+        text(&missing_node)
+    );
+    let value: Value = serde_json::from_slice(&missing_node.stdout).unwrap();
+    assert_eq!(value["data"]["availability"], "needs_preparation");
+    assert_eq!(value["data"]["fileState"], "unavailable");
+    assert_eq!(value["data"]["reason"], "prepare_runtime");
+    assert_eq!(value["data"]["copyItems"], json!([]));
+    assert_eq!(value["data"]["nextActions"], json!(["resume_setup"]));
+    assert_no_secrets(&missing_node);
+    assert_eq!(app.state.calls.lock().unwrap().len(), requests_after);
 }

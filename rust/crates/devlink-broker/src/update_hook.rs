@@ -3,7 +3,7 @@
 //! selected team, never from caller input. Reads local stores only: no central IO, no ACK.
 //! Each consumer keeps its own cursor so Codex and Claude Code do not consume each other's view.
 use crate::{
-    agent_profile,
+    agent_profile::{self, InspectionBinding},
     config::{self, Config},
     private_file,
     protocol::TaskMessageType,
@@ -34,13 +34,7 @@ struct HookState {
 /// output loses that digest instead of repeating it. `get_updates` keeps its own cursor.
 pub fn digest(config_path: &Path, consumer: &str, cwd: &Path) -> Result<Option<String>> {
     ensure!(valid_consumer(consumer), "Invalid update hook consumer");
-    if agent_profile::bound_agent_id(config_path)
-        .map_err(|_| anyhow!("DevLink local state is unavailable"))?
-        .is_none()
-    {
-        return Ok(None);
-    }
-    let Some(binding) = agent_profile::inspection_binding(config_path).map_err(|e| match e {
+    let Some((binding, actor)) = bound_actor(config_path).map_err(|e| match e {
         IdentityError::Forbidden => {
             anyhow!("DevLink agent binding does not match the selected team or project")
         }
@@ -57,13 +51,6 @@ pub fn digest(config_path: &Path, consumer: &str, cwd: &Path) -> Result<Option<S
         return Ok(None);
     }
     let config = Config::load(config_path).context("Cannot read DevLink config")?;
-    let id = |value: u64| Identifier::parse(value.to_string()).map_err(|e| anyhow!(e));
-    let actor = Principal {
-        user_id: id(binding.user_id)?,
-        team_id: id(binding.team_id)?,
-        agent_id: Some(id(binding.agent_id)?),
-        tool_type: None,
-    };
     let directory = config::state_directory(config_path);
     // Concurrent prompts of the same Host skip instead of waiting inside the Host's timeout.
     let Some(_lock) = config::try_lock(&directory.join(format!("updates-{consumer}.lock")))
@@ -98,6 +85,31 @@ pub fn digest(config_path: &Path, consumer: &str, cwd: &Path) -> Result<Option<S
         .context("Cannot save update hook cursor")?;
     }
     Ok(render(&feed, &batch.updates, batch.reset || discarded))
+}
+
+/// Feed scope of the bound Agent, taken from the profile and the selected team only,
+/// or `None` when no Agent is bound. Shared by session-free readers of the local feed.
+pub(crate) fn bound_actor(
+    config_path: &Path,
+) -> Result<Option<(InspectionBinding, Principal)>, IdentityError> {
+    if agent_profile::bound_agent_id(config_path)
+        .map_err(|_| IdentityError::Unavailable)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let Some(binding) = agent_profile::inspection_binding(config_path)? else {
+        return Ok(None);
+    };
+    let id =
+        |value: u64| Identifier::parse(value.to_string()).map_err(|_| IdentityError::Unavailable);
+    let actor = Principal {
+        user_id: id(binding.user_id)?,
+        team_id: id(binding.team_id)?,
+        agent_id: Some(id(binding.agent_id)?),
+        tool_type: None,
+    };
+    Ok(Some((binding, actor)))
 }
 
 fn state_path(directory: &Path, consumer: &str) -> PathBuf {
