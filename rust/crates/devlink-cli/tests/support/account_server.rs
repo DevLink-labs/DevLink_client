@@ -72,7 +72,8 @@ pub struct MockState {
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
     /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404,
-    /// 5 = an older central that ignores part/roles (S15P31D108-183)
+    /// 5 = an older central that ignores part/roles and never returns them (S15P31D108-183),
+    /// 6 = ignores part/roles and leaves them out of the PATCH reply only
     pub update_mode: Arc<AtomicU8>,
     pub pause_update_reply: Arc<AtomicBool>,
     pub update_entered: Arc<tokio::sync::Notify>,
@@ -476,7 +477,7 @@ async fn agent_update(
         if agent["ownerUserId"] != user(&state)["userId"] {
             return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
         }
-        let ignores_metadata = state.update_mode.load(Ordering::SeqCst) == 5;
+        let ignores_metadata = matches!(state.update_mode.load(Ordering::SeqCst), 5 | 6);
         for key in &keys {
             if ignores_metadata && matches!(key.as_str(), "part" | "roles") {
                 continue;

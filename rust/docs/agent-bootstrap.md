@@ -51,7 +51,7 @@ devlink agent update --clear-roles
 - `--roles TAG[,TAG...]`는 태그 목록 전체를 바꾼다. 최대 10개, 태그마다 다듬기 전 64 UTF-16 코드 단위 이하이며 공백만인 태그는 거부한다. 양끝의 U+0000–U+0020을 뺀 뒤 빈 문자열이 되거나 제어 문자가 남는 태그도 거부한다(수정 경로에만 있는 검사다). 생성 때와 같은 `normalize_roles`로 양끝 공백을 빼고 중복을 지운 뒤 중앙 값과 비교하므로, 다듬은 결과가 같으면 PATCH하지 않는다. 순서가 다르면 다른 값으로 본다. 쉼표가 구분자라 쉼표가 들어간 태그는 CLI로 넣을 수 없다(MCP `update_agent`는 가능).
 - `--clear-roles`는 `roles: []`를 보내 태그를 모두 지운다. `--roles`와 함께 쓸 수 없다. `--roles`를 주지 않으면 태그는 그대로다.
 - client는 바꾸지 않는 필드를 본문에서 빼며 null을 보내지 않는다. MCP `update_agent`는 `part`·`roles`의 null을 생략과 같게 받는다.
-- 응답의 part·roles가 요청과 다르면 결과 불명이다. part·roles가 없는 이전 server(예: `aecdcc3`)는 값을 무시하고 응답에도 넣지 않는다. client는 없는 필드를 OTHER·태그 없음으로 읽으므로, 그와 다른 값을 보내면 성공이 아니라 결과 불명으로 보고하고, 같은 값(`--part OTHER`, `--clear-roles`)이면 보낼 것이 없어 `updated:false`다.
+- 응답의 part·roles가 요청과 다르면 결과 불명이다. part·roles가 없는 이전 server(예: `aecdcc3`)는 값을 무시하고 응답에도 넣지 않는다. client는 중앙이 보내지 않은 part·roles를 모르는 값으로 본다. 사전 조회에 없으면 요청 값을 항상 보내고, PATCH 응답에 없으면 초기화(`--part OTHER`, `--clear-roles`)처럼 기본값과 같은 요청이어도 결과 불명으로 보고한다. 이때 로컬 캐시의 part·roles는 바꾸지 않고, 결과의 `agent`에도 넣지 않는다.
 - 태그는 로그인·결제처럼 담당 영역을 나타내는 명사로 쓴다. 중앙 추천(`find_agent`)이 질문과 대조한다.
 
 **중앙 계약.** server develop `34b2c15`의 `AgentController`·`AgentService` 코드를 기준으로 했다. 백엔드와 문서로 따로 합의한 계약은 아니다.
@@ -71,7 +71,7 @@ devlink agent update --clear-roles
 - 실행 순서: 사용자 세션 확인 → 선택 팀 확인 → 프로필의 origin·사용자·팀 일치 확인 → `GET /api/v1/agents/{id}`로 현재 값 확인 → 다른 필드만 PATCH. 모두 같으면 PATCH하지 않는다.
 - 응답의 ID·소유자·팀·name·toolType과 요청한 값이 모두 맞아야 성공이다. 어긋나면 결과 불명(unknown)으로 보고하고 로컬 프로필을 바꾸지 않는다.
 - PATCH가 4xx로 거부되면 rejected다. 전송 실패·5xx·응답 불일치는 중앙에 반영됐을 수 있으므로 결과 불명으로 안내한다. PATCH 전 단계(세션·팀·Agent 조회)의 연결 실패도 지금은 unknown으로 보고하는데, 안전한 쪽으로 틀리는 분류라 그대로 두었다.
-- 성공하면 프로필에 캐시한 projectName·roleDescription·part·roles만 갱신한다. ID·projectRoot·토큰은 그대로이고, 그 사이 다른 작업이 프로필을 바꿨으면 덮어쓰지 않고 `localProfileSynced:false`로 알린다. 새 Agent 생성·토큰 발급은 하지 않는다.
+- 성공하면 프로필에 캐시한 projectName·roleDescription·part·roles만 갱신한다. part·roles는 중앙 응답에 있을 때만 갱신한다. ID·projectRoot·토큰은 그대로이고, 그 사이 다른 작업이 프로필을 바꿨으면 덮어쓰지 않고 `localProfileSynced:false`로 알린다. 새 Agent 생성·토큰 발급은 하지 않는다.
 - 브로커는 Agent 정보를 중앙 `/agents/me`에서 실시간으로 읽으므로, 수정 후 `get_my_context`에 새 projectName·roleDescription이 바로 보인다. part·roles는 `get_my_context`에 넣지 않았고 `update_agent` 결과와 `register_agent`·`list_agents` 결과에서 본다. 뒤의 두 결과는 중앙이 준 값을 그대로 전달하며, 중앙 응답에 없으면 필드가 없다. 프로필 바인딩(ID·팀·projectRoot·도구)은 바뀌지 않아 실행 중인 브로커를 멈출 필요가 없다.
 
 **MCP 경로의 권한.** 중앙 PATCH가 사용자 세션만 받으므로, 브로커는 이 PC의 `devlink auth login` 세션 파일을 읽어 호출한다. 이 경로를 쓰는 조건은 다음과 같다.

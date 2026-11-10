@@ -150,13 +150,19 @@ async fn change(api: &Api, body: &BusinessRequest<UpdateArguments>) -> Result<Va
         Tool::Codex => "codex",
         Tool::ClaudeCode => "claude_code",
     };
-    Ok(
-        json!({"agent":{"agentId":agent.agent_id.to_string(),"teamId":agent.team_id.to_string(),
-            "name":agent.name,"roleDescription":agent.role_description,"toolType":tool,
-            "projectName":agent.project_name,"part":agent.part,"roles":agent.roles},
+    let mut shown = json!({"agentId":agent.agent_id.to_string(),"teamId":agent.team_id.to_string(),
+        "name":agent.name,"roleDescription":agent.role_description,"toolType":tool,
+        "projectName":agent.project_name});
+    // Only what central reported: a reply without part/roles must not read as OTHER / no tags.
+    if let Some(part) = result.part() {
+        shown["part"] = json!(part);
+    }
+    if let Some(roles) = result.roles() {
+        shown["roles"] = json!(roles);
+    }
+    Ok(json!({"agent":shown,
         "updated":!result.changed.is_empty(),"changedFields":result.changed,
-        "credentialsRotated":false,"localProfileSynced":result.local_profile_synced}),
-    )
+        "credentialsRotated":false,"localProfileSynced":result.local_profile_synced}))
 }
 /// Value-free classification. A failure after the PATCH was sent stays unknown.
 fn update_error(error: anyhow::Error) -> TaskError {

@@ -836,19 +836,49 @@ async fn update_changes_part_and_role_tags_keeps_omitted_fields_and_clears_tags_
             "agent_update:roles"
         ]
     );
-    // An older central has no part/roles and ignores them, so a real change must not be
-    // reported as a success. Its missing fields read as OTHER and no tags, so asking for
-    // exactly those defaults finds nothing to send.
-    f.state.update_mode.store(5, Ordering::SeqCst);
-    let stale = profile(&f.path);
+    // PR #118 review: a field central did not send is unknown. It must never be read as
+    // OTHER / no tags, which are exactly the values a reset asks for.
+    data(update(&f, &["--roles", "login"]));
+    let stored = |f: &Fixture| {
+        let agents = f.state.agents.lock().unwrap();
+        (agents[&201]["part"].clone(), agents[&201]["roles"].clone())
+    };
+    let cached = profile(&f.path);
+    assert_eq!(cached["state"]["agent"]["part"], "BACKEND");
+    assert_eq!(cached["state"]["agent"]["roles"], json!(["login"]));
     let calls = update_calls(&f).len();
-    deny(update(&f, &["--part", "INFRA"]), "outcome is unknown");
-    deny(update(&f, &["--roles", "login"]), "outcome is unknown");
-    assert_eq!(update_calls(&f).len(), calls + 2);
-    assert_eq!(stale, profile(&f.path));
-    let defaults = data(update(&f, &["--part", "OTHER", "--clear-roles"]));
-    assert_eq!(defaults["updated"], false);
-    assert_eq!(update_calls(&f).len(), calls + 2);
+    // The PATCH reply leaves part/roles out and central ignored the change.
+    f.state.update_mode.store(6, Ordering::SeqCst);
+    deny(
+        update(&f, &["--part", "OTHER", "--clear-roles"]),
+        "outcome is unknown",
+    );
+    assert_eq!(update_calls(&f).len(), calls + 1);
+    assert_eq!(cached, profile(&f.path));
+    assert_eq!(stored(&f), (json!("BACKEND"), json!(["login"])));
+    // An older central leaves them out of the preflight GET as well. The request is
+    // still sent and never judged a no-op.
+    f.state.update_mode.store(5, Ordering::SeqCst);
+    for args in [
+        &["--part", "OTHER", "--clear-roles"][..],
+        &["--part", "INFRA"],
+        &["--roles", "pay"],
+    ] {
+        deny(update(&f, args), "outcome is unknown");
+    }
+    assert_eq!(update_calls(&f).len(), calls + 4);
+    assert_eq!(cached, profile(&f.path));
+    assert_eq!(stored(&f), (json!("BACKEND"), json!(["login"])));
+    // A change that does not involve them still succeeds. Its result carries no part or
+    // roles, and the cached values stay as they were instead of becoming defaults.
+    let renamed = data(update(&f, &["--project-name", "Old central"]));
+    assert_eq!(renamed["changedFields"], json!(["projectName"]));
+    assert!(renamed["agent"].get("part").is_none(), "{renamed}");
+    assert!(renamed["agent"].get("roles").is_none(), "{renamed}");
+    let after = profile(&f.path);
+    assert_eq!(after["state"]["agent"]["projectName"], "Old central");
+    assert_eq!(after["state"]["agent"]["part"], "BACKEND");
+    assert_eq!(after["state"]["agent"]["roles"], json!(["login"]));
     assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
 }
@@ -1174,6 +1204,42 @@ async fn mcp_update_agent_changes_part_and_roles_and_keeps_null_or_omitted_value
         ]
     );
     assert_eq!(profile(&f.path)["state"]["agent"]["roles"], json!([]));
+    // PR #118 review: a reply without part/roles confirms nothing, even for a reset to
+    // the profile defaults, and such a reply never shows defaults as central values.
+    let cached = profile(&f.path);
+    f.state.update_mode.store(6, Ordering::SeqCst);
+    let (status, unknown) = local(
+        &http,
+        &mcp,
+        "/v1/agents/update",
+        &request(
+            "metadata-reset",
+            "update_agent",
+            json!({"part":"OTHER","roles":[]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 502, "{unknown}");
+    assert_eq!(unknown["error"]["code"], "CENTRAL_PROTOCOL_ERROR");
+    assert_eq!(unknown["error"]["outcome"], "unknown");
+    assert_eq!(cached, profile(&f.path));
+    f.state.update_mode.store(5, Ordering::SeqCst);
+    let (status, renamed) = local(
+        &http,
+        &mcp,
+        "/v1/agents/update",
+        &request(
+            "metadata-silent",
+            "update_agent",
+            json!({"projectName":"Old central"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{renamed}");
+    assert_eq!(renamed["data"]["changedFields"], json!(["projectName"]));
+    assert!(renamed["data"]["agent"].get("part").is_none(), "{renamed}");
+    assert!(renamed["data"]["agent"].get("roles").is_none(), "{renamed}");
+    assert_eq!(profile(&f.path)["state"]["agent"]["part"], "FRONTEND");
     assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
 }

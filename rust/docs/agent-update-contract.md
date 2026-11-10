@@ -88,16 +88,22 @@ client 동작:
   (`@Valid`와 `@NotBlank`) 400으로 거부될 입력이다. 뒤의 것(예: 태그 안의 NUL)은 중앙 저장소에서 실패해 결과 불명이 될 수
   있다고 보았는데, 중앙에서 실행해 확인한 것은 아니다. 생성·setup 경로의 `normalize_roles`는
   [setup 계약](../../contracts/setup/v1/README.md)이 고정하므로 바꾸지 않았다.
-- 응답의 part·roles가 요청과 다르면 결과 불명이다. part·roles가 없는 이전 server는 값을
-  무시하고 응답에도 넣지 않는다. client는 없는 필드를 OTHER·태그 없음으로 읽으므로, 그와 다른
-  값을 요청하면 PATCH 후 결과 불명이 되고, 같은 값(`--part OTHER`, `--clear-roles`)을 요청하면
-  보낼 것이 없어 `updated:false`로 끝난다. 그런 server에서는 `update_agent` 결과의 `agent`와
-  로컬 캐시의 part·roles도 이 기본값으로 채워진다(중앙에 저장된 값이 아니다).
+- 응답의 part·roles가 요청과 다르면 결과 불명이다.
+- 중앙이 실제로 보낸 값과 로컬 기본값을 구분한다(PR #118 리뷰 반영). 프로필 캐시의 `Agent`는
+  없는 필드를 OTHER·태그 없음으로 읽는데, 이 기본값은 초기화 요청(`--part OTHER`,
+  `--clear-roles`)이 요구하는 값과 같다. 그래서 응답에 필드가 있었는지를 따로 기록한다.
+  - 사전 조회에 필드가 없으면 현재 값을 모르는 것으로 보고, 요청한 part·roles를 항상 보낸다.
+    "이미 같다"고 판단하지 않는다.
+  - PATCH 응답에 필드가 없으면 요청 값과 같아 보여도 확인된 것이 아니므로 결과 불명이다.
+  - 그 결과, part·roles가 없는 이전 server나 응답에서 필드를 빼는 server에 part·roles 변경을
+    보내면 어떤 값이든 결과 불명으로 끝난다. 성공이나 no-op으로 보고하지 않는다.
+  - 중앙이 보내지 않은 part·roles는 `update_agent` 결과의 `agent`에 넣지 않고, 로컬 캐시의
+    기존 값도 덮어쓰지 않는다. projectName·roleDescription만 바꾸는 요청은 그대로 성공한다.
 - 사전 조회 뒤 세션·바인딩을 다시 확인하고 전송하는 순서(위 3번)는 그대로다. 로컬 캐시는
-  네 필드를 동기화한다.
+  네 필드를 동기화하되, part·roles는 중앙이 보낸 경우에만 바꾼다.
 
 **응답 노출 결정.** `update_agent` 결과의 `agent`, 그리고 `register_agent`·`list_agents` 결과에
-part·roles를 넣었다. 세 결과는 MCP에서 열린 객체로 받으므로 이전 MCP 프로세스와 새 브로커가
+part·roles를 넣었다(중앙이 보낸 경우에만). 세 결과는 MCP에서 열린 객체로 받으므로 이전 MCP 프로세스와 새 브로커가
 섞여도 깨지지 않는다. `register_agent`·`list_agents`는 중앙이 준 값을 그대로 전달한다. 필드가
 없거나 null이거나 문자열·문자열 배열이 아니면 그 필드만 뺀다. 이 값 때문에 Agent 확인이나
 목록 전체가 실패하지 않게 하기 위해서다(이 확인은 작업 생성·탐색 경로도 거친다). 반대로 새
@@ -113,8 +119,11 @@ null은 MCP가 빼고 보내므로 이전 브로커에서도 나머지 필드 �
 
 - fixture: `cli_agents`의 `update_changes_part_and_role_tags_keeps_omitted_fields_and_clears_tags_explicitly`
   (CLI)와 `mcp_update_agent_changes_part_and_roles_and_keeps_null_or_omitted_values`(로컬 HTTP).
-  합성 중앙은 본문에 null이 오면 실패한다. part·roles 필드가 아예 없는 이전 server 모드에서는
-  다른 값 요청의 결과 불명과 기본값 요청의 no-op을 확인한다. `task_creation`은 중앙 응답에
+  합성 중앙은 본문에 null이 오면 실패한다. PATCH 응답에서만 part·roles를 빼는 모드와 사전
+  조회에서도 빼는 이전 server 모드에서, 초기화 요청(`--part OTHER --clear-roles`)을 포함한
+  part·roles 변경이 모두 결과 불명으로 끝나고 중앙 값과 로컬 캐시가 그대로인지 확인한다.
+  같은 모드에서 projectName만 바꾸면 성공하고 결과와 캐시에 기본값이 들어가지 않는지도 본다.
+  단위 테스트는 필드 없는 응답이 "보고 없음"으로 읽히고 캐시의 part·roles를 지키는지 확인한다. `task_creation`은 중앙 응답에
   part·roles가 없거나 null·비문자열일 때 `register_agent`·`list_agents`가 그 필드만 빼고
   성공하는지 확인한다.
 - 실제 중앙: E2E `e2e/specs/p1-s17-agent-metadata-update.spec.ts`. server `d945f8b`(E2E lock,
