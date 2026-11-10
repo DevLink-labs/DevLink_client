@@ -35,6 +35,10 @@ impl RepoKey {
         );
         Ok(Self(value.to_owned()))
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// `/`-separated path inside the repository, following the central validator.
@@ -239,39 +243,41 @@ pub struct CommitBatch {
 
 impl CommitBatch {
     /// Splits in order to the central limits. A commit that alone exceeds the body limit is
-    /// rejected rather than truncated, so the caller can skip it without advancing a checkpoint.
-    pub fn split(repo_key: &RepoKey, commits: Vec<CommitRecord>) -> Result<Vec<Self>> {
+    /// never truncated: it is left out and its SHA returned, since no batch can ever carry it.
+    pub fn split(
+        repo_key: &RepoKey,
+        commits: Vec<CommitRecord>,
+    ) -> Result<(Vec<Self>, Vec<String>)> {
         let empty = || Self {
             repo_key: repo_key.clone(),
             commits: Vec::new(),
         };
         let mut batches = Vec::new();
+        let mut oversized = Vec::new();
         let mut current = empty();
         for commit in commits {
-            current.commits.push(commit);
+            let alone = Self {
+                repo_key: repo_key.clone(),
+                commits: vec![commit],
+            };
+            if alone.body_len()? > MAX_BATCH_BYTES {
+                oversized.extend(alone.commits.into_iter().map(|c| c.commit_sha));
+                continue;
+            }
+            current.commits.extend(alone.commits);
             if current.commits.len() <= MAX_COMMITS_PER_BATCH
                 && current.body_len()? <= MAX_BATCH_BYTES
             {
                 continue;
             }
             let overflow = current.commits.pop().expect("a commit was just added");
-            ensure!(
-                !current.commits.is_empty(),
-                "Commit {} exceeds the upload limit",
-                overflow.commit_sha
-            );
             batches.push(std::mem::replace(&mut current, empty()));
             current.commits.push(overflow);
-            ensure!(
-                current.body_len()? <= MAX_BATCH_BYTES,
-                "Commit {} exceeds the upload limit",
-                current.commits[0].commit_sha
-            );
         }
         if !current.commits.is_empty() {
             batches.push(current);
         }
-        Ok(batches)
+        Ok((batches, oversized))
     }
 
     pub fn commits(&self) -> &[CommitRecord] {
@@ -426,7 +432,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let batches = CommitBatch::split(&RepoKey::new(&key).unwrap(), vec![commit]).unwrap();
+        let (batches, _) = CommitBatch::split(&RepoKey::new(&key).unwrap(), vec![commit]).unwrap();
         let body = serde_json::to_value(&batches[0]).unwrap();
         assert_eq!(
             body,
@@ -631,8 +637,9 @@ mod tests {
     #[test]
     fn batches_respect_commit_count_and_body_size_in_order() {
         let shas: Vec<String> = (0..250).map(|n| format!("{n:040x}")).collect();
-        let batches =
+        let (batches, oversized) =
             CommitBatch::split(&repo_key(), shas.iter().map(|sha| commit(sha)).collect()).unwrap();
+        assert!(oversized.is_empty());
         assert_eq!(
             batches
                 .iter()
@@ -648,6 +655,7 @@ mod tests {
         assert!(
             CommitBatch::split(&repo_key(), Vec::new())
                 .unwrap()
+                .0
                 .is_empty()
         );
 
@@ -666,7 +674,7 @@ mod tests {
             )
             .unwrap()
         };
-        let batches = CommitBatch::split(&repo_key(), (0..5).map(large).collect()).unwrap();
+        let (batches, _) = CommitBatch::split(&repo_key(), (0..5).map(large).collect()).unwrap();
         assert!(batches.len() > 1);
         for batch in &batches {
             assert!(serde_json::to_vec(batch).unwrap().len() <= MAX_BATCH_BYTES);
@@ -685,7 +693,21 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(CommitBatch::split(&repo_key(), vec![commit(&"b".repeat(40)), oversized]).is_err());
+        // A commit no body can carry is left out; the others still go in order.
+        let (batches, skipped) = CommitBatch::split(
+            &repo_key(),
+            vec![commit(&"b".repeat(40)), oversized, commit(&"c".repeat(40))],
+        )
+        .unwrap();
+        assert_eq!(skipped, [SHA1]);
+        assert_eq!(
+            batches[0]
+                .commits()
+                .iter()
+                .map(CommitRecord::commit_sha)
+                .collect::<Vec<_>>(),
+            ["b".repeat(40), "c".repeat(40)]
+        );
     }
 
     #[test]

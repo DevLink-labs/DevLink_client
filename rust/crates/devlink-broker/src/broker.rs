@@ -175,26 +175,37 @@ pub async fn run(path: &Path) -> Result<()> {
                 ))
             })
     };
-    // 작업 파일 수집 (IDX-3-02): 30초마다 전체 목록 반영, find_agent 직전 재확인
+    // Git 근거 수집: 작업 파일 (IDX-3-02, 30초·find_agent 직전), 커밋 이력 (IDX-3-01, 시작 시·60초)
     let working_files = crate::working_files::WorkingFileRefresher::default();
-    let working_sync = crate::agent_profile::inspection_binding(path)
+    let git_remote = if config.dependency_remote.is_empty() {
+        crate::working_files::DEFAULT_REMOTE.to_owned()
+    } else {
+        config.dependency_remote.clone()
+    };
+    let git_binding = crate::agent_profile::inspection_binding(path)
         .ok()
-        .flatten()
-        .map(|binding| {
-            let remote = if config.dependency_remote.is_empty() {
-                crate::working_files::DEFAULT_REMOTE.to_owned()
-            } else {
-                config.dependency_remote.clone()
-            };
-            tokio::spawn(crate::working_files::run(
-                binding,
-                remote,
-                central_state.clone(),
-                task_client.clone(),
-                working_files.clone(),
-                cancel.clone(),
-            ))
-        });
+        .flatten();
+    let working_sync = git_binding.clone().map(|binding| {
+        tokio::spawn(crate::working_files::run(
+            binding,
+            git_remote.clone(),
+            central_state.clone(),
+            task_client.clone(),
+            working_files.clone(),
+            cancel.clone(),
+        ))
+    });
+    let commit_sync = git_binding.map(|binding| {
+        tokio::spawn(crate::commit_sync::run(
+            path.to_path_buf(),
+            binding,
+            git_remote.clone(),
+            central_state.clone(),
+            task_client.clone(),
+            git_identity.clone(),
+            cancel.clone(),
+        ))
+    });
 
     // 보낸 작업의 로컬 지연 알림 판정 (taskOverdueMinutes, 0이면 끔)
     // Off (0) records nothing, so enabling it later does not flag old tasks at once.
@@ -295,7 +306,10 @@ pub async fn run(path: &Path) -> Result<()> {
 
     // 중앙 서버 태스크 종료 요청 및 대기 (최대 2초 후 강제 취소)
     cancel.cancel();
-    for task in [dependency_sync, working_sync].into_iter().flatten() {
+    for task in [dependency_sync, working_sync, commit_sync]
+        .into_iter()
+        .flatten()
+    {
         let abort = task.abort_handle();
         if timeout(Duration::from_secs(1), task).await.is_err() {
             abort.abort();

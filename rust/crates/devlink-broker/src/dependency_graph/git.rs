@@ -24,6 +24,16 @@ pub(super) struct SourceFile {
     pub text: String,
 }
 
+/// One non-merge commit from `git log --name-status`. The author email stays on this PC; the
+/// commit uploader only uses it for SET-3-03 attribution.
+pub(crate) struct RawCommit {
+    pub sha: String,
+    pub committed_at: String,
+    pub author_email: String,
+    /// `(status, path)`; for renames and copies the path is the new one.
+    pub files: Vec<(String, String)>,
+}
+
 impl GitProject {
     pub(crate) async fn open(path: &Path, remote: &str) -> Result<Self> {
         ensure!(
@@ -72,6 +82,102 @@ impl GitProject {
         )
         .await?;
         Ok(())
+    }
+
+    /// Current `HEAD` commit, or `None` before the first commit.
+    pub(crate) async fn head(&self) -> Result<Option<String>> {
+        let Ok(result) = run(
+            &self.root,
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            None,
+            128,
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+        let sha = std::str::from_utf8(&result)?.trim();
+        ensure!(valid_sha(sha), "Invalid Git commit ID");
+        Ok(Some(sha.to_owned()))
+    }
+
+    /// Non-merge commits reachable from `tip` but not from `since`, committed at or after the
+    /// Unix time `after`, oldest first. Topological order puts every ancestor of a commit before
+    /// it, so the range up to any listed commit can be checkpointed by that commit.
+    ///
+    /// The date only filters: `--since` would stop at a commit with a skewed old date and drop
+    /// its recent ancestors. Git before 2.37 lacks `--since-as-filter` and falls back to it.
+    pub(crate) async fn commit_ids(
+        &self,
+        since: Option<&str>,
+        tip: &str,
+        after: u64,
+    ) -> Result<Vec<String>> {
+        ensure!(
+            valid_sha(tip) && since.is_none_or(valid_sha),
+            "Invalid Git commit ID"
+        );
+        let range = since.map_or_else(|| tip.to_owned(), |old| format!("{old}..{tip}"));
+        let list = |date: String| {
+            let range = range.clone();
+            async move {
+                let args = [
+                    "rev-list",
+                    "--no-merges",
+                    "--topo-order",
+                    "--reverse",
+                    &date,
+                    &range,
+                    "--",
+                ];
+                run(&self.root, &args, None, OUTPUT_LIMIT).await
+            }
+        };
+        let output = match list(format!("--since-as-filter=@{after}")).await {
+            Ok(output) => output,
+            Err(_) => list(format!("--since=@{after}")).await?,
+        };
+        let ids: Vec<String> = std::str::from_utf8(&output)?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        ensure!(ids.iter().all(|id| valid_sha(id)), "Invalid Git commit ID");
+        Ok(ids)
+    }
+
+    /// The listed commits in the given order. Root commits always list their files and rename
+    /// detection is fixed (`-M`, 50% similarity, limit 1000) instead of following user
+    /// configuration, so every clone reports the same files for the same SHA.
+    pub(crate) async fn commits(&self, ids: &[String]) -> Result<Vec<RawCommit>> {
+        ensure!(ids.iter().all(|id| valid_sha(id)), "Invalid Git commit ID");
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input = ids.iter().flat_map(|id| [id.as_bytes(), b"\n"]).flatten();
+        let output = run(
+            &self.root,
+            &[
+                "-c",
+                "core.quotePath=false",
+                "log",
+                "--stdin",
+                "--no-walk=unsorted",
+                "--root",
+                "--no-ext-diff",
+                "--no-color",
+                "--no-show-signature",
+                "-M",
+                "-l1000",
+                "--name-status",
+                "-z",
+                "--format=%x01%H%x00%cI%x00%ae",
+                "--",
+            ],
+            Some(input.copied().collect()),
+            OUTPUT_LIMIT,
+        )
+        .await?;
+        parse_log(&output)
     }
 
     pub(super) async fn snapshot(&self, sha: &str) -> Result<Vec<SourceFile>> {
@@ -175,6 +281,51 @@ impl GitProject {
         .await?;
         Ok((branch, parse_status(&status)?))
     }
+}
+
+fn valid_sha(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `--format=%x01%H%x00%cI%x00%ae --name-status -z`: each commit is `\x01SHA\0TIME\0EMAIL\0`
+/// (the email may be empty), then `\n` and NUL-separated status/path entries where renames and
+/// copies carry the old and the new path.
+fn parse_log(output: &[u8]) -> Result<Vec<RawCommit>> {
+    let mut commits = Vec::new();
+    for entry in output.split(|b| *b == 1).filter(|e| !e.is_empty()) {
+        let mut fields = entry.split(|b| *b == 0);
+        let (Some(sha), Some(time), Some(email)) = (fields.next(), fields.next(), fields.next())
+        else {
+            bail!("Invalid Git log entry");
+        };
+        let sha = std::str::from_utf8(sha).context("Invalid Git commit ID")?;
+        ensure!(valid_sha(sha), "Invalid Git commit ID");
+        let mut rest = fields
+            .map(|field| field.strip_prefix(b"\n").unwrap_or(field))
+            .filter(|field| !field.is_empty());
+        let mut files = Vec::new();
+        while let Some(status) = rest.next() {
+            let status = std::str::from_utf8(status).context("Invalid Git status")?;
+            if matches!(status.as_bytes().first(), Some(b'R' | b'C')) {
+                rest.next().context("Rename without source path")?;
+            }
+            let path = rest.next().context("Status without path")?;
+            // Central cannot take a non-UTF-8 path; skip that file only.
+            if let Ok(path) = std::str::from_utf8(path) {
+                files.push((status.to_owned(), path.to_owned()));
+            }
+        }
+        commits.push(RawCommit {
+            sha: sha.to_owned(),
+            committed_at: std::str::from_utf8(time)
+                .context("Invalid commit time")?
+                .to_owned(),
+            // Only compared locally for attribution, so a lossy decode is harmless.
+            author_email: String::from_utf8_lossy(email).into_owned(),
+            files,
+        });
+    }
+    Ok(commits)
 }
 
 /// `git status --porcelain=v1 -z --no-renames` records: two status letters, a space, the path.
@@ -356,5 +507,81 @@ mod tests {
             .flat_map(|i| format!("?? f{i}\0").into_bytes())
             .collect();
         assert!(parse_status(&many).is_err());
+    }
+
+    #[test]
+    fn log_entries_keep_the_new_path_of_renames_and_allow_an_empty_email() {
+        let first = "c805111b99cc2c3ef848f5809c7e9a2382f8cf89";
+        let second = "120ac440db5a24b6c664e27293cdc3581caa4009";
+        let mut output = Vec::new();
+        for part in [
+            format!("\x01{first}\x002026-11-10T14:36:09+09:00\x00dev@example.test\x00").as_bytes(),
+            b"\nR100\x00a.txt\x00b c.txt\x00M\x00src/\xed\x95\x9c.ts\x00",
+            format!("\x01{second}\x002026-11-10T14:36:09+09:00\x00\x00").as_bytes(),
+            b"\nA\x00a.txt\x00D\x00\xff.bin\x00",
+        ] {
+            output.extend_from_slice(part);
+        }
+        let commits = parse_log(&output).unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].sha, first);
+        assert_eq!(commits[0].author_email, "dev@example.test");
+        assert_eq!(
+            commits[0].files,
+            [
+                ("R100".to_owned(), "b c.txt".to_owned()),
+                ("M".to_owned(), "src/한.ts".to_owned())
+            ]
+        );
+        assert_eq!(commits[1].committed_at, "2026-11-10T14:36:09+09:00");
+        assert_eq!(commits[1].author_email, "");
+        // A non-UTF-8 path is dropped; the commit and its other files stay.
+        assert_eq!(commits[1].files, [("A".to_owned(), "a.txt".to_owned())]);
+        assert!(parse_log(b"").unwrap().is_empty());
+        assert!(parse_log(b"\x01not-a-sha\x00t\x00e\x00").is_err());
+        assert!(
+            parse_log(format!("\x01{first}\x00t\x00e\x00\nR100\x00only-old\x00").as_bytes())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_identity_normalizes_transport_and_host_only() {
+        let same = [
+            "https://github.com/Acme/Demo.git",
+            "https://GitHub.com/Acme/Demo",
+            "https://github.com:443/Acme/Demo/",
+            "ssh://git@github.com/Acme/Demo.git",
+            "ssh://git@github.com:22/Acme/Demo",
+            "git@github.com:Acme/Demo.git",
+        ];
+        for remote in same {
+            assert_eq!(
+                remote_identity(remote).unwrap(),
+                "github.com/Acme/Demo",
+                "{remote}"
+            );
+        }
+        assert_eq!(
+            remote_identity("https://git.example.com:8443/team/sub/repo.git").unwrap(),
+            "git.example.com:8443/team/sub/repo"
+        );
+        // Path case is kept: these are different repository keys.
+        assert_ne!(
+            remote_identity("git@github.com:acme/demo.git").unwrap(),
+            remote_identity("git@github.com:Acme/Demo.git").unwrap()
+        );
+        for unsupported in [
+            "http://github.com/acme/demo.git",
+            "file:///C:/repo",
+            "C:/repo",
+            "/srv/repo.git",
+            "https://github.com/demo",
+            "https://github.com/acme/../demo",
+            "https://github.com/acme/demo%2Fx",
+            "git@localhost:acme/demo.git",
+        ] {
+            assert!(remote_identity(unsupported).is_err(), "{unsupported}");
+        }
     }
 }
