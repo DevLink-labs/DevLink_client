@@ -325,17 +325,24 @@ pub struct WorkingFiles {
 }
 
 impl WorkingFiles {
+    /// Central branch rule: letters, digits and `._/-`, at most 255 UTF-16 units, no leading `-`
+    /// and no `..`. A collector sends `null` rather than an unaccepted name.
+    pub fn branch_allowed(branch: &str) -> bool {
+        !branch.is_empty()
+            && branch.encode_utf16().count() <= MAX_BRANCH_CHARS
+            && !branch.starts_with('-')
+            && !branch.contains("..")
+            && branch
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+    }
+
     pub fn new(
         branch: Option<&str>,
         files: impl IntoIterator<Item = (RelativePath, WorkingChange)>,
     ) -> Result<Self> {
         if let Some(branch) = branch {
-            ensure!(
-                !branch.trim().is_empty()
-                    && branch.chars().count() <= MAX_BRANCH_CHARS
-                    && !branch.chars().any(char::is_control),
-                "Invalid branch name"
-            );
+            ensure!(Self::branch_allowed(branch), "Invalid branch name");
         }
         let files: BTreeMap<_, _> = files.into_iter().collect();
         ensure!(files.len() <= MAX_WORKING_FILES, "Too many changed files");
@@ -713,7 +720,20 @@ mod tests {
         );
         let detached = serde_json::to_value(WorkingFiles::new(None, []).unwrap()).unwrap();
         assert_eq!(detached, json!({"branch": null, "files": []}));
-        for branch in ["", " ", "a\nb", &"b".repeat(MAX_BRANCH_CHARS + 1)] {
+        for branch in ["main", "feature/login-2", "release_1.2", "기능/로그인"] {
+            assert!(WorkingFiles::new(Some(branch), []).is_ok(), "{branch:?}");
+        }
+        for branch in [
+            "",
+            " ",
+            "a\nb",
+            "-main",
+            "a..b",
+            "fix#12",
+            "user@x",
+            "a b",
+            &"b".repeat(MAX_BRANCH_CHARS + 1),
+        ] {
             assert!(WorkingFiles::new(Some(branch), []).is_err(), "{branch:?}");
         }
         let many = (0..=MAX_WORKING_FILES).map(|i| (path(&format!("f{i}")), WorkingChange::Added));

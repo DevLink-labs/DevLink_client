@@ -41,9 +41,7 @@
 
 ## 작업 파일
 
-IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 파일은 2,000개, 브랜치는 255자 이하다.
-
-팀 의존성 분석(client #110)의 임시 작업 파일 전송도 같은 모양과 값을 쓴다. IDX-3-02 업로드가 생기면 그 전송은 이 타입으로 대체한다.
+IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 파일은 2,000개 이하다. 브랜치는 중앙 규칙(문자·숫자·`._/-`, 255자 이하, `-` 시작·`..` 금지)을 따르며 `WorkingFiles::branch_allowed`로 확인한다. 수집기는 [작업 파일 수집](working-files.md)이다.
 
 ## 검증
 

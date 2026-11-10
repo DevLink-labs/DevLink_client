@@ -7,6 +7,7 @@ use crate::{
     session_api,
     sessions::{Identifier, SessionManager},
     task_client::{TaskClient, TaskError},
+    working_files::WorkingFileRefresher,
 };
 use axum::{
     Router,
@@ -27,6 +28,7 @@ struct Api {
     central: TaskClient,
     cancel: CancellationToken,
     context: crate::context_api::ContextReader,
+    working_files: WorkingFileRefresher,
 }
 pub fn router(
     token: Arc<String>,
@@ -34,6 +36,24 @@ pub fn router(
     central: TaskClient,
     cancel: CancellationToken,
     context: crate::context_api::ContextReader,
+) -> Router {
+    router_with_working_files(
+        token,
+        sessions,
+        central,
+        cancel,
+        context,
+        WorkingFileRefresher::default(),
+    )
+}
+/// Same routes; `find_agent` re-checks working files through `working_files` first (IDX-3-02).
+pub fn router_with_working_files(
+    token: Arc<String>,
+    sessions: SessionManager,
+    central: TaskClient,
+    cancel: CancellationToken,
+    context: crate::context_api::ContextReader,
+    working_files: WorkingFileRefresher,
 ) -> Router {
     Router::new()
         .route("/v1/agents/register", post(register))
@@ -46,6 +66,7 @@ pub fn router(
             central,
             cancel,
             context,
+            working_files,
         })
 }
 #[derive(Deserialize)]
@@ -288,6 +309,11 @@ async fn find(State(api): State<Api>, request: Request) -> Response {
             .authorize(&body.context.session_id, &body.context.principal())
             .await
             .map_err(session_error)?;
+        // IDX-3-02: one more working-file observation before scoring; on failure central uses
+        // the last valid one.
+        api.working_files
+            .refresh(crate::working_files::REFRESH_LIMIT)
+            .await;
         let data = api.central.find_agents(&actor, question, repo_key).await?;
         api.sessions
             .authorize(&body.context.session_id, &actor)

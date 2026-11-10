@@ -1,7 +1,7 @@
+use crate::git_scope::{RelativePath, WorkingChange};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -13,7 +13,7 @@ use tokio::{
 
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
-pub(super) struct GitProject {
+pub(crate) struct GitProject {
     root: PathBuf,
     remote: String,
     pub key: String,
@@ -25,7 +25,7 @@ pub(super) struct SourceFile {
 }
 
 impl GitProject {
-    pub async fn open(path: &Path, remote: &str) -> Result<Self> {
+    pub(crate) async fn open(path: &Path, remote: &str) -> Result<Self> {
         ensure!(
             !remote.is_empty()
                 && !remote.starts_with('-')
@@ -46,7 +46,7 @@ impl GitProject {
         })
     }
 
-    pub async fn sha(&self, branch: &str) -> Result<String> {
+    pub(super) async fn sha(&self, branch: &str) -> Result<String> {
         let reference = format!("refs/remotes/{}/{branch}^{{commit}}", self.remote);
         let result = run(
             &self.root,
@@ -63,7 +63,7 @@ impl GitProject {
         Ok(sha.to_owned())
     }
 
-    pub async fn require_ancestor(&self, old: &str, new: &str) -> Result<()> {
+    pub(super) async fn require_ancestor(&self, old: &str, new: &str) -> Result<()> {
         run(
             &self.root,
             &["merge-base", "--is-ancestor", old, new],
@@ -74,7 +74,7 @@ impl GitProject {
         Ok(())
     }
 
-    pub async fn snapshot(&self, sha: &str) -> Result<Vec<SourceFile>> {
+    pub(super) async fn snapshot(&self, sha: &str) -> Result<Vec<SourceFile>> {
         let listing = run(
             &self.root,
             &["ls-tree", "-r", "-z", "--full-tree", sha],
@@ -151,8 +151,11 @@ impl GitProject {
     }
 
     /// Current branch (`None` on a detached HEAD) and the working-tree changes, following the
-    /// IDX-3-02 working-file contract: at most 2,000 distinct paths.
-    pub async fn working(&self) -> Result<(Option<String>, BTreeMap<String, &'static str>)> {
+    /// IDX-3-02 working-file contract: at most 2,000 distinct paths. Paths outside the central
+    /// path rules are skipped.
+    pub(crate) async fn working(
+        &self,
+    ) -> Result<(Option<String>, Vec<(RelativePath, WorkingChange)>)> {
         let branch = run(&self.root, &["branch", "--show-current"], None, 1024).await?;
         let branch = std::str::from_utf8(&branch)?.trim();
         let branch = (!branch.is_empty()).then(|| branch.to_owned());
@@ -170,34 +173,33 @@ impl GitProject {
             OUTPUT_LIMIT,
         )
         .await?;
-        let mut files = BTreeMap::new();
-        for record in status
-            .split(|byte| *byte == 0)
-            .filter(|record| !record.is_empty())
-        {
-            if record.len() < 4 || record[2] != b' ' {
-                bail!("Invalid Git status entry");
-            }
-            let Ok(path) = std::str::from_utf8(&record[3..]) else {
-                continue;
-            };
-            if !valid_path(path) {
-                continue;
-            }
-            let flags = &record[..2];
-            let change = match flags {
-                b"??" => "UNTRACKED",
-                b"DD" | b"AU" | b"UD" | b"UA" | b"DU" | b"AA" | b"UU" => "UNMERGED",
-                _ if flags.contains(&b'D') => "DELETED",
-                _ if flags.contains(&b'A') => "ADDED",
-                _ if flags.contains(&b'T') => "TYPE_CHANGED",
-                _ => "MODIFIED",
-            };
-            files.insert(path.to_owned(), change);
-            ensure!(files.len() <= 2000, "Too many changed files");
-        }
-        Ok((branch, files))
+        Ok((branch, parse_status(&status)?))
     }
+}
+
+/// `git status --porcelain=v1 -z --no-renames` records: two status letters, a space, the path.
+fn parse_status(status: &[u8]) -> Result<Vec<(RelativePath, WorkingChange)>> {
+    let mut files = std::collections::BTreeMap::new();
+    for record in status
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        if record.len() < 4 || record[2] != b' ' {
+            bail!("Invalid Git status entry");
+        }
+        let Ok(path) = std::str::from_utf8(&record[3..]) else {
+            continue;
+        };
+        let Ok(path) = RelativePath::new(path) else {
+            continue;
+        };
+        files.insert(path, WorkingChange::from_porcelain([record[0], record[1]]));
+        ensure!(
+            files.len() <= crate::git_scope::MAX_WORKING_FILES,
+            "Too many changed files"
+        );
+    }
+    Ok(files.into_iter().collect())
 }
 
 pub(super) fn valid_path(path: &str) -> bool {
@@ -315,4 +317,44 @@ async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -
     })
     .await
     .context("Git operation timed out")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_records_become_sorted_working_changes() {
+        let status =
+            b" M src/b.ts\0?? \xed\x95\x9c.md\0A  src/a.ts\0 D gone.ts\0UU c.ts\0MM src/b.ts\0";
+        let files = parse_status(status).unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|(path, change)| (path.as_str(), *change))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("c.ts", WorkingChange::Unmerged),
+                ("gone.ts", WorkingChange::Deleted),
+                ("src/a.ts", WorkingChange::Added),
+                ("src/b.ts", WorkingChange::Modified),
+                ("한.md", WorkingChange::Untracked),
+            ]
+        );
+        assert!(parse_status(b"").unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_skips_paths_central_rejects_and_bounds_the_list() {
+        let files = parse_status(b" M ok.ts\0 M bad\\name.ts\0?? \xff\xfe\0").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0.as_str(), "ok.ts");
+        assert!(parse_status(b"XM\0").is_err());
+        assert!(parse_status(b"MMXpath\0").is_err());
+        let many: Vec<u8> = (0..=crate::git_scope::MAX_WORKING_FILES)
+            .flat_map(|i| format!("?? f{i}\0").into_bytes())
+            .collect();
+        assert!(parse_status(&many).is_err());
+    }
 }

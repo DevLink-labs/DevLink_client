@@ -175,6 +175,26 @@ pub async fn run(path: &Path) -> Result<()> {
                 ))
             })
     };
+    // 작업 파일 수집 (IDX-3-02): 30초마다 전체 목록 반영, find_agent 직전 재확인
+    let working_files = crate::working_files::WorkingFileRefresher::default();
+    let working_sync = crate::agent_profile::inspection_binding(path)
+        .ok()
+        .flatten()
+        .map(|binding| {
+            let remote = if config.dependency_remote.is_empty() {
+                crate::working_files::DEFAULT_REMOTE.to_owned()
+            } else {
+                config.dependency_remote.clone()
+            };
+            tokio::spawn(crate::working_files::run(
+                binding,
+                remote,
+                central_state.clone(),
+                task_client.clone(),
+                working_files.clone(),
+                cancel.clone(),
+            ))
+        });
 
     // 보낸 작업의 로컬 지연 알림 판정 (taskOverdueMinutes, 0이면 끔)
     // Off (0) records nothing, so enabling it later does not flag old tasks at once.
@@ -227,12 +247,13 @@ pub async fn run(path: &Path) -> Result<()> {
             sessions.clone(),
         ))
         // 작업 생성 API 라우터 병합 (/v1/tasks/create)
-        .merge(crate::agent_api::router(
+        .merge(crate::agent_api::router_with_working_files(
             mcp_token.clone(),
             sessions.clone(),
             task_client.clone(),
             cancel.clone(),
             context_reader,
+            working_files,
         ))
         .merge(crate::task_api::router(
             mcp_token.clone(),
@@ -274,7 +295,7 @@ pub async fn run(path: &Path) -> Result<()> {
 
     // 중앙 서버 태스크 종료 요청 및 대기 (최대 2초 후 강제 취소)
     cancel.cancel();
-    if let Some(task) = dependency_sync {
+    for task in [dependency_sync, working_sync].into_iter().flatten() {
         let abort = task.abort_handle();
         if timeout(Duration::from_secs(1), task).await.is_err() {
             abort.abort();
