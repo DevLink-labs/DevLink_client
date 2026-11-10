@@ -3,7 +3,10 @@
 //! WebSocket 접속 origin으로부터 HTTP/HTTPS 엔드포인트를 도출하며,
 //! Bearer 인증 토큰을 안전하게 주입하고 로그, URL, 에러 메시지에 인증 정보가 누출되지 않도록 보장합니다.
 
-use crate::{central::endpoint_url, protocol::MAX_CENTRAL_MESSAGE_BYTES, sessions::Principal};
+use crate::{
+    agent_metadata::AgentPart, central::endpoint_url, protocol::MAX_CENTRAL_MESSAGE_BYTES,
+    sessions::Principal,
+};
 use anyhow::{Context, Result, ensure};
 use reqwest::{
     Client,
@@ -381,7 +384,14 @@ impl TaskClient {
                 {
                     return Err(protocol_error());
                 }
-                agents.push(agent.local());
+                let mut view = agent.local();
+                if let Some(part) = row["part"]
+                    .as_str()
+                    .and_then(|part| AgentPart::parse(part).ok())
+                {
+                    view["part"] = json!(part);
+                }
+                agents.push(view);
             }
             Ok(json!({"agents":agents}))
         })

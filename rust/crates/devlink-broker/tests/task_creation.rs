@@ -174,7 +174,9 @@ async fn central_agents(
         8 => agent["agentId"] = json!(9223372036854775808_u64),
         _ => {}
     }
-    Json(json!({"success":true,"data":[public_agent(12),agent]})).into_response()
+    let mut own_agent = public_agent(12);
+    own_agent["part"] = json!("BACKEND");
+    Json(json!({"success":true,"data":[own_agent,agent]})).into_response()
 }
 
 async fn central_context(
@@ -542,6 +544,8 @@ async fn register_confirms_existing_agent_and_list_preserves_long_ids_without_cr
         "9223372036854775807"
     );
     assert_eq!(result["data"]["agents"][0]["toolType"], "CODEX");
+    assert_eq!(result["data"]["agents"][0]["part"], "BACKEND");
+    assert!(result["data"]["agents"][1].get("part").is_none());
     assert!(remote.state.calls.lock().await.is_empty());
     assert!(!TaskRequests::path(&dir.path().join("config.json")).exists());
     broker.stop().await;
