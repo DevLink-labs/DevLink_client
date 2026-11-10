@@ -606,11 +606,16 @@ pub async fn token(config_path: &Path) -> Result<Value> {
     issue(config_path, &mut client, &mut profile, agent).await
 }
 
-/// S15P31D108-146: the only Agent fields a bound profile may change. Name, tool,
+/// S15P31D108-146/-183: the only Agent fields a bound profile may change. Name, tool,
 /// owner and team stay fixed, and no Agent or credential is created.
+#[derive(Default)]
 pub struct UpdateOptions {
     pub project_name: Option<String>,
     pub role_description: Option<String>,
+    /// `None` keeps the stored part.
+    pub part: Option<AgentPart>,
+    /// `None` keeps the stored tags; an empty list removes all of them.
+    pub roles: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -658,8 +663,8 @@ fn valid_text(value: &str, limit: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-/// Change the bound Agent's project name or role through the central owner session.
-/// Only fields that differ from the live central value are sent. `expected_agent`
+/// Change the bound Agent's project name, role, part or role tags through the central
+/// owner session. Only fields that differ from the live central value are sent. `expected_agent`
 /// pins the caller's verified Agent (the broker session) to the bound profile.
 pub async fn update(
     config_path: &Path,
@@ -687,11 +692,17 @@ pub(crate) struct PreparedUpdate {
 
 pub(crate) async fn prepare_update(
     config_path: &Path,
-    options: UpdateOptions,
+    mut options: UpdateOptions,
     expected_agent: Option<u64>,
 ) -> Result<PreparedUpdate> {
     use UpdateFaultKind::{Binding, Invalid};
-    if (options.project_name.is_none() && options.role_description.is_none())
+    // Same trimming and de-duplication as creation, so the comparison with the
+    // central value and the confirmation of the reply use what central stores.
+    let roles = options.roles.as_deref().map(normalize_roles).transpose();
+    if (options.project_name.is_none()
+        && options.role_description.is_none()
+        && options.part.is_none()
+        && options.roles.is_none())
         || options
             .project_name
             .as_deref()
@@ -700,12 +711,18 @@ pub(crate) async fn prepare_update(
             .role_description
             .as_deref()
             .is_some_and(|v| !valid_text(v, 255))
+        // A tag that trims to nothing is a central 400, and a control character such
+        // as NUL inside a tag may fail in central storage with an unknown outcome.
+        || roles.as_ref().map_or(true, |roles| {
+            roles.iter().flatten().any(|tag| tag.is_empty() || tag.chars().any(char::is_control))
+        })
     {
         return Err(update_fault(
             Invalid,
-            "Invalid Agent update: pass a non-blank --project-name (up to 120) or --role-description (up to 255)",
+            "Invalid Agent update: pass a non-blank --project-name (up to 120) or --role-description (up to 255), --part, or at most 10 non-blank --roles tags (each up to 64, no control characters)",
         ));
     }
+    options.roles = roles.unwrap_or_default();
     let mut client = UserClient::authenticated(config_path).await?;
     let team = teams::require_selected(config_path, &mut client).await?;
     let user = client.user()?.user_id;
@@ -751,6 +768,19 @@ pub(crate) async fn prepare_update(
     {
         body.insert("roleDescription".into(), json!(role));
         changed.push("roleDescription");
+    }
+    if let Some(part) = options.part
+        && part != current.part
+    {
+        body.insert("part".into(), json!(part));
+        changed.push("part");
+    }
+    // Central replaces the whole list; `[]` removes every tag.
+    if let Some(roles) = &options.roles
+        && *roles != current.roles
+    {
+        body.insert("roles".into(), json!(roles));
+        changed.push("roles");
     }
     let csrf = if changed.is_empty() {
         None
@@ -802,7 +832,13 @@ impl PreparedUpdate {
                     .options
                     .role_description
                     .as_ref()
-                    .is_none_or(|r| updated.role_description.as_ref() == Some(r));
+                    .is_none_or(|r| updated.role_description.as_ref() == Some(r))
+                && self.options.part.is_none_or(|p| p == updated.part)
+                && self
+                    .options
+                    .roles
+                    .as_ref()
+                    .is_none_or(|r| *r == updated.roles);
             if !confirmed {
                 return Err(update_fault(
                     UpdateFaultKind::Unconfirmed,
@@ -822,7 +858,7 @@ impl PreparedUpdate {
     }
 }
 
-/// Only the two editable fields are cached: identity, root, token and volatile
+/// Only the four editable fields are cached: identity, root, token and volatile
 /// status stay, so an unchanged value never rewrites the profile. A profile changed
 /// by another operation is left alone and reported as unsynced.
 fn sync_cached_agent(config_path: &Path, before: &Profile, agent: &Agent) -> bool {
@@ -836,11 +872,15 @@ fn sync_cached_agent(config_path: &Path, before: &Profile, agent: &Agent) -> boo
         State::Ready { agent: cached, .. } | State::NeedsToken { agent: cached } => {
             if cached.project_name == agent.project_name
                 && cached.role_description == agent.role_description
+                && cached.part == agent.part
+                && cached.roles == agent.roles
             {
                 return true;
             }
             cached.project_name = agent.project_name.clone();
             cached.role_description = agent.role_description.clone();
+            cached.part = agent.part;
+            cached.roles = agent.roles.clone();
         }
         _ => return false,
     }

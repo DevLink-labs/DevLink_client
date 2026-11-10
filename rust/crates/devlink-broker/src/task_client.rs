@@ -444,6 +444,12 @@ struct PublicAgent {
     owner_user_id: u64,
     name: String,
     role_description: Option<String>,
+    // S15P31D108-183: shown as central sent them. Identity checks never depend on these,
+    // so a missing, null or unexpected value is left out instead of failing the Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    part: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roles: Option<Value>,
     tool_type: String,
     project_name: String,
     status: String,
@@ -452,7 +458,13 @@ struct PublicAgent {
 }
 impl PublicAgent {
     fn decode(data: Value) -> Result<Self, TaskError> {
-        let agent: Self = serde_json::from_value(data).map_err(|_| protocol_error())?;
+        let mut agent: Self = serde_json::from_value(data).map_err(|_| protocol_error())?;
+        agent.part = agent.part.filter(Value::is_string);
+        agent.roles = agent.roles.filter(|roles| {
+            roles
+                .as_array()
+                .is_some_and(|tags| tags.iter().all(Value::is_string))
+        });
         if [agent.agent_id, agent.team_id, agent.owner_user_id]
             .into_iter()
             .any(|id| id == 0 || id > i64::MAX as u64)

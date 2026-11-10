@@ -758,6 +758,101 @@ async fn update_failures_keep_the_profile_and_never_issue_credentials() {
     assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
 }
 
+/// S15P31D108-183: part and role tags follow the central rule. An omitted field keeps
+/// the stored value and only an explicit empty list removes the tags.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_changes_part_and_role_tags_keeps_omitted_fields_and_clears_tags_explicitly() {
+    let f = Fixture::new().await;
+    selected(&f);
+    data(create(&f));
+    let before = profile(&f.path);
+    assert_eq!(before["state"]["agent"]["part"], "OTHER");
+    assert_eq!(before["state"]["agent"]["roles"], json!([]));
+    deny(update(&f, &["--part", "DESIGN"]), "Choose FRONTEND");
+    deny(
+        update(&f, &["--roles", "login", "--clear-roles"]),
+        "cannot be used with",
+    );
+    let eleven = (0..11)
+        .map(|i| format!("tag{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // A tag of U+0001 alone trims to nothing in central; a control character inside a
+    // tag is refused as well.
+    for roles in [
+        eleven.as_str(),
+        "login,  ",
+        "",
+        &"r".repeat(65),
+        "\u{1}",
+        "pay\u{7f}ment",
+    ] {
+        deny(update(&f, &["--roles", roles]), "Invalid Agent update");
+    }
+    assert!(update_calls(&f).is_empty());
+    let tags = json!(["로그인", "결제 API"]);
+    let result = data(update(
+        &f,
+        &["--part", "BACKEND", "--roles", " 로그인 ,결제 API,로그인"],
+    ));
+    assert_eq!(result["updated"], true);
+    assert_eq!(result["changedFields"], json!(["part", "roles"]));
+    assert_eq!(result["credentialsRotated"], false);
+    assert_eq!(result["localProfileSynced"], true);
+    assert_eq!(result["agent"]["part"], "BACKEND");
+    assert_eq!(result["agent"]["roles"], tags);
+    let after = profile(&f.path);
+    assert_eq!(after["state"]["agent"]["part"], "BACKEND");
+    assert_eq!(after["state"]["agent"]["roles"], tags);
+    assert_eq!(after["state"]["token"], before["state"]["token"]);
+    // Fields that were not passed are not sent and keep the central value.
+    let kept = data(update(&f, &["--project-name", "Renamed"]));
+    assert_eq!(kept["changedFields"], json!(["projectName"]));
+    assert_eq!(kept["agent"]["part"], "BACKEND");
+    assert_eq!(kept["agent"]["roles"], tags);
+    // The same tags after trimming are not a change.
+    let unchanged = std::fs::read(agent_profile::path(&f.path)).unwrap();
+    let same = data(update(
+        &f,
+        &["--part", "BACKEND", "--roles", "로그인, 결제 API "],
+    ));
+    assert_eq!(same["updated"], false);
+    assert_eq!(same["changedFields"], json!([]));
+    assert_eq!(
+        std::fs::read(agent_profile::path(&f.path)).unwrap(),
+        unchanged
+    );
+    let cleared = data(update(&f, &["--clear-roles"]));
+    assert_eq!(cleared["changedFields"], json!(["roles"]));
+    assert_eq!(cleared["agent"]["roles"], json!([]));
+    assert_eq!(cleared["agent"]["part"], "BACKEND");
+    assert_eq!(profile(&f.path)["state"]["agent"]["roles"], json!([]));
+    assert_eq!(data(update(&f, &["--clear-roles"]))["updated"], false);
+    assert_eq!(
+        update_calls(&f),
+        [
+            "agent_update:part,roles",
+            "agent_update:projectName",
+            "agent_update:roles"
+        ]
+    );
+    // An older central has no part/roles and ignores them, so a real change must not be
+    // reported as a success. Its missing fields read as OTHER and no tags, so asking for
+    // exactly those defaults finds nothing to send.
+    f.state.update_mode.store(5, Ordering::SeqCst);
+    let stale = profile(&f.path);
+    let calls = update_calls(&f).len();
+    deny(update(&f, &["--part", "INFRA"]), "outcome is unknown");
+    deny(update(&f, &["--roles", "login"]), "outcome is unknown");
+    assert_eq!(update_calls(&f).len(), calls + 2);
+    assert_eq!(stale, profile(&f.path));
+    let defaults = data(update(&f, &["--part", "OTHER", "--clear-roles"]));
+    assert_eq!(defaults["updated"], false);
+    assert_eq!(update_calls(&f).len(), calls + 2);
+    assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
+}
+
 async fn local(
     http: &reqwest::Client,
     mcp: &credentials::McpCredentials,
@@ -982,6 +1077,105 @@ async fn replace_update_session(http: &reqwest::Client, mcp: &credentials::McpCr
         "requestId":"update-claim-b", "instanceId":"update-instance-b", "mode":"fresh", "agentId":"201"
     })).await;
     assert_eq!(status, 200, "{response}");
+}
+
+/// S15P31D108-183: the MCP route takes part/roles, treats null like an omitted field,
+/// and the registration result then shows the stored metadata.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_update_agent_changes_part_and_roles_and_keeps_null_or_omitted_values() {
+    let (f, _stop, mcp, http, context) = update_fixture().await;
+    let request = |id: &str, operation: &str, args: Value| json!({"requestId":id,"operation":operation,"arguments":args,"context":context});
+    let eleven = (0..11).map(|i| format!("tag{i}")).collect::<Vec<_>>();
+    for args in [
+        json!({"part":null}),
+        json!({"roles":null}),
+        json!({"part":null,"roles":null}),
+        json!({"part":"DESIGN"}),
+        json!({"part":"backend"}),
+        json!({"part":7}),
+        json!({"roles":"login"}),
+        json!({"roles":["  "]}),
+        json!({"roles":["r".repeat(65)]}),
+        json!({"roles":["\u{1}"]}),
+        json!({"roles":["pay\u{0}ment"]}),
+        json!({"roles":eleven}),
+    ] {
+        let (status, rejected) = local(
+            &http,
+            &mcp,
+            "/v1/agents/update",
+            &request("bad-metadata", "update_agent", args.clone()),
+        )
+        .await;
+        assert_eq!(status, 400, "{args} {rejected}");
+        assert_eq!(rejected["error"]["code"], "VALIDATION_FAILED", "{args}");
+    }
+    assert!(update_calls(&f).is_empty());
+    let tags = json!(["로그인", "결제 API"]);
+    let (status, updated) = local(
+        &http,
+        &mcp,
+        "/v1/agents/update",
+        &request(
+            "metadata-1",
+            "update_agent",
+            json!({"part":"FRONTEND","roles":[" 로그인 ","결제 API","로그인"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["data"]["changedFields"], json!(["part", "roles"]));
+    assert_eq!(updated["data"]["agent"]["part"], "FRONTEND");
+    assert_eq!(updated["data"]["agent"]["roles"], tags);
+    assert_eq!(updated["data"]["credentialsRotated"], false);
+    // null and omitted fields are not sent, so central keeps both values.
+    let (status, kept) = local(
+        &http,
+        &mcp,
+        "/v1/agents/update",
+        &request(
+            "metadata-2",
+            "update_agent",
+            json!({"projectName":"Kept metadata","part":null,"roles":null}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(kept["data"]["changedFields"], json!(["projectName"]));
+    assert_eq!(kept["data"]["agent"]["part"], "FRONTEND");
+    assert_eq!(kept["data"]["agent"]["roles"], tags);
+    let (status, confirmed) = local(
+        &http,
+        &mcp,
+        "/v1/agents/register",
+        &request("metadata-register", "register_agent", json!({})),
+    )
+    .await;
+    assert_eq!(status, 200, "{confirmed}");
+    assert_eq!(confirmed["data"]["part"], "FRONTEND");
+    assert_eq!(confirmed["data"]["roles"], tags);
+    let (status, cleared) = local(
+        &http,
+        &mcp,
+        "/v1/agents/update",
+        &request("metadata-3", "update_agent", json!({"roles":[]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{cleared}");
+    assert_eq!(cleared["data"]["changedFields"], json!(["roles"]));
+    assert_eq!(cleared["data"]["agent"]["roles"], json!([]));
+    assert_eq!(cleared["data"]["agent"]["part"], "FRONTEND");
+    assert_eq!(
+        update_calls(&f),
+        [
+            "agent_update:part,roles",
+            "agent_update:projectName",
+            "agent_update:roles"
+        ]
+    );
+    assert_eq!(profile(&f.path)["state"]["agent"]["roles"], json!([]));
+    assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.state.token_calls.load(Ordering::SeqCst), 1);
 }
 
 /// Issue #86: every asynchronous preflight, including CSRF, must precede the

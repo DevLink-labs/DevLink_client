@@ -1,7 +1,9 @@
 //! Agent confirmation/list/recommendation providers. This router never creates Agents or
-//! credentials; `update_agent` changes only the bound Agent's project name and role
-//! (S15P31D108-146), and `find_agent` only reads central recommendations (S15P31D108-188).
+//! credentials; `update_agent` changes only the bound Agent's project name, role, part and
+//! role tags (S15P31D108-146/-183), and `find_agent` only reads central recommendations
+//! (S15P31D108-188).
 use crate::{
+    agent_metadata::AgentPart,
     agent_profile::{self, Tool, UpdateFault, UpdateFaultKind, UpdateOptions},
     business_api::{self, BusinessRequest, LOCAL_BUDGET, session_error},
     session_api,
@@ -75,6 +77,11 @@ struct UpdateArguments {
     project_name: Option<String>,
     #[serde(default, deserialize_with = "crate::sessions::present")]
     role_description: Option<String>,
+    // S15P31D108-183: like central, a missing or null part/roles keeps the stored value.
+    #[serde(default)]
+    part: Option<String>,
+    #[serde(default)]
+    roles: Option<Vec<String>>,
 }
 
 /// The central PATCH accepts only the owner's user session, so this route uses the
@@ -111,9 +118,18 @@ async fn change(api: &Api, body: &BusinessRequest<UpdateArguments>) -> Result<Va
         .as_str()
         .parse::<u64>()
         .map_err(|_| TaskError::rejected("FORBIDDEN", 403))?;
+    let part = body
+        .arguments
+        .part
+        .as_deref()
+        .map(AgentPart::parse)
+        .transpose()
+        .map_err(|_| TaskError::rejected("VALIDATION_FAILED", 400))?;
     let options = UpdateOptions {
         project_name: body.arguments.project_name.clone(),
         role_description: body.arguments.role_description.clone(),
+        part,
+        roles: body.arguments.roles.clone(),
     };
     let prepared =
         agent_profile::prepare_update(api.context.config_path(), options, Some(expected))
@@ -137,7 +153,7 @@ async fn change(api: &Api, body: &BusinessRequest<UpdateArguments>) -> Result<Va
     Ok(
         json!({"agent":{"agentId":agent.agent_id.to_string(),"teamId":agent.team_id.to_string(),
             "name":agent.name,"roleDescription":agent.role_description,"toolType":tool,
-            "projectName":agent.project_name},
+            "projectName":agent.project_name,"part":agent.part,"roles":agent.roles},
         "updated":!result.changed.is_empty(),"changedFields":result.changed,
         "credentialsRotated":false,"localProfileSynced":result.local_profile_synced}),
     )
