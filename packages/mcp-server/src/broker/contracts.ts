@@ -5,6 +5,8 @@ export { BrokerFault, terminalSessionFaults, type FaultCode, type Correlation } 
 export const operationRoutes = {
   register_agent: '/v1/agents/register',
   list_agents: '/v1/agents/list',
+  update_agent: '/v1/agents/update',
+  find_agent: '/v1/agents/find',
   create_task: '/v1/tasks/create',
   update_task_status: '/v1/tasks/status',
   complete_task: '/v1/tasks/complete',

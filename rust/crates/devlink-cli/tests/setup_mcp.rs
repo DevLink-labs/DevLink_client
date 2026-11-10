@@ -212,12 +212,12 @@ async fn codex_project_configuration_is_applied_and_reused_without_token_values(
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_project_configuration_is_applied_and_reused_without_token_values() {
-    create_and_reuse(ToolType::ClaudeCode, "2.1.310").await;
+    create_and_reuse(ToolType::ClaudeCode, "2.1.317").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_preserves_other_mcp_settings_and_returns_a_private_exact_backup() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let original = br#"{"huge":9223372036854775807,"mcpServers":{"other":{"command":"other","env":{"OTHER_SECRET":"unrelated-private-marker"}}}}"#;
     fs::write(f.target(), original).unwrap();
     let prepared = f.plan().await;
@@ -262,7 +262,7 @@ impl McpInput for Confirm {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_keeps_the_same_plan_and_refuses_concurrent_config_edits() {
-    let mut f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let mut f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let snapshot = f.profile();
     let calls = Arc::new(AtomicUsize::new(0));
     let stages = f.stages.take().unwrap();
@@ -351,6 +351,49 @@ async fn unsupported_host_returns_only_manual_guidance_without_writing_or_claimi
     assert!(!f.target().exists());
     assert_eq!(f.calls(), (1, 1));
 }
+async fn manual_application_is_reused_on_rerun(tool: ToolType) {
+    let mut f = Prepared::new(tool, "9.9.9").await;
+    let mut stages = f.stages.take().unwrap().with_mcp(f.options.clone());
+    let context = SetupContext {
+        config_path: f.app.path.clone(),
+    };
+    let StepResult::Failed(error) = stages.execute(Step::ConfigureMcp, &context).await else {
+        panic!()
+    };
+    assert_eq!(error.code, ErrorCode::ManualActionRequired);
+    let manual = error.manual_config.unwrap();
+
+    // The user applies the guidance exactly; the rerun must not ask again or write.
+    fs::create_dir_all(manual.suggested_target_path.parent().unwrap()).unwrap();
+    fs::write(&manual.suggested_target_path, &manual.snippet).unwrap();
+    let modified = fs::metadata(f.target()).unwrap().modified().unwrap();
+    // A rerun is a new process, so it prepares again instead of reusing the failed stage.
+    let prepared = f.plan().await;
+    assert!(!prepared.requires_manual());
+    assert_eq!(prepared.plan().unwrap().change, Change::Unchanged);
+    let reused = prepared.apply().await.unwrap();
+    assert_eq!(reused.config.status, ApplyStatus::Unchanged);
+    assert!(reused.config.backup_path.is_none());
+    assert_eq!(reused.config.target_path, f.target());
+    assert_eq!(fs::read_to_string(f.target()).unwrap(), manual.snippet);
+    assert_eq!(
+        fs::metadata(f.target()).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(f.calls(), (1, 1));
+
+    // A hand edit that no longer matches this profile goes back to the guidance.
+    fs::write(f.target(), manual.snippet.replace("--transport", "--other")).unwrap();
+    assert!(f.plan().await.requires_manual());
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_manual_application_is_reused_on_rerun_without_writing() {
+    manual_application_is_reused_on_rerun(ToolType::Codex).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_manual_application_is_reused_on_rerun_without_writing() {
+    manual_application_is_reused_on_rerun(ToolType::ClaudeCode).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn changed_runtime_is_rejected_after_review_and_cannot_reuse_a_prior_probe() {
     let f = Prepared::new(ToolType::Codex, "0.166.0").await;
@@ -365,7 +408,7 @@ async fn changed_runtime_is_rejected_after_review_and_cannot_reuse_a_prior_probe
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_node_wrong_service_and_raw_runtime_errors_never_become_applied_configuration() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     for mode in [
         "old-node",
         "wrong-server",
@@ -407,7 +450,7 @@ async fn old_node_wrong_service_and_raw_runtime_errors_never_become_applied_conf
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_requires_review_applies_explicitly_and_then_reuses_configuration_before_verify_step() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let base = [
         "setup",
         "--output",
@@ -490,6 +533,77 @@ async fn cli_requires_review_applies_explicitly_and_then_reuses_configuration_be
     assert!(result["data"].get("agentId").is_none());
     assert_eq!(f.calls(), (1, 1));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_replacement_updates_only_devlink_and_preserves_the_existing_agent() {
+    for tool in [ToolType::Codex, ToolType::ClaudeCode] {
+        let version = if tool == ToolType::Codex {
+            "0.166.0"
+        } else {
+            "2.1.317"
+        };
+        let f = Prepared::new(tool, version).await;
+        let target = f.target();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        credentials::set_private_permissions(target.parent().unwrap()).unwrap();
+        let before: &[u8] = if tool == ToolType::Codex {
+            b"# preserve comment\nmodel='keep'\n[mcp_servers]\ndevlink={command='old',args=[]}\nother={command='other'}\n"
+        } else {
+            br#"{"editor":{"number":9007199254740993},"mcpServers":{"devlink":{"command":"old","args":[]},"other":{"command":"other"}}}"#
+        };
+        fs::write(&target, before).unwrap();
+        let profile = f.profile();
+        let input = f.app.path.parent().unwrap().join("replace-input.json");
+        fs::write(
+            &input,
+            serde_json::to_vec(&json!({
+                "schemaVersion":1,
+                "user":{"mode":"session"},
+                "team":{"id":"71"},
+                "project":{"path":f.context.project},
+                "tool":{"type":if tool == ToolType::Codex {"codex"} else {"claude-code"}},
+                "agent":{"action":"use","id":"201"},
+                "mcp":{"mode":"replace","targetPath":target}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_devlink"))
+            .arg("--config")
+            .arg(&f.app.path)
+            .env_remove("DEVLINK_TOKEN")
+            .args([
+                "setup",
+                "--non-interactive",
+                "--input",
+                input.to_str().unwrap(),
+                "--node-path",
+                f.options.node.as_ref().unwrap().to_str().unwrap(),
+                "--mcp-entry",
+                f.options.entry.as_ref().unwrap().to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+        assert_no_secrets(&output);
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let backup = result["data"]["mcpConfig"]["backupPath"].as_str().unwrap();
+        assert_eq!(fs::read(backup).unwrap(), before);
+        assert_eq!(result["data"]["connection"]["setupReady"], true);
+        assert_eq!(f.profile(), profile);
+        assert_eq!(f.calls(), (1, 1));
+        let after = fs::read_to_string(&target).unwrap();
+        assert!(after.contains("other"));
+        if tool == ToolType::Codex {
+            assert!(after.contains("# preserve comment"));
+            assert!(after.contains("model='keep'"));
+        } else {
+            assert!(after.contains("9007199254740993"));
+        }
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_mcp_options_are_rejected_before_configuration_or_central_calls() {
     let app = Fixture::new().await;
@@ -519,7 +633,7 @@ async fn preflight_rejects_existing_host_conflict_before_agent_or_token_creation
     app.state.calls.lock().unwrap().clear();
     let root = app._root.path();
     let host =
-        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.317 (Claude Code)");
     let (node, entry) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
     let target = root.join(".mcp.json");
     let original =
@@ -592,7 +706,7 @@ async fn preflight_rejects_existing_host_conflict_before_agent_or_token_creation
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn setup_reports_a_fixed_port_conflict_and_can_retry_with_another_fixed_port() {
-    let f = Prepared::new(ToolType::ClaudeCode, "2.1.310").await;
+    let f = Prepared::new(ToolType::ClaudeCode, "2.1.317").await;
     let free = local::Runtime::load(&f.app.path).unwrap().port;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let occupied = listener.local_addr().unwrap().port();
@@ -660,7 +774,7 @@ async fn preflight_reports_the_runtime_directory_with_unsafe_permissions() {
     let root = app._root.path();
     credentials::set_private_permissions(root).unwrap();
     let host =
-        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.317 (Claude Code)");
     let (node, _) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
     let shared = root.join("shared");
     fs::create_dir(&shared).unwrap();
@@ -737,7 +851,7 @@ async fn preflight_rejects_missing_node_before_agent_or_token_creation() {
     app.state.calls.lock().unwrap().clear();
     let root = app._root.path();
     let host =
-        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.310 (Claude Code)");
+        account_server::tool_fixture::host(&root.join("host"), "claude", "2.1.317 (Claude Code)");
     let (_, entry) = account_server::tool_fixture::mcp_runtime(&root.join("runtime"));
     let node = root.join(if cfg!(windows) {
         "missing/node.exe"
@@ -790,7 +904,7 @@ async fn preflight_checks_a_later_tool_selection_and_rechecks_changes_before_reg
     assert!(app.login().status.success());
     let root = app._root.path();
     let hosts = root.join("hosts");
-    account_server::tool_fixture::host(&hosts, "claude", "2.1.310 (Claude Code)");
+    account_server::tool_fixture::host(&hosts, "claude", "2.1.317 (Claude Code)");
     let options = account_server::tool_fixture::mcp_options(&root.join("runtime"));
     let mut stages = SetupStages::default()
         .with_project(ProjectOptions {
@@ -894,7 +1008,7 @@ async fn preflight_uses_the_node_beside_an_npm_shim_without_node_on_path() {
     let script = npm.join("node_modules/@anthropic-ai/claude-code/cli.js");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
     fs::write(&script, "synthetic entry").unwrap();
-    fs::write(script.with_extension("probe"), "2.1.310 (Claude Code)").unwrap();
+    fs::write(script.with_extension("probe"), "2.1.317 (Claude Code)").unwrap();
     // PATH keeps PowerShell for the broker's ACL setup but offers no Node at all.
     let path = std::env::join_paths(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())

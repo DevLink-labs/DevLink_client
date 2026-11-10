@@ -2,7 +2,7 @@
 
 2026-10-30 현재 구현 기준. CLI는 독립 Rust 브로커를 제어하고 Host는 stdio MCP 프로세스를 제어한다. MCP는 인증된 loopback HTTP로 브로커를 호출하며 중앙 토큰과 WebSocket은 브로커가 관리한다. MCP 종료는 공유 브로커 종료로 이어지지 않는다.
 
-CLI/설정·자격 파일·세션 4개·업무 HTTP 7개·중앙 신원·수신함/ACK provider는 구현되어 있다. MCP 도구의 최종 DTO 수렴(-97)과 실제 Host 전체 왕복(-66)은 별도다. [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 참고한다.
+CLI/설정·자격 파일·세션 4개·업무 HTTP 경로(2026-11-09 기준 12개, `packages/mcp-server/src/broker/contracts.ts`의 `operationRoutes`)·중앙 신원·수신함/ACK provider는 구현되어 있다. MCP 도구의 최종 DTO 수렴(-97)과 실제 Host 전체 왕복(-66)은 별도다. [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 참고한다.
 
 ## 세션·전송 규칙
 
@@ -19,16 +19,16 @@ CLI/설정·자격 파일·세션 4개·업무 HTTP 7개·중앙 신원·수신�
 - 자격 파일은 `schemaVersion: 1`, `brokerUrl`, `localToken`, 선택적 `agentId`의 엄격한 스키마를 사용하며 `DEVLINK_BROKER_FILE`에 절대 경로를 전달합니다. 토큰은 16~4096자의 영문·숫자·`.`·`_`·`~`·`-`를 허용합니다. 중앙 토큰은 전달하지 않습니다.
 - 자격은 일반 파일·16KiB 이하·비공개 권한이어야 하고 파일 및 직계 부모의 심볼릭 링크를 거부합니다. POSIX 소유권·파일 권한·부모 쓰기 권한, Windows 소유권·DACL은 현재 MCP 검사에 맞춥니다. CLI가 완결된 스냅샷을 원자적으로 발행합니다.
 - MCP는 주소·토큰을 실행 중 고정합니다. 일반 브로커 재시작에는 토큰을 유지하고 명시적 회전에는 MCP를 재시작합니다. 주소를 바꿀 때도 현재 클라이언트를 다시 시작해야 합니다.
-- 로컬 전송은 포트가 명시된 `http://127.0.0.1:<port>`와 Bearer 토큰·JSON이며 리다이렉트를 허용하지 않습니다. 세션 4개 경로와 업무 7개 경로·JSON은 MCP 계약을 따릅니다.
+- 로컬 전송은 포트가 명시된 `http://127.0.0.1:<port>`와 Bearer 토큰·JSON이며 리다이렉트를 허용하지 않습니다. 세션 4개 경로와 업무 경로·JSON은 MCP 계약을 따릅니다.
 - 응답은 같은 `requestId`와 `data` 또는 `error`를 사용합니다. HTTP 401·403은 현재 MCP의 인증·권한 오류 해석을 따릅니다. 세션 오류 코드도 그대로 사용하되 테스트 대역이 쓰는 409를 모든 실패의 공동 상태 코드로 확정하지 않습니다.
 - 요청 기본 제한 10초(응답 본문 수신 포함), 요청 128KiB·응답 256KiB를 채택합니다. timeout·단절·취소·프로토콜 오류는 업무 결과 불명이며 중앙 작업을 임의 실패·취소·재할당하지 않습니다. 요청 추적 ID는 중앙 멱등성 보장의 대체물이 아닙니다.
 - MCP 종료 시 진행 요청·타이머를 정리하고 최대 1초 동안 세션 해제를 시도합니다. 해제 실패는 MCP 종료를 막지 않으며 공유 브로커를 종료하지 않습니다.
 
 ## 프로세스와 자격 파일
 
-CLI와 브로커는 동일 실행 파일의 별도 프로세스다. CLI의 숨겨진 broker 명령이 라이브러리를 실행하며, CLI 종료 뒤에도 브로커는 유지된다. Host 자동 실행·MCP 자동 등록·부팅 자동 실행은 제공하지 않는다.
+CLI와 브로커는 동일 실행 파일의 별도 프로세스다. CLI의 숨겨진 broker 명령이 라이브러리를 실행하며, CLI 종료 뒤에도 브로커는 유지된다. Host 자동 실행·MCP 도구 자동 등록(`register_agent` 호출)·부팅 자동 실행은 제공하지 않는다.
 
-Agent ID의 영속 저장·기존 ID 재사용·토큰 관리는 [Agent bootstrap](agent-bootstrap.md)에 구현되어 있다. 프로필이 있으면 발행 MCP 자격에도 해당 Agent ID를 포함한다. 하나의 브로커에서 Host별 프로필/토큰을 관리하는 제품 정책, 설치·기존 Host 설정 병합·백업, Node 배포 방식은 후속 항목이다.
+Agent ID의 영속 저장·기존 ID 재사용·토큰 관리는 [Agent bootstrap](agent-bootstrap.md)에 구현되어 있다. 프로필이 있으면 발행 MCP 자격에도 해당 Agent ID를 포함한다. 프로젝트 계층 Host 설정 병합·백업·조건부 복원은 `devlink setup`이 [MCP 설정 제공 계약](../../contracts/setup/v1/mcp-config-provider.md)으로 수행한다(2026-11-09 갱신, S15P31D108-143). 하나의 브로커에서 Host별 프로필/토큰을 관리하는 제품 정책과 Node 배포 방식은 후속 항목이다.
 
 ## 로컬 연결과 제어 API
 
@@ -82,6 +82,8 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | --- | --- | --- |
 | register_agent | /v1/agents/register | [기존 Agent 확인](business-relay.md) |
 | list_agents | /v1/agents/list | [팀 목록](business-relay.md) |
+| update_agent | /v1/agents/update | [Agent 정보 수정](agent-bootstrap.md#agent-정보-수정-s15p31d108-146) |
+| find_agent | /v1/agents/find | [담당 Agent 추천 중계](agent-recommendation.md) |
 | create_task | /v1/tasks/create | [작업 생성·requestKey](business-relay.md) |
 | update_task_status | /v1/tasks/status | [상태 변경](task-operations.md) |
 | complete_task | /v1/tasks/complete | [완료](task-operations.md) |

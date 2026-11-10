@@ -2,7 +2,7 @@
 
 ## 간편설정 규격
 
-[간편설정 호출·단계·오류 규격 v1](contracts/setup/v1/README.md)은 대화형/비대화형 입력, 진행·결과·오류 응답, 복구·종료 코드와 등록 API·MCP 설정·연결 상태의 연동 경계를 정의합니다. `setup`은 설정 준비·로그인·팀/프로젝트/도구 선택과 Agent 생성·재사용까지 연결되어 있습니다. 새 Agent의 토큰 준비와 MCP 설정 통합은 후속 단계이며, 현재 동작과 복구 방법은 [간편설정 구현 문서](rust/docs/setup.md)를 따릅니다.
+[간편설정 호출·단계·오류 규격 v1](contracts/setup/v1/README.md)은 대화형/비대화형 입력, 진행·결과·오류 응답, 복구·종료 코드와 등록 API·MCP 설정·연결 상태의 연동 경계를 정의합니다. `setup`은 설정 준비·로그인·팀/프로젝트/도구 선택, Agent 생성·재사용과 토큰 준비, 브로커 시작, 프로젝트 계층 MCP 설정 적용(Codex `.codex/config.toml`, Claude Code `.mcp.json`)까지 연결되어 있습니다. 현재 동작과 복구 방법은 [간편설정 구현 문서](rust/docs/setup.md), MCP 연결 확인 순서는 [MCP 온보딩](packages/mcp-server/docs/onboarding.md#connection-sequence-three-steps)을 따릅니다.
 
 ## MCP 서버
 
@@ -11,7 +11,7 @@ JSON은 MCP 측 v0.1 초안이며 실제 Rust 브로커와의 상호 검증은 �
 
 사용자는 [Agent 요청·수락·결과 등록 지침](packages/mcp-server/docs/agent-workflow.md)에서 수신자 지정부터 사용자 수락, Host의 로컬 수정·검증, 완료·실패 조회까지 확인할 수 있습니다.
 
-실제 중앙 연동의 인증·Agent bootstrap·DTO 차이와 후속 구현 조건은 [중앙 연동 결정표](contracts/central/README.md)에 정리했습니다. 확인한 develop SHA와 미제공 API를 구분하며, 기존 로컬 계약의 실제 연동 완료를 뜻하지 않습니다.
+실제 중앙 server와의 현재 연동 경로·자격·DTO와 아직 제공되지 않는 API는 [중앙 연동 현재 상태](contracts/central/current-state.md)에 정리했습니다. 기준 server SHA와 확인 방법을 함께 적었고, 실행으로 확인하지 않은 항목은 "코드 기준"으로 표시합니다. 2026-10-29의 [중앙 연동 결정표](contracts/central/README.md)는 당시 설계 결정을 보존한 역사 기록입니다.
 
 ## Git Flow
 

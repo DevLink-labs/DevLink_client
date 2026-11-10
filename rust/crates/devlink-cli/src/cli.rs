@@ -18,7 +18,7 @@ pub struct Cli {
 
 pub fn parse() -> Cli {
     let arguments: Vec<_> = std::env::args_os().collect();
-    let setup_requested = {
+    let requested_command = {
         let mut arguments = arguments.iter().skip(1);
         loop {
             match arguments.next() {
@@ -27,8 +27,8 @@ pub fn parse() -> Cli {
                     arguments.next();
                 }
                 Some(arg) if arg.to_str().is_some_and(|s| s.starts_with("--config=")) => {}
-                Some(arg) => break arg == "setup",
-                None => break false,
+                Some(arg) => break Some(arg.clone()),
+                None => break None,
             }
         }
     };
@@ -36,9 +36,19 @@ pub fn parse() -> Cli {
         Ok(cli) => cli,
         Err(error) => {
             // Invalid-value errors omit command usage, so identify the requested
-            // command before parsing. Never echo setup values; preserve legacy errors.
-            if setup_requested && error.use_stderr() {
+            // command before parsing. Never echo setup or Git identity values; preserve legacy errors.
+            if requested_command.as_deref() == Some(std::ffi::OsStr::new("setup"))
+                && error.use_stderr()
+            {
                 eprintln!("Invalid setup arguments. Run devlink setup --help for usage.");
+                std::process::exit(2);
+            }
+            if requested_command.as_deref() == Some(std::ffi::OsStr::new("git-identity"))
+                && error.use_stderr()
+            {
+                eprintln!(
+                    "Invalid Git identity arguments. Run devlink git-identity --help for usage."
+                );
                 std::process::exit(2);
             }
             error.exit()
@@ -47,6 +57,11 @@ pub fn parse() -> Cli {
 }
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Manage your Git email using the logged-in user session
+    GitIdentity {
+        #[command(subcommand)]
+        command: GitIdentityCommand,
+    },
     /// Run guided setup or inspect setup readiness
     Setup(Box<SetupArgs>),
     /// Create a configuration file without overwriting existing settings
@@ -57,6 +72,11 @@ pub enum Commands {
     Stop,
     /// Show local broker and central WebSocket state
     Status,
+    /// Print the team repository key for a Git remote
+    DependencyRepoKey {
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Read or update non-secret settings (changes apply after restart)
     Config {
         #[command(subcommand)]
@@ -113,6 +133,19 @@ pub enum Commands {
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
     Broker,
+}
+
+#[derive(Subcommand)]
+pub enum GitIdentityCommand {
+    /// Register or replace one Git email; hidden prompt or a single stdin line
+    Register {
+        #[arg(long)]
+        email_stdin: bool,
+    },
+    /// Show registration status and time; never reveals the email or hash
+    Status,
+    /// Delete your registration (idempotent)
+    Delete,
 }
 
 #[derive(Subcommand)]
@@ -229,6 +262,10 @@ pub enum AgentCommand {
         project: PathBuf,
         #[arg(long)]
         role_description: Option<String>,
+        #[arg(long, default_value = "OTHER", value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: devlink_broker::agent_metadata::AgentPart,
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Vec<String>,
     },
     /// List the selected team's Agents; only your own ID can be bound
     List,
@@ -241,6 +278,14 @@ pub enum AgentCommand {
     },
     /// Explicitly issue/rotate the current Agent token while its broker is stopped
     Token,
+    /// Change the bound Agent's project name or role; never creates an Agent or token
+    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description"])))]
+    Update {
+        #[arg(long)]
+        project_name: Option<String>,
+        #[arg(long)]
+        role_description: Option<String>,
+    },
     /// Show public profile metadata and verify a stored central token
     Status,
     /// Clear only an unknown creation after manual server inspection; never retries
@@ -428,9 +473,38 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
     let path = config::config_path(cli.config)?;
     match cli.command {
+        Commands::GitIdentity { command } => {
+            use devlink_broker::git_identity;
+            let result = match command {
+                GitIdentityCommand::Register { email_stdin } => {
+                    use std::io::IsTerminal;
+                    anyhow::ensure!(
+                        email_stdin
+                            || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()),
+                        "Use --email-stdin or an interactive terminal for Git email input"
+                    );
+                    let email = secret_input("Git email", 1024, email_stdin).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Cannot read Git email; use --email-stdin or an interactive terminal"
+                        )
+                    })?;
+                    git_identity::register(&path, &email).await?
+                }
+                GitIdentityCommand::Status => git_identity::status(&path).await?,
+                GitIdentityCommand::Delete => git_identity::delete(&path).await?,
+            };
+            print_json(&serde_json::to_value(result)?)?;
+        }
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
+        Commands::DependencyRepoKey { remote } => {
+            let root = std::env::current_dir().context("Cannot read the working directory")?;
+            println!(
+                "{}",
+                devlink_broker::dependency_repo_key(&root, &remote).await?
+            );
+        }
         Commands::Hooks { command } => hooks_command(&path, command)?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
@@ -513,6 +587,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     project_name,
                     project,
                     role_description,
+                    part,
+                    roles,
                 } => {
                     agent_profile::create(
                         &path,
@@ -522,6 +598,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                             project_name,
                             project,
                             role_description,
+                            part,
+                            roles,
                         },
                     )
                     .await?
@@ -531,6 +609,19 @@ pub async fn run(cli: Cli) -> Result<()> {
                     agent_profile::use_agent(&path, id, project.as_deref()).await?
                 }
                 AgentCommand::Token => agent_profile::token(&path).await?,
+                AgentCommand::Update {
+                    project_name,
+                    role_description,
+                } => agent_profile::update(
+                    &path,
+                    agent_profile::UpdateOptions {
+                        project_name,
+                        role_description,
+                    },
+                    None,
+                )
+                .await?
+                .summary(),
                 AgentCommand::Status => agent_profile::status(&path).await?,
                 AgentCommand::ResetPending {
                     accept_duplicate_risk,

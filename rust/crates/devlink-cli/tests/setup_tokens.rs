@@ -83,6 +83,8 @@ async fn ready(f: &Fixture, expected: &RegistrationContext) {
         agent_profile::CreateOptions {
             name: metadata.agent_name.clone(),
             role_description: metadata.role_description.clone(),
+            part: metadata.part,
+            roles: metadata.roles.clone(),
             tool: agent_profile::Tool::Codex,
             project_name: metadata.project_name.clone(),
             project: expected.project.root.clone(),

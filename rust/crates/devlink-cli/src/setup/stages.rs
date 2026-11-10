@@ -113,6 +113,7 @@ struct AgentState {
     confirmed_token_agent: Option<u64>,
     selection: Option<Selection>,
     waiting: bool,
+    waiting_metadata: bool,
     registration: Option<Registration>,
     creation_pending: bool,
     issuance_pending: bool,
@@ -499,31 +500,53 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput> Step
             }
         }
         if required.step == Step::RegisterAgent {
-            let resolved = match required.code {
-                ErrorCode::AgentAlreadyExists => self.agent_input.rename().await.map(|name| {
-                    if let Some(project) = &mut self.project.prepared {
-                        project.metadata.agent_name = name;
-                    }
-                }),
-                ErrorCode::TokenRequired => {
-                    let id = required
-                        .known
-                        .agent_id
-                        .as_deref()
-                        .and_then(|id| id.parse().ok())
-                        .ok_or_else(|| required.clone())?;
-                    self.agent_input.confirm_issue(id).await.map(|()| {
-                        self.agents.selection = None;
-                        self.agents.confirmed_token_agent = Some(id);
-                    })
-                }
-                _ => self
-                    .agent_input
-                    .request(&required.agent_choices)
+            let resolved = if self.agents.waiting_metadata {
+                self.agent_input
+                    .routing_metadata(
+                        self.project.options.part,
+                        self.project.options.roles.clone(),
+                    )
                     .await
-                    .map(|selection| {
-                        self.agents.selection = Some(selection);
+                    .and_then(|(part, roles)| {
+                        let roles = devlink_broker::agent_metadata::normalize_roles(&roles)
+                            .map_err(|_| AgentInputError::Invalid)?;
+                        self.project.options.part = Some(part);
+                        self.project.options.roles = Some(roles.clone());
+                        if let Some(project) = &mut self.project.prepared {
+                            project.metadata.part = part;
+                            project.metadata.roles = roles;
+                        }
+                        self.agents.waiting_metadata = false;
+                        self.agents.waiting = false;
+                        Ok(())
+                    })
+            } else {
+                match required.code {
+                    ErrorCode::AgentAlreadyExists => self.agent_input.rename().await.map(|name| {
+                        if let Some(project) = &mut self.project.prepared {
+                            project.metadata.agent_name = name;
+                        }
                     }),
+                    ErrorCode::TokenRequired => {
+                        let id = required
+                            .known
+                            .agent_id
+                            .as_deref()
+                            .and_then(|id| id.parse().ok())
+                            .ok_or_else(|| required.clone())?;
+                        self.agent_input.confirm_issue(id).await.map(|()| {
+                            self.agents.selection = None;
+                            self.agents.confirmed_token_agent = Some(id);
+                        })
+                    }
+                    _ => self
+                        .agent_input
+                        .request(&required.agent_choices)
+                        .await
+                        .map(|selection| {
+                            self.agents.selection = Some(selection);
+                        }),
+                }
             };
             let code = match resolved {
                 Ok(()) => return Ok(()),
@@ -1313,6 +1336,42 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
     SetupStages<I, T, U, A, M>
 {
     async fn register_agent(&mut self, context: &SetupContext) -> StepResult {
+        if self.agents.selection == Some(Selection::Create)
+            && self.auth.batch.is_none()
+            && self.agent_input.interactive()
+            && self.project.prepared.as_ref().is_some_and(|p| !p.reused)
+            && (self.project.options.part.is_none() || self.project.options.roles.is_none())
+        {
+            self.agents.waiting = true;
+            self.agents.waiting_metadata = true;
+            let mut error = SetupError::new(
+                ErrorCode::InputRequired,
+                Step::RegisterAgent,
+                Outcome::NotApplied,
+            );
+            for (field, missing, kind) in [
+                (
+                    "agent.part",
+                    self.project.options.part.is_none(),
+                    InputKind::Selection,
+                ),
+                (
+                    "agent.roles",
+                    self.project.options.roles.is_none(),
+                    InputKind::Value,
+                ),
+            ] {
+                if missing {
+                    error.required_inputs.push(RequiredInput {
+                        field,
+                        kind,
+                        secret: false,
+                        source: InputSource::Input,
+                    });
+                }
+            }
+            return StepResult::InputRequired(error);
+        }
         // A tool chosen after Validate, or a local change since that check, must
         // still be rejected before registration and token issuance can mutate central.
         if let Some(tool) = &self.tools.selected
@@ -1634,6 +1693,19 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
 {
     async fn validate(&mut self, context: &SetupContext, coordinated: bool) -> StepResult {
         let step = Step::Validate;
+        if self
+            .project
+            .options
+            .roles
+            .as_ref()
+            .is_some_and(|roles| devlink_broker::agent_metadata::normalize_roles(roles).is_err())
+        {
+            return StepResult::Failed(SetupError::new(
+                ErrorCode::InputInvalid,
+                step,
+                Outcome::NotApplied,
+            ));
+        }
         if let Err(error) = self.mcp.options.validate() {
             return StepResult::Failed(mcp_error(step, error));
         }

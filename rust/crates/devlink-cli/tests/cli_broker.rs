@@ -39,7 +39,9 @@ async fn serve_context_request(stream: &mut tokio::net::TcpStream, agent: Option
     let count = stream.peek(&mut head).await.unwrap();
     // The broker also pulls question/answer arrivals on the same origin after READY.
     let messages = head[..count].starts_with(b"GET /api/v1/agents/me/task-messages?");
-    if !messages && !head[..count].starts_with(b"GET /api/v1/agents/me ") {
+    // The broker refreshes the owner's Git comparison value from startup.
+    let git_identity = head[..count].starts_with(b"GET /api/v1/agents/me/git-identity ");
+    if !messages && !git_identity && !head[..count].starts_with(b"GET /api/v1/agents/me ") {
         return false;
     }
     let mut request = Vec::new();
@@ -59,6 +61,14 @@ async fn serve_context_request(stream: &mut tokio::net::TcpStream, agent: Option
     assert!(!headers.contains("cookie:") && !headers.contains("origin:"));
     if messages {
         let body = serde_json::json!({"success":true,"data":{"items":[],"nextCursor":"cli-fixture","hasNext":false}})
+            .to_string();
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        return true;
+    }
+    if git_identity {
+        let body =
+            serde_json::json!({"success":true,"data":{"registered":false,"gitEmailHash":null,
+            "hashAlgorithm":"SHA-256","normalization":"TRIM_LOWERCASE"}})
             .to_string();
         stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
         return true;
@@ -207,19 +217,18 @@ async fn cli_persists_tasks_before_ack_and_deduplicates_after_restart() {
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         for attempt in 1..=2 {
-            // Skip only the broker's question/answer pulls; any other request still has to
-            // be the WebSocket upgrade this test expects.
+            // Skip only the broker's question/answer pulls and Git comparison refreshes
+            // (owner lookup included); any other request still has to be the WebSocket
+            // upgrade this test expects.
             let stream = loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let prefix = b"GET /api/v1/agents/me/task-messages?";
                 let mut head = [0; 64];
-                while stream.peek(&mut head).await.unwrap() < prefix.len() {
+                while stream.peek(&mut head).await.unwrap() < 37 {
                     sleep(Duration::from_millis(1)).await;
                 }
-                if !head.starts_with(prefix) {
+                if !serve_context_request(&mut stream, Some(12)).await {
                     break stream;
                 }
-                assert!(serve_context_request(&mut stream, Some(12)).await);
             };
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let event_id = format!("cli-task-{attempt}");
@@ -948,10 +957,12 @@ impl Mock {
                 let received = received_clone.clone();
                 let heartbeat_pings = heartbeat_pings_clone.clone();
                 let expirations = expirations_clone.clone();
-                let seq = next_seq.fetch_add(1, Ordering::SeqCst);
+                let next_seq = next_seq.clone();
 
                 clients.spawn(async move {
                     if serve_context_request(&mut stream, if matches!(behavior, Behavior::VerifiedReady) {Some(11)} else {None}).await {return;}
+                    // Number only WebSocket attempts; HTTP lookups may arrive first.
+                    let seq = next_seq.fetch_add(1, Ordering::SeqCst);
                     attempts.fetch_add(1, Ordering::SeqCst);
                     let handshake = accept_hdr_async(
                         stream,

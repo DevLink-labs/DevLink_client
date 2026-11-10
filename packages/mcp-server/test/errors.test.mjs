@@ -8,6 +8,8 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { BrokerClient } from '../dist/broker/client.js';
 import { BrokerHttp } from '../dist/broker/http.js';
+import { BrokerFault } from '../dist/broker/contracts.js';
+import { recoveryAdvice } from '../dist/broker/recovery.js';
 import { createServer } from '../dist/server.js';
 import { brokerEnvelopeSchema } from '../dist/broker/envelopes.js';
 import { fakeBroker } from './helpers/fake-broker.mjs';
@@ -180,6 +182,44 @@ test('registration requestKey survives bind failure while internal IDs do not re
   assert.equal(error.requestKey, 'register-key'); assert.equal(error.mcpRequestId, 'host-call');
   assert.equal(error.requestId, broker.calls.find((call) => call.body.operation === 'register_agent').body.requestId);
   assert.notEqual(error.requestId, broker.calls.at(-1).body.requestId);
+});
+
+test('update_agent keeps login, busy, binding and unconfirmed outcomes distinct (S15P31D108-146)', async (t) => {
+  const { broker, client } = await fixture(t);
+  for (const [status, remote, code, outcome] of [
+    [412, { scope: 'domain', code: 'USER_LOGIN_REQUIRED', outcome: 'rejected' }, 'USER_LOGIN_REQUIRED', 'rejected'],
+    [409, { scope: 'domain', code: 'LOCAL_ACCOUNT_BUSY', outcome: 'rejected' }, 'LOCAL_ACCOUNT_BUSY', 'rejected'],
+    [403, { scope: 'domain', code: 'FORBIDDEN', outcome: 'rejected' }, 'BROKER_FORBIDDEN', 'rejected'],
+    [502, { scope: 'transport', code: 'CENTRAL_PROTOCOL_ERROR', outcome: 'unknown' }, 'CENTRAL_PROTOCOL_ERROR', 'unknown'],
+  ]) {
+    broker.setHook(({ body, send }) => {
+      if (body.operation !== 'update_agent') return false;
+      send({ error: remote }, status); return true;
+    });
+    const error = await faultOf(client.execute('update_agent', { projectName: 'DevLink' }));
+    assert.equal(error.code, code, `${status}`); assert.equal(error.outcome, outcome, `${status}`);
+    assert.equal(error.taskId, undefined); assert.equal(error.requestKey, undefined);
+  }
+});
+
+test('find_agent keeps recommendation outages definite and validates before the broker (S15P31D108-188)', async (t) => {
+  const { broker, client } = await fixture(t);
+  for (const [status, remote, code, outcome] of [
+    [503, { scope: 'domain', code: 'GIT_ROUTING_UNAVAILABLE', outcome: 'rejected' }, 'GIT_ROUTING_UNAVAILABLE', 'rejected'],
+    [403, { scope: 'domain', code: 'FORBIDDEN', outcome: 'rejected' }, 'BROKER_FORBIDDEN', 'rejected'],
+    [400, { scope: 'domain', code: 'VALIDATION_FAILED', outcome: 'rejected' }, 'VALIDATION_FAILED', 'rejected'],
+    [502, { scope: 'transport', code: 'CENTRAL_UNAVAILABLE', outcome: 'unknown' }, 'CENTRAL_UNAVAILABLE', 'unknown'],
+  ]) {
+    broker.setHook(({ body, send }) => {
+      if (body.operation !== 'find_agent') return false;
+      send({ error: remote }, status); return true;
+    });
+    const error = await faultOf(client.execute('find_agent', { question: '로그인' }));
+    assert.equal(error.code, code, `${status}`); assert.equal(error.outcome, outcome, `${status}`);
+    assert.equal(error.taskId, undefined); assert.equal(error.requestKey, undefined);
+  }
+  const routing = recoveryAdvice(new BrokerFault('GIT_ROUTING_UNAVAILABLE', 'r'), 'find_agent');
+  assert.deepEqual(routing, { stage: 'central', nextActions: ['check_network_then_retry'] });
 });
 
 test('ambiguous envelopes, conflicting keys and invalid metadata fail safely', async (t) => {
