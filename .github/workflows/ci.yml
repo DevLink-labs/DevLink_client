@@ -8,9 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       test-threads:
-        description: Rust 테스트 스레드 수. 비우면 1(직렬).
+        description: Rust 테스트 동시 실행 수. 비우면 cargo는 1(직렬), nextest는 코어 수.
         required: false
         default: ''
+      runner:
+        description: Rust 테스트 실행기. nextest는 테스트마다 별도 프로세스로 병렬 실행한다(시험용).
+        type: choice
+        options: [cargo, nextest]
+        default: cargo
 
 permissions:
   contents: read
@@ -48,29 +53,48 @@ jobs:
       # 스레드가 자식 프로세스를 띄우는 순간 잠금 파일 핸들이 자식에게 잠깐 복제되기 때문으로 추정한다
       # (미확인). Windows 로컬에서는 병렬 실행이 통과하므로 개발 중에는 스레드 옵션 없이 돌려도 된다.
       # 수동 실행(workflow_dispatch)의 test-threads 입력으로 스레드 수를 바꿔 비교할 수 있다.
+      # runner 입력에 nextest를 고르면 cargo-nextest로 실행한다. 테스트마다 별도 프로세스라 위 경합이
+      # 생기는 조건(같은 프로세스의 다른 스레드)이 없고, 테스트 바이너리 사이에서도 병렬로 돈다.
       # 실패한 바이너리가 있어도 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
       # setup은 설정 경로의 상위 심볼릭 링크를 거부하므로, macOS 기본 TMPDIR(/var → /private/var)
       # 대신 링크가 없는 runner 임시 디렉터리를 쓴다.
+      - name: cargo-nextest 설치
+        if: inputs.runner == 'nextest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: 테스트
         if: runner.os != 'Windows'
         env:
           TMPDIR: ${{ runner.temp }}
-          TEST_THREADS: ${{ inputs.test-threads || '1' }}
+          TEST_THREADS: ${{ inputs.test-threads }}
+          TEST_RUNNER: ${{ inputs.runner || 'cargo' }}
         run: |
           if [[ -n "$TEST_THREADS" && ! "$TEST_THREADS" =~ ^[1-9][0-9]*$ ]]; then
             echo "test-threads must be a positive integer" >&2; exit 2
           fi
-          cargo test --workspace --all-targets --locked --no-fail-fast ${TEST_THREADS:+-- --test-threads=$TEST_THREADS}
+          if [[ "$TEST_RUNNER" == nextest ]]; then
+            cargo nextest run --workspace --all-targets --locked --no-fail-fast ${TEST_THREADS:+--test-threads=$TEST_THREADS}
+          else
+            cargo test --workspace --all-targets --locked --no-fail-fast -- --test-threads="${TEST_THREADS:-1}"
+          fi
       # 관리자 runner의 새 파일 소유자를 현재 사용자로 보정해 일반 사용자 환경과 맞춘다.
       - name: 테스트 (Windows, 소유자 보정)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          TEST_THREADS: ${{ inputs.test-threads || '1' }}
+          TEST_THREADS: ${{ inputs.test-threads }}
+          TEST_RUNNER: ${{ inputs.runner || 'cargo' }}
         run: |
           if ($env:TEST_THREADS -and $env:TEST_THREADS -notmatch '^[1-9][0-9]*$') { throw 'test-threads must be a positive integer' }
-          $threads = if ($env:TEST_THREADS) { @('--', "--test-threads=$env:TEST_THREADS") } else { @() }
-          & "${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1" cargo test --workspace --all-targets --locked --no-fail-fast @threads
+          $owner = "${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1"
+          if ($env:TEST_RUNNER -eq 'nextest') {
+            $threads = if ($env:TEST_THREADS) { @("--test-threads=$env:TEST_THREADS") } else { @() }
+            & $owner cargo nextest run --workspace --all-targets --locked --no-fail-fast @threads
+          } else {
+            $count = if ($env:TEST_THREADS) { $env:TEST_THREADS } else { '1' }
+            & $owner cargo test --workspace --all-targets --locked --no-fail-fast '--' "--test-threads=$count"
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   mcp-server:
