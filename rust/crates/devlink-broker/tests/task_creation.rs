@@ -158,6 +158,9 @@ async fn central_agent(State(state): State<MockState>, headers: HeaderMap) -> Re
     if mode == 10 {
         agent["teamId"] = json!(999);
     }
+    if mode != 11 {
+        agent["part"] = json!("BACKEND");
+    }
     Json(json!({"success":true,"data":agent})).into_response()
 }
 async fn central_agents(
@@ -520,6 +523,7 @@ async fn register_confirms_existing_agent_and_list_preserves_long_ids_without_cr
         assert_eq!(status, 200, "{result}");
         assert_eq!(result["data"]["agentId"], "12");
         assert_eq!(result["data"]["ownerUserId"], "3");
+        assert_eq!(result["data"]["part"], "BACKEND");
         assert!(result["data"].get("unexpectedCredential").is_none());
     }
     let list = agent_request(&session, "list_agents", json!({}));
@@ -1425,7 +1429,7 @@ async fn unknown_outcome_with_caller_key_recovers_through_a_new_tool_call() {
 }
 
 #[tokio::test]
-async fn team_context_relays_parts_to_the_verified_team_and_rejects_bad_input_locally() {
+async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
     let remote = Central::start(&path).await;
@@ -1458,15 +1462,17 @@ async fn team_context_relays_parts_to_the_verified_team_and_rejects_bad_input_lo
     let (status, result) = broker
         .post(
             "/v1/teams/context",
-            &agent_request(&session, "get_team_context", json!({"part":"INFRA"})),
+            &agent_request(&session, "get_team_context", json!({})),
         )
         .await;
     assert_eq!(status, 200, "{result}");
+    assert_eq!(result["data"]["query"]["part"], "BACKEND");
     assert!(result["data"]["query"].get("counterpart").is_none());
     assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
     for args in [
-        json!({}),
+        json!({"part":null}),
         json!({"part":"DB"}),
+        json!({"part":"INFRA"}),
         json!({"part":"BACKEND","counterpart":"db"}),
         json!({"part":"BACKEND","teamId":"2"}),
         json!({"part":"BACKEND","counterpart":""}),
@@ -1478,6 +1484,7 @@ async fn team_context_relays_parts_to_the_verified_team_and_rejects_bad_input_lo
             )
             .await;
         assert_eq!(status, 400, "{result}");
+        assert_eq!(result["error"]["code"], "VALIDATION_FAILED");
     }
     let (status, result) = broker
         .post(
@@ -1487,6 +1494,17 @@ async fn team_context_relays_parts_to_the_verified_team_and_rejects_bad_input_lo
         .await;
     assert_eq!(status, 400);
     assert_eq!(result["error"]["code"], "VALIDATION_FAILED");
+    remote.state.agent_mode.store(11, Ordering::SeqCst);
+    for args in [json!({}), json!({"part":"BACKEND"})] {
+        let (_, result) = broker
+            .post(
+                "/v1/teams/context",
+                &agent_request(&session, "get_team_context", args),
+            )
+            .await;
+        assert_eq!(result["error"]["code"], "CENTRAL_PROTOCOL_ERROR");
+    }
+    remote.state.agent_mode.store(0, Ordering::SeqCst);
     assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
     for (mode, code) in [
         (1, "CENTRAL_UNAUTHENTICATED"),
@@ -1496,7 +1514,7 @@ async fn team_context_relays_parts_to_the_verified_team_and_rejects_bad_input_lo
         let (status, result) = broker
             .post(
                 "/v1/teams/context",
-                &agent_request(&session, "get_team_context", json!({"part":"OTHER"})),
+                &agent_request(&session, "get_team_context", json!({})),
             )
             .await;
         assert_ne!(status, 401);

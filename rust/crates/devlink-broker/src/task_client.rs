@@ -384,14 +384,7 @@ impl TaskClient {
                 {
                     return Err(protocol_error());
                 }
-                let mut view = agent.local();
-                if let Some(part) = row["part"]
-                    .as_str()
-                    .and_then(|part| AgentPart::parse(part).ok())
-                {
-                    view["part"] = json!(part);
-                }
-                agents.push(view);
+                agents.push(agent.local());
             }
             Ok(json!({"agents":agents}))
         })
@@ -403,11 +396,15 @@ impl TaskClient {
     pub async fn team_context(
         &self,
         actor: &Principal,
-        part: &str,
+        requested_part: Option<&str>,
         counterpart: Option<&str>,
     ) -> Result<Value, TaskError> {
         tokio::time::timeout(self.timeout, async {
-            self.confirm_agent(actor).await?;
+            let agent = self.confirm_agent(actor).await?;
+            let part = agent["part"].as_str().ok_or_else(protocol_error)?;
+            if requested_part.is_some_and(|requested| requested != part) {
+                return Err(TaskError::rejected("VALIDATION_FAILED", 400));
+            }
             let team_id = numeric_id(actor.team_id.as_str())
                 .ok_or_else(|| TaskError::rejected("VALIDATION_FAILED", 400))?;
             let mut query = vec![("part".to_string(), part.to_string())];
@@ -488,6 +485,8 @@ struct PublicAgent {
     role_description: Option<String>,
     tool_type: String,
     project_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part: Option<AgentPart>,
     status: String,
     last_seen_at: Option<String>,
     created_at: String,

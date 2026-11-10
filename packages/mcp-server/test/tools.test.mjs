@@ -26,7 +26,7 @@ const samples = {
   update_task_status: { taskId: 'task-1', version: '0', status: 'IN_PROGRESS' },
   complete_task: { taskId: 'task-1', version: '1', resultText: 'Done\nVerification: npm test passed', taskFiles: [{ relativePath: 'src/example.ts', changeType: 'MODIFIED', diffText: '- old\n+ new' }] },
   get_tasks: {}, get_task_result: { taskId: 'task-1' }, get_updates: {},
-  get_team_context: { part: 'BACKEND', counterpart: 'FRONTEND' },
+  get_team_context: {},
   ask_question: { taskId: 'task-1', message: 'Which API version applies?', requestKey: 'question-1' },
   answer_question: { taskId: 'task-1', questionEventId: '501', message: 'Use v2.', requestKey: 'answer-1' },
 };
@@ -103,7 +103,7 @@ test('invalid inputs and actor overrides are rejected before any session or brok
     ['update_task_status', { taskId: 'task', version: '0', status: 'FAILED', failureReason: 'x', partiallyModified: false, rejectionReason: 'no' }],
     ['get_tasks', { limit: 101 }],
     ['get_task_result', { taskId: 1 }],
-    ['get_team_context', {}],
+    ['get_team_context', { part: null }],
     ['get_team_context', { part: 'DB' }],
     ['get_team_context', { part: 'BACKEND', counterpart: 'db' }],
     ['get_team_context', { part: 'BACKEND', teamId: 'forged' }],

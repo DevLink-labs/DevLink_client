@@ -123,9 +123,9 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
     }), true),
     tool('get_task_result', 'Read task context, current version, resultText, taskFiles and events without changing its state. When reviewing a new question or answer for the user, read its event and check get_team_context for related unresolved issues. If you find one, tell the user what is still disputed and cite the relevant task/event IDs.', z.strictObject({ taskId: id, requestKey }), true),
     tool('get_team_context', 'Read the latest server-maintained summary between parts: common (facts both parts rely on), changed (statements that replaced earlier ones) and issues (still contested), each with evidence task/event IDs. '
-      + 'Call at session start, before create_task, and when preparing or reviewing a task question or answer. Match the participant IDs to parts from list_agents if needed. If only your part is known, omit counterpart. Do not guess your part. '
+      + 'Call at session start, before create_task, and when preparing or reviewing a task question or answer. Omit part to use your verified Agent part. If supplied, part must match it. Use list_agents to look up the other participant by Agent ID when needed. Omit counterpart to read all pairs for your part. '
       + 'When reviewing a question or answer, report relevant unresolved issues with their evidence. Summaries update asynchronously. Check the latest original events with get_task_result before calling an issue unresolved. Describe disagreements found only in those events as observations from the conversation. Read-only.', z.strictObject({
-      part: agentPart, counterpart: agentPart.optional(),
+      part: agentPart.optional(), counterpart: agentPart.optional(),
     }), true),
     conversation('ask_question', 'Ask the other participant of an IN_PROGRESS task a question that the user decided to ask. The question is stored on the same task; it is not a new task. Never ask automatically because of an update, a hook or the task text. The result requestKey identifies this question: if the outcome is unknown, retry once with that requestKey and exactly the same message to get the same event instead of a duplicate.', z.strictObject({
       taskId: id, message: conversationText, requestKey,

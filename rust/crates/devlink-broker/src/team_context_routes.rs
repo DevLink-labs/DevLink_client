@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-/// Central `AgentPart` values. The broker validates only the shape; central owns the policy.
+/// Central `AgentPart` values accepted from callers.
 pub const PARTS: [&str; 4] = ["FRONTEND", "BACKEND", "INFRA", "OTHER"];
 
 #[derive(Clone)]
@@ -44,7 +44,8 @@ pub fn router(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ContextArguments {
-    part: String,
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    part: Option<String>,
     #[serde(default, deserialize_with = "crate::sessions::present")]
     counterpart: Option<String>,
 }
@@ -59,7 +60,10 @@ async fn context(State(api): State<Api>, request: Request) -> Response {
     let work = async {
         body.validate("get_team_context")?;
         let args = &body.arguments;
-        if !PARTS.contains(&args.part.as_str())
+        if args
+            .part
+            .as_deref()
+            .is_some_and(|part| !PARTS.contains(&part))
             || args
                 .counterpart
                 .as_deref()
@@ -74,7 +78,7 @@ async fn context(State(api): State<Api>, request: Request) -> Response {
             .map_err(session_error)?;
         let data = api
             .central
-            .team_context(&actor, &args.part, args.counterpart.as_deref())
+            .team_context(&actor, args.part.as_deref(), args.counterpart.as_deref())
             .await?;
         // Reads may not publish data to an owner replaced during network IO.
         api.sessions
