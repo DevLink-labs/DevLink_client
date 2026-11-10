@@ -37,20 +37,23 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # 기존 로컬 검증과 같이 테스트를 직렬로 실행한다. 실패한 바이너리가 있어도
-      # 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
+      # 한 테스트 바이너리 안의 테스트를 병렬로 실행한다(cargo 기본값, 스레드 수 = 코어 수).
+      # 테스트는 저마다 임시 설정 디렉터리와 임의 포트의 합성 중앙을 쓰고 환경 변수를 바꾸지 않는다.
+      # 예전의 `--test-threads=1`은 초기 로컬 검증 방식을 옮긴 것이었다. 병렬에서만 실패하는 테스트가
+      # 나오면 그 테스트의 공유 상태를 고치고, 원인 확인 중에는 끝에 `-- --test-threads=1`을 붙여 비교한다.
+      # 실패한 바이너리가 있어도 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
       # setup은 설정 경로의 상위 심볼릭 링크를 거부하므로, macOS 기본 TMPDIR(/var → /private/var)
       # 대신 링크가 없는 runner 임시 디렉터리를 쓴다.
       - name: 테스트
         if: runner.os != 'Windows'
         env:
           TMPDIR: ${{ runner.temp }}
-        run: cargo test --workspace --all-targets --locked --no-fail-fast -- --test-threads=1
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
       # 관리자 runner의 새 파일 소유자를 현재 사용자로 보정해 일반 사용자 환경과 맞춘다.
       - name: 테스트 (Windows, 소유자 보정)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1 cargo test --workspace --all-targets --locked --no-fail-fast '--' --test-threads=1
+        run: ${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1 cargo test --workspace --all-targets --locked --no-fail-fast
 
   mcp-server:
     name: MCP 서버 (${{ matrix.os }})

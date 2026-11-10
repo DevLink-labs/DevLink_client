@@ -201,8 +201,13 @@ export const test = base.extend<Fixtures>({
       const team = await sessions.a.send<{ teamId: number; inviteCode: string }>("POST", "/api/v1/teams", { name: teamName });
       secrets.add(team.inviteCode);
       await sessions.b.send("POST", "/api/v1/teams/join", { inviteCode: team.inviteCode });
-      const a = await desktopSetup(await newActor("a", "codex"), users.a, team.teamId, userIds.a, duty?.a);
-      const b = await desktopSetup(await newActor("b", "claude-code"), users.b, team.teamId, userIds.b, duty?.b);
+      // The two actors are different central users with their own profile and project folder, so
+      // their setups share no account or per-target lock and run at the same time.
+      const actors = { a: await newActor("a", "codex"), b: await newActor("b", "claude-code") };
+      const [a, b] = await Promise.all([
+        desktopSetup(actors.a, users.a, team.teamId, userIds.a, duty?.a),
+        desktopSetup(actors.b, users.b, team.teamId, userIds.b, duty?.b),
+      ]);
       return { teamId: team.teamId, teamName, a, b };
     });
   },

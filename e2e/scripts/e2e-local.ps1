@@ -26,7 +26,9 @@ param(
   [switch]$InstallPostgres,
   [switch]$SkipBuild,
   [int]$Runs = 1,
-  [string]$Grep
+  [string]$Grep,
+  # Parallel spec files; 0 keeps the playwright.config.ts default.
+  [int]$Workers = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -144,6 +146,7 @@ try {
   $env:E2E_DEVLINK_CLI = Join-Path $repoRoot 'rust\target\release\devlink.exe'
   $env:E2E_MCP_PACKAGE = Join-Path $repoRoot 'packages\mcp-server'
   if ($Java) { $env:E2E_JAVA = $Java }
+  if ($Workers -gt 0) { $env:E2E_WORKERS = "$Workers" }
 
   $playwrightArgs = @('playwright', 'test')
   if ($Grep) { $playwrightArgs += @('--grep', $Grep) }
