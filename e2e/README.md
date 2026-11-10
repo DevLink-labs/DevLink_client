@@ -23,7 +23,7 @@ pwsh e2e/scripts/e2e-local.ps1 -PgBin C:\pg16\bin -SkipBuild -Grep S3
 | `src/stack/global-setup.ts` | 실행당 1회: 비공개 ACL 실행 디렉터리, MCP 런타임 사본, PostgreSQL 16, 정적 frontend + `/api` 프록시, central. 시작 전 server·frontend checkout이 깨끗한지, frontend에 `.env.local`·`.env.production.local`이 없는지, Java가 21인지 확인한다. java는 런처가 아닌 `java.home`의 실행 파일로 띄우고 종료할 때 프로세스 트리째 끝낸다. 결과는 `stack-receipt.json`(포트·PID·SHA·CLI와 MCP 해시, 비밀값 없음). |
 | `src/stack/central.ts` | 기본 프로필, `-Duser.timezone=UTC`, `--server.address=127.0.0.1`, 임의 포트, 실행마다 생성한 `TASK_MESSAGE_CURSOR_SECRET`. 기본 프로필에 값이 없는 `devlink.websocket.allowed-origins`는 인자로 준다. |
 | `src/stack/static-proxy.ts` | `dist/`를 제공하고 `/api`를 central로 넘긴다. `vite.config.ts`처럼 `Origin` 헤더를 지운다. |
-| `src/client/actor.ts` | 액터별 `--config` 프로필, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `git init`한 프로젝트, 가짜 Host(npm 배치의 `codex.cmd`/`claude.cmd`, 버전 응답만 함, 자동 설정 지원 버전 Codex 0.166.0·Claude Code 2.1.317). 자식 환경에서 `DEVLINK_*`·`E2E_*` 제거. |
+| `src/client/actor.ts` | 액터별 `--config` 프로필, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `git init`한 프로젝트, 가짜 Host(npm 배치의 `codex.cmd`/`claude.cmd`, 버전 응답만 함, 자동 설정 최소 지원 버전과 같은 Codex 0.166.0·Claude Code 2.1.317을 출력). 자식 환경에서 `DEVLINK_*`·`E2E_*` 제거. |
 | `src/client/mcp.ts` | `packages/mcp-server/scripts/lib/mcp-stdio.mjs`(실제 중앙 검증 스크립트와 공유)로 MCP stdio 연결. |
 | `src/pages/workspace.ts` | 역할·라벨 선택자 화면 객체. 새로고침 버튼을 누르며 `toPass`로 기다린다. |
 | `specs/` | S1~S3 (`@p0`). S15 `find_agent` 실제 중앙 추천 중계와 후보에게 작업 전달·오프라인 후보 관찰(`@p1`, S15P31D108-188·-190). S16 3차 통합: setup part·roles → find_agent → 선택 → create_task → 수락·완료(`@p1`, S15P31D108-191). `E2E_REAL_HOSTS=1`이면 사용자 로그인을 쓰는 실제 Codex·Claude Code 턴도 실행한다(모델 비용 발생, [기록](../packages/mcp-server/docs/mvp3-integration.md)). |

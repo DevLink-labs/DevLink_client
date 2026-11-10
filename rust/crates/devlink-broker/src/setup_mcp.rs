@@ -93,8 +93,9 @@ pub struct PreflightContext {
     pub project: PathBuf,
     pub tool_type: crate::sessions::ToolType,
     pub host_launcher: Option<PathBuf>,
-    /// Only a provider-verified Host version is applied automatically. An unverified
-    /// one ends in manual guidance, where an existing entry is the user's to merge.
+    /// Only a Host at or above the provider's verified minimum version is applied
+    /// automatically. An older one ends in manual guidance, where an existing entry
+    /// is the user's to merge.
     pub mcp_automatic_supported: bool,
 }
 impl From<&Context> for PreflightContext {

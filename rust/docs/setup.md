@@ -631,7 +631,7 @@ devlink setup --tool codex --agent-id 34 --issue-token
 
 - Node 24 이상이 필요하다. `--node-path` → 선택 Host의 Node 실행 경로 → PATH의 절대 경로 순으로 찾는다. MCP 진입점은 `--mcp-entry` → CLI 옆 `mcp-server/dist/index.js` → CLI 위치에서 확인한 개발 checkout의 `packages/mcp-server/dist/index.js` 순이다. 현재 작업 폴더나 빌드 PC 경로를 실행 경로로 쓰지 않는다. 개발 checkout은 `npm.cmd --prefix packages/mcp-server run build`로 먼저 빌드한다. 다운로드·설치·배포 패키지 제작은 수행하지 않는다.
 - 실행 전 경로·권한을 확인하고 Node 버전과 MCP stdio `initialize`를 제한 시간 5초/출력 16 KiB 안에서 확인한다. 검사용 프로세스에는 DevLink 자격 환경변수와 Node 실행 옵션을 전달하지 않는다. AI 작업·업무 도구·Host 세션 등록을 호출하지 않는다.
-- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 / Claude Code 2.1.317**이다. 미검증 버전과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
+- 자동 적용 지원 버전은 제공자 기준 **Codex 0.166.0 이상 / Claude Code 2.1.317 이상**이다(2026-11-10 변경, 이전에는 두 버전과 정확히 일치해야 했다). 최소 버전 미만(최소 버전 자체의 pre-release 포함)과 `--mcp-mode manual`은 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3으로 설정 예시·제안 위치·Host 재시작 안내를 반환하며 Host 파일을 쓰지 않는다. 예시는 해당 형식에 대한 수동 검토용이며 새 Host 버전 지원을 보장하지 않는다. manual과 `--apply-mcp`/`--mcp-target`을 함께 지정하면 validate에서 거절한다.
 - 생성/병합 계획은 안전한 DevLink 항목만 표시한다. TTY에서는 계획을 보여준 후 확인하고, 비대화형에서는 `--apply-mcp`가 없으면 `SETUP_INPUT_REQUIRED`/종료 2와 `mcpPlan`을 반환한다. 거절/EOF는 종료 130이다. 기존 항목이 일치하면 확인·재작성·추가 백업 없이 재사용한다.
 - 확인한 같은 제공자 인스턴스와 `planId`/예상 digest로 적용한다. 입력 대기 동안 잠금은 해제하며 적용 직전에 사용자·팀·Agent·도구·브로커 PID/instance·프로필/자격/실행 파일 해시를 재확인한다. Host 파일의 동시 수정은 제공자의 digest 검사로 거절한다. 확인 후 계획을 몰래 재생성하지 않는다.
 
@@ -789,6 +789,19 @@ cargo test --offline --locked -p devlink-broker --test task_creation actual_mcp_
 
 기존 계정 단위 잠금 파일에는 새 브로커들이 공유 잠금을 유지한다. 구버전의 배타적 계정 잠금과는 양방향으로 충돌하므로 구버전 브로커가 같은 계정으로 실행 중이면 한 번 중지하고 새 CLI로 다시 실행해야 한다. Agent ID를 아직 모르는 신규 생성은 공유 잠금과 프로필 잠금으로 보호하고, 확인된 Agent의 토큰 발급부터 Agent 잠금을 적용한다. 서버의 Agent별 토큰·WebSocket 연결 정책은 변경하지 않았다.
 
-자동 적용 가능 버전은 `CODEX_VERSIONS`, `CLAUDE_VERSIONS` 목록으로 관리한다. 이번 변경에서는 기존에 검증한 `0.166.0`, `2.1.317`만 유지했다. 미검증 버전의 직접 적용 재사용과 일치 검사 정책도 유지한다.
+당시 자동 적용 가능 버전은 `CODEX_VERSIONS`, `CLAUDE_VERSIONS` 목록으로 관리했다. 그 변경에서는 기존에 검증한 `0.166.0`, `2.1.317`만 유지했다. 미검증 버전의 직접 적용 재사용과 일치 검사 정책도 유지했다. (2026-11-10에 최소 버전 기준으로 바꾸면서 두 목록은 `CODEX_MIN_VERSION`, `CLAUDE_MIN_VERSION`으로 대체됐다. 아래 절 참고.)
 
 Windows에서 Agent CLI 16건, setup 등록 22건·토큰 13건·MCP 20건, MCP 제공자 21건과 owner 잠금 호환성 1건을 통과했다. 전체 타깃 Clippy와 fmt 검사도 통과했다. 별도 데스크톱 검증에서는 실제 Electron 연결 화면·실제 CLI·로컬 Spring/PostgreSQL 서버로 같은 계정의 두 프로젝트와 다른 팀 연결, 재연결, 직접 적용 후 확인·재실행을 확인했다. 직접 적용 경로의 Host만 버전 `9.9.9`를 출력하는 합성 실행 파일을 사용했고 모델 호출은 하지 않았다.
+
+## 2026-11-10 자동 적용 버전 기준 변경
+
+Host가 한 패치만 올라가도 자동 적용에서 빠져 직접 설정으로 안내되는 문제가 있었다. 예: 이 PC의 Codex `0.167.0`, Claude Code `2.1.319`. 자동 적용 기준을 고정 목록과의 정확한 일치에서 **검증한 최소 버전 이상**으로 바꿨다.
+
+- 최소 버전은 `mcp_config`의 `CODEX_MIN_VERSION`(`0.166.0`), `CLAUDE_MIN_VERSION`(`2.1.317`)이다. 형식을 실제로 검증한 버전이며, 그 이후 릴리스는 같은 프로젝트 설정 형식을 유지한다고 가정한다. 상한은 두지 않는다.
+- 비교는 semantic version 우선순위를 따른다. 최소 버전 자체의 pre-release(`0.166.0-alpha.6`)는 최소 버전보다 낮아 직접 설정으로 가고, 더 높은 버전의 pre-release(`0.167.0-alpha.1`)는 통과한다. build metadata(`+...`)는 비교에 쓰지 않는다.
+- `major.minor.patch` 숫자 형식이 아닌 버전은 제공자가 비교하지 않고 거부한다. setup에서는 이런 출력이 도구 탐지 단계에서 먼저 `invalid_version`으로 걸러져 select_tool이 도구를 사용할 수 없다고 보고하므로, 직접 설정 안내까지 가지 않는다. 예외로 자릿수는 숫자지만 u64 범위를 넘는 버전은 탐지를 통과한 뒤 제공자가 거부하므로 직접 설정 안내로 간다.
+- 최소 버전 미만의 직접 적용 재사용과 일치 검사 정책, `--mcp-mode manual` 동작은 그대로다.
+- 최소 버전보다 높은 Host도 이제 자동 적용 대상이므로 기존 설정과의 병합 충돌 검사를 받는다. 예전에 직접 설정으로 넣어 둔 DevLink 항목이 현재 프로필과 다르면(Node 경로 등) 직접 설정 안내 대신 `SETUP_MCP_CONFIG_CONFLICT`로 멈추며, `--mcp-mode replace`로 교체한다. 항목이 일치하면 변경 없음으로 통과한다.
+- 이후 Host 릴리스가 설정 형식을 바꾸면 자동 적용이 잘못된 형식을 쓸 수 있다. 적용 후 inspect가 항목을 다시 읽어 확인하지만 Host가 그 파일을 실제로 읽는지는 확인하지 않는다. 형식 변경을 확인하면 상한 또는 버전별 분기를 추가한다.
+
+테스트의 미지원 Host는 `9.9.9` 대신 최소 버전보다 낮은 `0.0.1`을 출력한다. 위 2026-11-04, 2026-11-08 기록의 `9.9.9`는 당시 기준이다. 지금 `9.9.9`는 자동 적용 대상이라, 2026-11-04 기록의 "미지원 Claude Code 9.9.9와 다른 DevLink 항목" 시나리오는 `SETUP_MCP_CONFIG_CONFLICT`로 끝난다.

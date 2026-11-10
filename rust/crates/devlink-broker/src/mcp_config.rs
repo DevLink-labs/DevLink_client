@@ -14,25 +14,50 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const CODEX_VERSIONS: &[&str] = &["0.166.0"];
-pub const CLAUDE_VERSIONS: &[&str] = &["2.1.317"];
+/// Oldest Host releases whose project settings format was verified, as
+/// `[major, minor, patch]`. Later releases are assumed to keep that format.
+pub const CODEX_MIN_VERSION: [u64; 3] = [0, 166, 0];
+pub const CLAUDE_MIN_VERSION: [u64; 3] = [2, 1, 317];
 const LIMIT: usize = 1024 * 1024;
 type Result<T> = std::result::Result<T, ConfigError>;
 
-/// The -108 adapter supplies its detected version. Unknown versions require manual setup.
+/// The -108 adapter supplies its detected version. Versions older than the
+/// verified minimum, and unreadable ones, require manual setup.
 pub struct VerifiedHost {
     tool: ToolType,
 }
 impl VerifiedHost {
     pub fn new(tool: ToolType, version: &str) -> Result<Self> {
-        let expected = match tool {
-            ToolType::Codex => CODEX_VERSIONS,
-            ToolType::ClaudeCode => CLAUDE_VERSIONS,
+        let minimum = match tool {
+            ToolType::Codex => CODEX_MIN_VERSION,
+            ToolType::ClaudeCode => CLAUDE_MIN_VERSION,
         };
-        if !expected.contains(&version) {
+        if !at_least(version, minimum) {
             return Err(ConfigError::new("SETUP_TOOL_UNAVAILABLE"));
         }
         Ok(Self { tool })
+    }
+}
+
+/// Semantic-version precedence: a pre-release of the minimum itself is older than
+/// the minimum, while build metadata does not affect the comparison.
+fn at_least(version: &str, minimum: [u64; 3]) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    });
+    let (Some(Some(major)), Some(Some(minor)), Some(Some(patch)), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let pre_release = version[core.len()..].starts_with('-');
+    match [major, minor, patch].cmp(&minimum) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => !pre_release,
+        std::cmp::Ordering::Less => false,
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
