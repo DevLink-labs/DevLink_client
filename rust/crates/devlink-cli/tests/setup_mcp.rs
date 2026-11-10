@@ -214,6 +214,15 @@ async fn codex_project_configuration_is_applied_and_reused_without_token_values(
 async fn claude_project_configuration_is_applied_and_reused_without_token_values() {
     create_and_reuse(ToolType::ClaudeCode, "2.1.317").await;
 }
+// A Host newer than the verified minimum is applied the same way, not sent to manual setup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn newer_codex_project_configuration_is_applied_and_reused_without_token_values() {
+    create_and_reuse(ToolType::Codex, "0.167.0").await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn newer_claude_project_configuration_is_applied_and_reused_without_token_values() {
+    create_and_reuse(ToolType::ClaudeCode, "2.1.319").await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_guide_reads_a_stopped_profile_without_writes_or_central_side_effects() {
@@ -229,7 +238,9 @@ async fn mcp_guide_reads_a_stopped_profile_without_writes_or_central_side_effect
         }
         files
     }
-    let f = Prepared::new(ToolType::Codex, "0.166.0").await;
+    // The stored Host is newer than the verified minimum: the guide still reports
+    // automatic support from the saved version, without probing the Host again.
+    let f = Prepared::new(ToolType::Codex, "0.167.0").await;
     assert!(f.app.run(&["stop"], None).status.success());
     let before = snapshot(f.app._root.path());
     let original_calls = f.calls();
@@ -253,6 +264,7 @@ async fn mcp_guide_reads_a_stopped_profile_without_writes_or_central_side_effect
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["data"]["fileState"], "file_missing");
     assert_eq!(result["data"]["availability"], "ready");
+    assert_eq!(result["data"]["automaticSupported"], true);
     assert_eq!(result["data"]["agentId"], "201");
     assert_eq!(result["stages"], json!([]));
     let public = String::from_utf8(output.stdout).unwrap();
@@ -415,7 +427,7 @@ async fn declined_review_never_changes_the_host_file_or_prepared_agent() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_host_returns_only_manual_guidance_without_writing_or_claiming_readiness() {
-    let mut f = Prepared::new(ToolType::Codex, "9.9.9").await;
+    let mut f = Prepared::new(ToolType::Codex, "0.0.1").await;
     let descriptor = credentials::load(&f.app.path).unwrap();
     let mut stages = f.stages.take().unwrap().with_mcp(f.options.clone());
     let StepResult::Failed(error) = stages
@@ -440,7 +452,7 @@ async fn unsupported_host_returns_only_manual_guidance_without_writing_or_claimi
     assert_eq!(f.calls(), (1, 1));
 }
 async fn manual_application_is_reused_on_rerun(tool: ToolType) {
-    let mut f = Prepared::new(tool, "9.9.9").await;
+    let mut f = Prepared::new(tool, "0.0.1").await;
     let mut stages = f.stages.take().unwrap().with_mcp(f.options.clone());
     let context = SetupContext {
         config_path: f.app.path.clone(),
@@ -987,12 +999,21 @@ async fn preflight_rejects_missing_node_before_agent_or_token_creation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preflight_checks_a_later_tool_selection_and_rechecks_changes_before_registration() {
+    preflight_rechecks_changes_before_registration("2.1.317").await;
+}
+// A Host newer than the verified minimum is applied automatically, so a conflicting
+// existing entry blocks it too instead of falling through to manual guidance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preflight_rechecks_a_newer_host_and_blocks_a_conflicting_existing_entry() {
+    preflight_rechecks_changes_before_registration("2.1.319").await;
+}
+async fn preflight_rechecks_changes_before_registration(version: &str) {
     let app = Fixture::new().await;
     credentials::set_private_permissions(app._root.path()).unwrap();
     assert!(app.login().status.success());
     let root = app._root.path();
     let hosts = root.join("hosts");
-    account_server::tool_fixture::host(&hosts, "claude", "2.1.317 (Claude Code)");
+    account_server::tool_fixture::host(&hosts, "claude", &format!("{version} (Claude Code)"));
     let options = account_server::tool_fixture::mcp_options(&root.join("runtime"));
     let mut stages = SetupStages::default()
         .with_project(ProjectOptions {
@@ -1057,7 +1078,7 @@ async fn unsupported_host_reaches_manual_guidance_despite_a_conflicting_existing
         br#"{"mcpServers":{"devlink":{"command":"other-runtime"},"other":{"command":"keep-me"}}}"#;
     // The seeded fixture asserts validate, select_tool and register_agent complete:
     // a merge conflict blocks only a version the provider would apply automatically.
-    let mut f = Prepared::seeded(ToolType::ClaudeCode, "9.9.9", Some(original)).await;
+    let mut f = Prepared::seeded(ToolType::ClaudeCode, "0.0.1", Some(original)).await;
     let mut stages = f.stages.take().unwrap().with_mcp(f.options.clone());
     let StepResult::Failed(error) = stages
         .execute(

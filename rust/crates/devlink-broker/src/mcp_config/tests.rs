@@ -224,16 +224,7 @@ impl Fixture {
         }
     }
     fn manager(tool: ToolType) -> McpConfig {
-        McpConfig::new(
-            VerifiedHost::new(
-                tool,
-                match tool {
-                    ToolType::Codex => CODEX_VERSIONS[0],
-                    ToolType::ClaudeCode => CLAUDE_VERSIONS[0],
-                },
-            )
-            .unwrap(),
-        )
+        McpConfig::new(VerifiedHost::new(tool, &minimum(tool)).unwrap())
     }
     fn seed(&self, tool: ToolType, bytes: &[u8]) {
         let p = self.input(tool);
@@ -473,20 +464,74 @@ fn write_and_post_inspection_failures_restore_only_the_owned_version() {
     }
 }
 
+fn minimum(tool: ToolType) -> String {
+    let [major, minor, patch] = match tool {
+        ToolType::Codex => CODEX_MIN_VERSION,
+        ToolType::ClaudeCode => CLAUDE_MIN_VERSION,
+    };
+    format!("{major}.{minor}.{patch}")
+}
+
 #[test]
-fn only_listed_versions_of_the_selected_host_are_verified() {
-    for (tool, versions, other) in [
-        (ToolType::Codex, CODEX_VERSIONS, CLAUDE_VERSIONS),
-        (ToolType::ClaudeCode, CLAUDE_VERSIONS, CODEX_VERSIONS),
+fn the_minimum_host_version_and_later_releases_are_verified() {
+    for (tool, verified, older) in [
+        (
+            ToolType::Codex,
+            [
+                "0.166.0",
+                "0.166.0+build.7",
+                "0.166.1",
+                "0.167.0",
+                "0.167.0-alpha.1",
+                "1.0.0",
+                "0.1000.0",
+            ],
+            [
+                "0.165.9",
+                "0.166.0-beta.1",
+                "0.166.0-alpha.6+build",
+                "0.99.999",
+            ],
+        ),
+        (
+            ToolType::ClaudeCode,
+            [
+                "2.1.317",
+                "2.1.317+build.7",
+                "2.1.319",
+                "2.2.0",
+                "2.2.0-rc.1",
+                "3.0.0",
+                "2.1.1000",
+            ],
+            ["2.1.316", "2.1.317-beta.1", "2.0.999", "1.9.999"],
+        ),
     ] {
-        assert!(!versions.is_empty());
-        for version in versions {
-            assert!(VerifiedHost::new(tool, version).is_ok());
+        assert!(VerifiedHost::new(tool, &minimum(tool)).is_ok());
+        for version in verified {
+            assert!(VerifiedHost::new(tool, version).is_ok(), "{version}");
         }
-        for version in other.iter().copied().chain(["", "9.9.9", "0.166.0-beta.1"]) {
-            if !versions.contains(&version) {
-                assert!(VerifiedHost::new(tool, version).is_err());
-            }
+        for version in older {
+            assert!(VerifiedHost::new(tool, version).is_err(), "{version}");
+        }
+        // Anything that is not `major.minor.patch` is never compared as a version.
+        for version in [
+            "",
+            "unverified",
+            "9",
+            "9.9",
+            "9.9.9.9",
+            "9..9",
+            ".9.9",
+            "9.9.",
+            "9.9.x",
+            "+9.9.9",
+            "-9.9.9",
+            "v9.9.9",
+            " 9.9.9",
+            "9.9.99999999999999999999999",
+        ] {
+            assert!(VerifiedHost::new(tool, version).is_err(), "{version}");
         }
     }
 }

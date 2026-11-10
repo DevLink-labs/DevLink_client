@@ -7,8 +7,11 @@ log in, select a team, create an Agent, issue a token, or deploy anything.
 
 Create `VerifiedHost::new(toolType, detectedVersion)` and then `McpConfig::new(host)`.
 The tested automatic formats are **Codex 0.166.0** and **Claude Code 2.1.317**.
-Unknown versions return `SETUP_TOOL_UNAVAILABLE` for a manual path. Supporting a
-new version requires its actual parser/Host verification, not silently guessing.
+Since 2026-11-10 those are minimum versions: the same or a later release is
+applied automatically on the assumption that it keeps the tested format.
+Older versions, a pre-release of the minimum itself, and versions that are not
+`major.minor.patch` return `SETUP_TOOL_UNAVAILABLE` for a manual path. A release
+that changes the settings format needs its own parser/Host verification.
 
 The -108 adapter must verify Node >=24 and the built MCP entry before calling the
 provider. Version 1 accepts only an existing absolute Node executable and argv
