@@ -480,6 +480,8 @@ fn the_minimum_host_version_and_later_releases_are_verified() {
             [
                 "0.166.0",
                 "0.166.0+build.7",
+                // A hyphen inside build metadata is not a pre-release marker.
+                "0.166.0+build-1",
                 "0.166.1",
                 "0.167.0",
                 "0.167.0-alpha.1",
@@ -498,6 +500,7 @@ fn the_minimum_host_version_and_later_releases_are_verified() {
             [
                 "2.1.317",
                 "2.1.317+build.7",
+                "2.1.317+exp-sha.5",
                 "2.1.319",
                 "2.2.0",
                 "2.2.0-rc.1",

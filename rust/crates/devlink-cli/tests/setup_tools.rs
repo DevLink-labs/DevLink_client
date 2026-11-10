@@ -229,6 +229,20 @@ async fn hosts_newer_than_the_verified_minimum_support_automatic_configuration()
 }
 
 #[tokio::test]
+async fn a_pre_release_of_the_minimum_is_available_but_not_applied_automatically() {
+    let root = tempfile::tempdir().unwrap();
+    tool_fixture::host(root.path(), "codex", "codex-cli 0.166.0-alpha.6");
+    let reports = search(root.path()).detect(None, None).await;
+    let report = reports
+        .iter()
+        .find(|r| r.tool_type == ToolType::Codex)
+        .unwrap();
+    assert_eq!(report.status, DetectionStatus::Available, "{reports:?}");
+    assert_eq!(report.selected.as_ref().unwrap().version, "0.166.0-alpha.6");
+    assert!(!report.mcp_automatic_supported);
+}
+
+#[tokio::test]
 async fn explicit_korean_path_is_reusable_outside_path_and_older_versions_are_provider_decisions() {
     let root = tempfile::tempdir().unwrap();
     let exe = tool_fixture::host(
