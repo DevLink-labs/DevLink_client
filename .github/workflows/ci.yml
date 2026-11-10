@@ -26,6 +26,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Linux는 직렬로 둔다. 병렬 실행 두 번(같은 커밋)에서 매번 다른 테스트가 자기 임시 디렉터리의
+          # 잠금을 "사용 중"으로 받아 실패했고(2개, 6개), 직렬 실행은 통과했다. 다른 테스트 스레드가
+          # 자식 프로세스를 띄우는 순간 잠금 파일 핸들이 자식에게 잠깐 복제되기 때문으로 추정한다.
+          - os: ubuntu-latest
+            test-threads: '1'
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -42,11 +48,11 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # 한 테스트 바이너리 안의 테스트를 병렬로 실행한다(cargo 기본값, 스레드 수 = 코어 수).
-      # 테스트는 저마다 임시 설정 디렉터리와 임의 포트의 합성 중앙을 쓰고 환경 변수를 바꾸지 않는다.
-      # 예전의 `--test-threads=1`은 초기 로컬 검증 방식을 옮긴 것이었다. 병렬에서만 실패하는 테스트가
-      # 나오면 그 테스트의 공유 상태를 고친다. 원인 확인 중에는 수동 실행(workflow_dispatch)의
-      # test-threads 입력에 1을 넣어 같은 커밋을 직렬로 돌려 비교한다.
+      # Windows·macOS는 한 테스트 바이너리 안의 테스트를 병렬로 실행한다(cargo 기본값, 스레드 수 =
+      # 코어 수). 테스트는 저마다 임시 설정 디렉터리와 임의 포트의 합성 중앙을 쓰고 환경 변수를
+      # 바꾸지 않는다. Linux는 위 matrix 설명대로 직렬이다.
+      # 수동 실행(workflow_dispatch)의 test-threads 입력은 모든 OS의 스레드 수를 덮어쓴다. 병렬에서만
+      # 실패하는지 볼 때 1을 넣어 같은 커밋을 직렬로 돌려 비교한다.
       # 실패한 바이너리가 있어도 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
       # setup은 설정 경로의 상위 심볼릭 링크를 거부하므로, macOS 기본 TMPDIR(/var → /private/var)
       # 대신 링크가 없는 runner 임시 디렉터리를 쓴다.
@@ -54,7 +60,7 @@ jobs:
         if: runner.os != 'Windows'
         env:
           TMPDIR: ${{ runner.temp }}
-          TEST_THREADS: ${{ inputs.test-threads }}
+          TEST_THREADS: ${{ inputs.test-threads || matrix.test-threads }}
         run: |
           if [[ -n "$TEST_THREADS" && ! "$TEST_THREADS" =~ ^[1-9][0-9]*$ ]]; then
             echo "test-threads must be a positive integer" >&2; exit 2
@@ -65,7 +71,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          TEST_THREADS: ${{ inputs.test-threads }}
+          TEST_THREADS: ${{ inputs.test-threads || matrix.test-threads }}
         run: |
           if ($env:TEST_THREADS -and $env:TEST_THREADS -notmatch '^[1-9][0-9]*$') { throw 'test-threads must be a positive integer' }
           $threads = if ($env:TEST_THREADS) { @('--', "--test-threads=$env:TEST_THREADS") } else { @() }
