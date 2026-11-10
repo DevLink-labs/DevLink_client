@@ -16,6 +16,7 @@ pub mod credentials;
 mod dependency_graph;
 pub use dependency_graph::dependency_repo_key;
 pub mod git_identity;
+pub mod git_scope;
 pub mod inbox;
 pub mod local;
 pub mod local_updates;
