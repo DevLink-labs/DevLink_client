@@ -353,30 +353,29 @@ pub async fn ensure_tracked(
         {
             return Err(failure(FailureKind::BindingConflict));
         }
-        if !matches!(selection, Some(Selection::Use(_))) && !matches!(old.state, State::Vacant) {
-            if let Some(agent) = old.agent() {
-                let lookup = client
-                    .get::<Agent>(&format!("/api/v1/agents/{}", agent.agent_id))
-                    .await;
-                // An explicit create replaces a binding whose Agent central reports deleted.
-                // IDs are never reused, so a 404 cannot point at another live Agent.
-                if selection == Some(Selection::Create) && lookup.as_ref().is_err_and(agent_deleted)
-                {
-                    replacing_deleted = true;
-                } else {
-                    if !matches_metadata(agent, expected) {
-                        return Err(failure(FailureKind::BindingConflict));
-                    }
-                    let verified = lookup.map_err(|error| {
-                        let mut failure = central(error);
-                        failure.agent_id = Some(agent.agent_id);
-                        failure
-                    })?;
-                    validate_agent(&verified, expected)?;
-                    if verified.agent_id != agent.agent_id || !matches_metadata(&verified, expected)
-                    {
-                        return Err(failure(FailureKind::BindingConflict));
-                    }
+        if !matches!(selection, Some(Selection::Use(_)))
+            && !matches!(old.state, State::Vacant)
+            && let Some(agent) = old.agent()
+        {
+            let lookup = client
+                .get::<Agent>(&format!("/api/v1/agents/{}", agent.agent_id))
+                .await;
+            // An explicit create replaces a binding whose Agent central reports deleted.
+            // IDs are never reused, so a 404 cannot point at another live Agent.
+            if selection == Some(Selection::Create) && lookup.as_ref().is_err_and(agent_deleted) {
+                replacing_deleted = true;
+            } else {
+                if !matches_metadata(agent, expected) {
+                    return Err(failure(FailureKind::BindingConflict));
+                }
+                let verified = lookup.map_err(|error| {
+                    let mut failure = central(error);
+                    failure.agent_id = Some(agent.agent_id);
+                    failure
+                })?;
+                validate_agent(&verified, expected)?;
+                if verified.agent_id != agent.agent_id || !matches_metadata(&verified, expected) {
+                    return Err(failure(FailureKind::BindingConflict));
                 }
             }
         }
