@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {privateDirectory} from './helpers/private-settings.mjs';
-import {prepareCodexHome} from './helpers/host-profile.mjs';
+import {prepareCodexHome,hostVersion} from './helpers/host-profile.mjs';
 test('private Codex profile cannot rotate the original OAuth refresh token',async()=>{
  const dir=await privateDirectory();
  try{
@@ -35,4 +35,17 @@ test('stale, expiring, incomplete or unsupported Codex logins fail before public
    await assert.rejects(readFile(join(target,'auth.json')));
   }
  }finally{await fixture.cleanup();}
+});
+
+test('Host version output is read without deciding support',()=>{
+ for(const [tool,output,version]of [
+  ['codex','codex-cli 0.166.0','0.166.0'],['codex','codex-cli 0.167.0\r\n','0.167.0'],['codex','codex-cli 0.166.0-alpha.6','0.166.0-alpha.6'],['codex','codex-cli 0.0.1','0.0.1'],
+  ['codex','  codex-cli 0.166.0  ','0.166.0'],['codex','codex-cli 0.166.0-'+'a'.repeat(56),'0.166.0-'+'a'.repeat(56)],
+  ['claude_code','2.1.317 (Claude Code)','2.1.317'],['claude_code','2.1.319 (Claude Code)\n','2.1.319'],['claude_code','2.2.0-rc.1+build-5 (Claude Code)','2.2.0-rc.1+build-5'],
+ ])assert.equal(hostVersion(tool,output),version);
+ for(const [tool,output]of [
+  ['codex',''],['codex','0.166.0'],['codex','codex-cli'],['codex','codex-cli 0.166'],['codex','codex-cli 0.166.0.1'],['codex','codex-cli v0.166.0'],['codex','codex-cli 0.166.0 extra'],['codex','2.1.317 (Claude Code)'],
+  ['codex','codex-cli 0.166.0-'+'a'.repeat(57)],['codex','\uFEFFcodex-cli 0.167.0'],['codex','codex-cli 0.166.0-'+'a'.repeat(64)],
+  ['claude_code','2.1.317'],['claude_code','codex-cli 0.166.0'],['claude_code','2.1 (Claude Code)'],['claude_code','2.1.317 (Claude Code) extra'],['claude_code','x2.1.317 (Claude Code)'],
+ ])assert.throws(()=>hostVersion(tool,output),/Unrecognized (Codex|Claude Code) version output/,JSON.stringify([tool,output]));
 });
