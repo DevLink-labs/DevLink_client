@@ -8,14 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       test-threads:
-        description: Rust 테스트 동시 실행 수. 비우면 cargo는 1(직렬), nextest는 코어 수.
+        description: Rust 테스트 동시 실행 수. 비우면 nextest는 코어 수, cargo는 1(직렬).
         required: false
         default: ''
       runner:
-        description: Rust 테스트 실행기. nextest는 테스트마다 별도 프로세스로 병렬 실행한다(시험용).
+        description: Rust 테스트 실행기. nextest(기본)는 테스트마다 별도 프로세스로 병렬 실행, cargo는 직렬 cargo test.
         type: choice
-        options: [cargo, nextest]
-        default: cargo
+        options: [nextest, cargo]
+        default: nextest
 
 permissions:
   contents: read
@@ -47,28 +47,30 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # 테스트는 직렬(--test-threads=1)로 실행한다. 2026-11-10에 같은 커밋을 GitHub 러너에서 병렬(cargo
-      # 기본값)로 돌려 보니 Ubuntu는 2회 모두, macOS는 3회 중 1회 실패했다. 매번 다른 테스트가 자기
-      # 임시 디렉터리의 잠금을 "사용 중"으로 받았고, 직렬 실행은 3개 OS 모두 통과했다. 다른 테스트
-      # 스레드가 자식 프로세스를 띄우는 순간 잠금 파일 핸들이 자식에게 잠깐 복제되기 때문으로 추정한다
-      # (미확인). Windows 로컬에서는 병렬 실행이 통과하므로 개발 중에는 스레드 옵션 없이 돌려도 된다.
-      # 수동 실행(workflow_dispatch)의 test-threads 입력으로 스레드 수를 바꿔 비교할 수 있다.
-      # runner 입력에 nextest를 고르면 cargo-nextest로 실행한다. 테스트마다 별도 프로세스라 위 경합이
-      # 생기는 조건(같은 프로세스의 다른 스레드)이 없고, 테스트 바이너리 사이에서도 병렬로 돈다.
-      # 실패한 바이너리가 있어도 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
+      # 테스트는 cargo-nextest로 실행한다. 테스트마다 별도 프로세스로 돌고, 테스트 바이너리 사이에서도
+      # 병렬로 돈다(동시 실행 수 = 코어 수).
+      # `cargo test`의 스레드 병렬(--test-threads 생략)은 쓰지 않는다. 2026-11-10에 같은 커밋을 GitHub
+      # 러너에서 그렇게 돌려 보니 Ubuntu는 2회 모두, macOS는 3회 중 1회 실패했다. 매번 다른 테스트가
+      # 자기 임시 디렉터리의 잠금을 "사용 중"으로 받았고, 직렬 실행은 3개 OS 모두 통과했다. 같은
+      # 프로세스의 다른 테스트 스레드가 자식 프로세스를 띄우는 순간 잠금 파일 핸들이 자식에게 잠깐
+      # 복제되기 때문으로 추정한다(미확인). nextest에서는 3회 연속 3개 OS 모두 통과했다.
+      # 수동 실행(workflow_dispatch)의 runner 입력에 cargo를 고르면 예전처럼 직렬 `cargo test`로 돌고,
+      # test-threads 입력으로 동시 실행 수를 바꿔 비교할 수 있다.
+      # 실패한 테스트가 있어도 나머지를 모두 실행해 OS별 실패를 한 번에 드러낸다.
       # setup은 설정 경로의 상위 심볼릭 링크를 거부하므로, macOS 기본 TMPDIR(/var → /private/var)
       # 대신 링크가 없는 runner 임시 디렉터리를 쓴다.
+      # 액션은 커밋(v2 태그가 2026-11-10에 가리키던 것)으로, nextest는 시험에 쓴 버전으로 고정한다.
       - name: cargo-nextest 설치
-        if: inputs.runner == 'nextest'
-        uses: taiki-e/install-action@v2
+        if: (inputs.runner || 'nextest') == 'nextest'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.151
       - name: 테스트
         if: runner.os != 'Windows'
         env:
           TMPDIR: ${{ runner.temp }}
           TEST_THREADS: ${{ inputs.test-threads }}
-          TEST_RUNNER: ${{ inputs.runner || 'cargo' }}
+          TEST_RUNNER: ${{ inputs.runner || 'nextest' }}
         run: |
           if [[ -n "$TEST_THREADS" && ! "$TEST_THREADS" =~ ^[1-9][0-9]*$ ]]; then
             echo "test-threads must be a positive integer" >&2; exit 2
@@ -84,7 +86,7 @@ jobs:
         shell: pwsh
         env:
           TEST_THREADS: ${{ inputs.test-threads }}
-          TEST_RUNNER: ${{ inputs.runner || 'cargo' }}
+          TEST_RUNNER: ${{ inputs.runner || 'nextest' }}
         run: |
           if ($env:TEST_THREADS -and $env:TEST_THREADS -notmatch '^[1-9][0-9]*$') { throw 'test-threads must be a positive integer' }
           $owner = "${{ github.workspace }}/.github/scripts/invoke-as-user-owner.ps1"

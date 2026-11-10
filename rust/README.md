@@ -95,12 +95,18 @@ mv "$HOME/devlink-<새 버전>-<target>" "$HOME/devlink"
 
 ```powershell
 cargo build --locked --workspace
-cargo test --locked --workspace --all-targets -- --test-threads=1
+cargo test --locked --workspace --all-targets
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --release --locked --workspace
 .\target\release\devlink.exe --help
 ```
+
+테스트 실행 방식(2026-11-10 측정):
+
+- Windows에서는 위처럼 스레드 옵션 없이 돌려도 된다. 로컬 22코어에서 전체가 약 6분이고, 예전의 `-- --test-threads=1`(직렬)은 약 11분이다. 병렬 실행 3회에서 실패는 없었다.
+- Linux·macOS에서 `cargo test`를 돌릴 때는 `-- --test-threads=1`을 붙인다. GitHub 러너에서 스레드 병렬로 돌리면 매번 다른 테스트가 자기 임시 디렉터리의 잠금을 "사용 중"으로 받아 실패했다(Ubuntu 2회 모두, macOS 3회 중 1회). 원인은 추정만 했다(`.github/workflows/ci.yml`의 주석).
+- CI는 `cargo-nextest`로 실행한다(`cargo nextest run --workspace --all-targets --locked --no-fail-fast`). 테스트마다 별도 프로세스라 위 실패가 나오지 않았고, 3개 OS에서 직렬보다 빠르다. 로컬에 설치돼 있으면 같은 명령을 쓸 수 있다.
 
 `rust-toolchain.toml`은 stable, rustfmt, clippy를 선택합니다. 의존성 버전은 이 디렉터리의 `Cargo.lock`으로 고정하며 공통 의존성은 workspace의 `Cargo.toml`에서 관리합니다. 빌드 산출물은 `rust/target/`에 생성됩니다. 최근 Windows MSVC 검증과 고정 중앙·DB 결과는 [검증 요약](docs/verification.md)에 실행별로 보관합니다. -95 후속 보완의 전체 Rust 회귀는 168건 통과·2건 제외였고, 문서 정리 과정에서 다시 실행한 결과는 아닙니다. Ubuntu·CI·운영 Host 전체 왕복은 별도 검증입니다.
 
