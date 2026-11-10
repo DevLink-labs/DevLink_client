@@ -712,6 +712,18 @@ Windows stable MSVC, `00a99d7` 기반 작업 트리에서 임시 프로젝트·�
 
 ## 작업 12 (S15P31D108-113): 최종 연결 상태
 
+### 읽기 전용 MCP 설정 안내 (S15P31D108-198)
+
+```powershell
+devlink --config <PROFILE> setup mcp-guide --output json --node-path <NODE> --mcp-entry <ENTRY>
+```
+
+저장된 사용자·팀·프로젝트·Agent·도구 바인딩과 안전한 런타임·자격 파일을 확인해 설정 안내를 반환한다. 브로커가 중지된 상태에서도 동작하며 중앙 요청, 런타임 실행, 설정 쓰기, 백업, 폴더 생성, 토큰 발급과 세션 claim/bind를 하지 않는다. 기존 setup v1 result envelope의 `data`에 ID·경로·`observedAt`, `automaticSupported`, `availability`, `fileState`, `editKind`, `copyItems`, `reason`, `nextActions`를 반환한다.
+
+`availability=ready`는 안내 생성 가능이라는 뜻이다. 실제 연결 준비는 `setup status`로 별도 확인한다. 프로필·CLI 사용자 바인딩이 없거나 다르면 오류를 반환하며, 런타임·자격 파일이 없으면 `needs_preparation`과 빈 `copyItems`를 반환한다. 문법 오류·중복 키에는 복사할 조각을 제공하지 않는다. JSON 속성 조각은 기존 중괄호 안에 쉼표를 유지해 넣고, TOML 인라인 컨테이너는 해당 중괄호 안의 DevLink 항목만 편집한다. 기존 파일 전체 내용·다른 MCP 설정·토큰은 반환하지 않는다.
+
+데스크톱의 ‘직접 설정하기’는 기존 `mcp.mode=manual`을 사용한다. 지원 버전에서도 파일을 쓰지 않고 `SETUP_MANUAL_ACTION_REQUIRED`/종료 3을 반환하므로, 사용자가 적용한 후에는 manual 재실행 대신 읽기 전용 상태 조회로 확인한다.
+
 ```powershell
 devlink setup status --output json
 devlink --config C:\work\profile\config.json setup status --output jsonl

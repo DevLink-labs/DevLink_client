@@ -795,8 +795,10 @@ pub fn run_at(path: &std::path::Path, args: &[&str], input: Option<&str>) -> Out
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Existing auth/team/project fixtures use a synthetic --version-only Host.
-    let guided_setup =
-        args.contains(&"setup") && !args.windows(2).any(|pair| pair == ["setup", "status"]);
+    let guided_setup = args.contains(&"setup")
+        && !args
+            .windows(2)
+            .any(|pair| pair[0] == "setup" && ["status", "mcp-guide", "tools"].contains(&pair[1]));
     if guided_setup && !args.contains(&"--tool") && !args.contains(&"--tool-path") {
         command
             .args(["--tool", "codex", "--tool-path"])

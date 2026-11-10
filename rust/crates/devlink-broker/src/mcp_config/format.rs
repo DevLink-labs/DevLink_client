@@ -140,7 +140,7 @@ pub(super) fn configured_entry(tool: ToolType, bytes: &[u8]) -> Result<Option<Va
     }
 }
 
-fn to_toml(value: &Value) -> Result<toml_edit::Value> {
+pub(super) fn to_toml(value: &Value) -> Result<toml_edit::Value> {
     Ok(match value {
         Value::String(s) => toml_edit::Value::from(s.as_str()),
         Value::Array(items) => {
