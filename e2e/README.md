@@ -11,7 +11,11 @@ pwsh e2e/scripts/e2e-local.ps1 -InstallPostgres
 pwsh e2e/scripts/e2e-local.ps1 -Runs 5
 # 이미 설치된 PostgreSQL 16, 빌드 생략, 일부 시나리오
 pwsh e2e/scripts/e2e-local.ps1 -PgBin C:\pg16\bin -SkipBuild -Grep S3
+# 다른 작업 트리가 이미 만든 스택(checkout·빌드·PostgreSQL) 재사용, 워커 수 지정
+pwsh e2e/scripts/e2e-local.ps1 -StackDir D:\devlink-e2e-stack -Workers 1
 ```
+
+스펙 파일은 워커 3개로 병렬 실행한다(`playwright.config.ts`, `-Workers` 또는 `E2E_WORKERS`로 변경). 시나리오마다 central 사용자·팀·액터 디렉터리·프로젝트 폴더가 따로라 계정 잠금과 대상별 MCP 설정 잠금을 공유하지 않는다. 한 파일 안의 테스트는 순서대로 실행한다. `seedTeam`은 두 액터의 데스크톱 setup을 동시에 실행한다. 실제 Host 턴(`E2E_REAL_HOSTS=1`)은 소유권 해제 시간을 재므로 워커 1개로 고정한다. 병렬에서만 실패하는 시나리오가 나오면 `-Workers 1`로 비교한다.
 
 필요 도구: Node 24, JDK 21(`java`가 PATH에 없으면 `-Java`), Rust(`rust-toolchain.toml`), git. 스크립트는 `e2e/.stack/`(git 무시)에 server·frontend checkout, 빌드 산출물, 실행별 디렉터리 `runs/<runId>/`를 둔다.
 

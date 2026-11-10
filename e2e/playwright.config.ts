@@ -6,12 +6,20 @@ import { defineConfig, devices } from "@playwright/test";
 // by the runner's digest scan (see README "비밀정보").
 process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
 
+// Spec files run in parallel workers against the one stack global setup starts. Each scenario uses
+// its own central users, team, actor directories and project folders, so they share no account or
+// per-target lock. Tests inside a file stay serial. E2E_WORKERS overrides the count; the real-Host
+// turns (E2E_REAL_HOSTS=1) measure owner-release timing and stay on one worker.
+const requestedWorkers = Number(process.env.E2E_WORKERS ?? "3");
+const workers = process.env.E2E_REAL_HOSTS === "1" ? 1
+  : Number.isInteger(requestedWorkers) && requestedWorkers >= 1 ? requestedWorkers : 1;
+
 export default defineConfig({
   testDir: "./specs",
   outputDir: "./test-results",
   globalSetup: "./src/stack/global-setup.ts",
   fullyParallel: false,
-  workers: 1,
+  workers,
   retries: 0,
   forbidOnly: !!process.env.CI,
   timeout: 240_000,
