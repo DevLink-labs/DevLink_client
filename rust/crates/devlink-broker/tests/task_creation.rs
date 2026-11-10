@@ -167,12 +167,20 @@ async fn central_agents(
     assert_eq!(headers["authorization"], format!("Bearer {AGENT}"));
     state.agent_calls.fetch_add(1, Ordering::SeqCst);
     let mut agent = public_agent(i64::MAX as u64);
+    // S15P31D108-183: this row carries routing metadata. `/agents/me` answers like a
+    // central that predates part/roles, and the first list row holds values the broker
+    // does not recognise.
+    agent["part"] = json!("BACKEND");
+    agent["roles"] = json!(["로그인", "결제 API"]);
+    let mut unexpected = public_agent(12);
+    unexpected["part"] = Value::Null;
+    unexpected["roles"] = json!(["API", 7]);
     match state.agent_mode.load(Ordering::SeqCst) {
         7 => agent["teamId"] = json!(999),
         8 => agent["agentId"] = json!(9223372036854775808_u64),
         _ => {}
     }
-    Json(json!({"success":true,"data":[public_agent(12),agent]})).into_response()
+    Json(json!({"success":true,"data":[unexpected,agent]})).into_response()
 }
 
 struct Central {
@@ -483,6 +491,9 @@ async fn register_confirms_existing_agent_and_list_preserves_long_ids_without_cr
         assert_eq!(result["data"]["agentId"], "12");
         assert_eq!(result["data"]["ownerUserId"], "3");
         assert!(result["data"].get("unexpectedCredential").is_none());
+        // A central reply without part/roles is passed on without inventing them.
+        assert!(result["data"].get("part").is_none());
+        assert!(result["data"].get("roles").is_none());
     }
     let list = agent_request(&session, "list_agents", json!({}));
     assert_eq!(
@@ -506,6 +517,14 @@ async fn register_confirms_existing_agent_and_list_preserves_long_ids_without_cr
         "9223372036854775807"
     );
     assert_eq!(result["data"]["agents"][0]["toolType"], "CODEX");
+    // A null part or a non-string tag never fails the Agent or the list; it is left out.
+    assert!(result["data"]["agents"][0].get("part").is_none());
+    assert!(result["data"]["agents"][0].get("roles").is_none());
+    assert_eq!(result["data"]["agents"][1]["part"], "BACKEND");
+    assert_eq!(
+        result["data"]["agents"][1]["roles"],
+        json!(["로그인", "결제 API"])
+    );
     assert!(remote.state.calls.lock().await.is_empty());
     assert!(!TaskRequests::path(&dir.path().join("config.json")).exists());
     broker.stop().await;

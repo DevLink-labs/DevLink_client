@@ -115,6 +115,7 @@ client의 오류 매핑은 `task_client.rs`에 있다.
 
 - 2026-10-30, server `0e8c2b7`, client `970b5ea`: 격리 loopback Spring Boot와 PostgreSQL 17.11에서 두 Agent의 업무 도구 왕복을 실행했다. [중앙 계약 정합화와 두 Agent 컨텍스트 왕복](../../packages/mcp-server/docs/central-roundtrip.md) 참조.
 - server `aecdcc3`: S15P31D108-146에서 실제 Host로 register_agent, get_my_context, update_agent를 실행했다. [증거 JSON](../../rust/docs/evidence/agent-update-146.json)과 [Agent 갱신 소비 계약](../../rust/docs/agent-update-contract.md) 참조.
+- 2026-11-10, server `d945f8b`(DevLink_server#76 병합 커밋 `dd8cffe`를 포함): S15P31D108-183에서 E2E S17로 `PATCH /agents/{agentId}`의 `part`·`roles`를 MCP `update_agent`와 `devlink agent update`로 보내고 `GET /agents/me`로 저장 값을 확인했다(생략·null 유지, `[]` 삭제). LLM Host가 아니라 MCP SDK 클라이언트로 실행했다. [Agent 갱신 소비 계약](../../rust/docs/agent-update-contract.md#part와-roles-s15p31d108-183) 참조. 위 표의 기준 SHA(`aecdcc3`)에는 이 필드가 없다.
 - Issue #89는 2026-11-02 server `b5ae244` 실제 중앙 검증을 언급한다. 이 기록은 Notion에 있고 저장소에는 없다.
 
 ## 갱신 방법
