@@ -111,7 +111,7 @@ fn probe(pid: u32) -> Probe {
     }
     match linux_stat(pid) {
         // A zombie (Z) or dead (X) process has ended; only its parent has not reaped it yet.
-        Some((state, _)) if matches!(state, 'Z' | 'X') => Probe::Gone,
+        Some(('Z' | 'X', _)) => Probe::Gone,
         Some((_, started)) => Probe::Running(started),
         // Not Linux (or unreadable): running, start time unknown (PID reuse not detected).
         None => Probe::Running(0),
