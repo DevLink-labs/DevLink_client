@@ -17,7 +17,7 @@ import {StdioClientTransport,getDefaultEnvironment} from '@modelcontextprotocol/
 import {privateDirectory} from '../test/helpers/private-settings.mjs';
 import {captureHost} from '../test/helpers/host-process.mjs';
 import {readHostTranscript,hostTools} from '../test/helpers/host-transcript.mjs';
-import {prepareCodexHome,authDigest} from '../test/helpers/host-profile.mjs';
+import {prepareCodexHome,authDigest,hostVersion} from '../test/helpers/host-profile.mjs';
 import {verifyOnboardingProof} from '../test/helpers/onboarding-proof.mjs';
 
 assert.equal(process.platform,'win32','This actual Host process-cleanup harness currently supports Windows only');
@@ -88,7 +88,7 @@ async function configure(p){activeStep=p.tool+'/configure';
  p.wrapper=join(p.folder,'devlink-onboarding-'+randomUUID()+'.mjs');await writeFile(p.wrapper,`import ${JSON.stringify(pathToFileURL(entry).href)};\n`,{mode:0o600});
  p.target=p.tool==='codex'?join(p.folder,'.codex','config.toml'):join(p.folder,'.mcp.json');
  const input={toolType:p.tool,projectPath:p.folder,targetPath:p.target,brokerFile:join(p.folder,'.devlink-runtime','broker.json'),executable:{command:process.execPath,args:[p.wrapper,'--transport','stdio']}};
- const started=Date.now(),output=JSON.parse(await run(provider,['--apply'],p.folder,JSON.stringify({hostVersion:p.tool==='codex'?'0.166.0':'2.1.317',input})));assert.equal(output.inspection.status,'applied');
+ const started=Date.now(),output=JSON.parse(await run(provider,['--apply'],p.folder,JSON.stringify({hostVersion:hostVersions[p.label],input})));assert.equal(output.inspection.status,'applied');
  p.configApplyMs=Date.now()-started;p.configHash=hash(await readFile(p.target));safe(await readFile(p.target,'utf8'));
 }
 const normal='Call only these DevLink MCP tools, sequentially, with empty object arguments: get_my_context, get_connection_status, register_agent, get_connection_status, get_my_context, register_agent. Do not supply name/toolType/role. Do not use any other tools or read files, secrets, shell or network. Finish after the six calls, even if any returns an error. Briefly state completion.';
@@ -100,7 +100,7 @@ async function owned(p,kill=false){
 }
 const verificationFiles=[import.meta.url,...['host-process.mjs','host-profile.mjs','host-transcript.mjs','onboarding-proof.mjs','private-settings.mjs'].map(name=>new URL('../test/helpers/'+name,import.meta.url))];
 const verificationCodeHash=hash(JSON.stringify(await Promise.all(verificationFiles.map(async path=>({file:basename(new URL(path).pathname),sha256:await fileHash(new URL(path))})))));
-const versions={},binaries={};let activeStep='preparation';
+const versions={},hostVersions={},hostSupport={},binaries={};let activeStep='preparation';
 async function codexProfile(p){
  if(p.codexHome)return;activeStep='codex/private-profile';
  p.codexHome=join(p.folder,'isolated-codex-home');await mkdir(p.codexHome);
@@ -148,7 +148,12 @@ async function localSession(p){
 let failure,baseline;const cleanup={brokers:true,fixture:false,proxy:false};
 try{
  for(const [label,command]of [['codex',process.env.DEVLINK_TEST_CODEX??'codex.exe'],['claude',process.env.DEVLINK_TEST_CLAUDE??'claude.exe']]){const path=isAbsolute(command)?command:(await run('where.exe',[command],root)).trim().split(/\r?\n/)[0];binaries[label]={path,sha256:await fileHash(path)};}
- versions.codex=(await run(binaries.codex.path,['--version'],root)).trim();versions.claude=(await run(binaries.claude.path,['--version'],root)).trim();assert.equal(versions.codex,'codex-cli 0.166.0');assert.equal(versions.claude,'2.1.317 (Claude Code)');
+ versions.codex=(await run(binaries.codex.path,['--version'],root)).trim();versions.claude=(await run(binaries.claude.path,['--version'],root)).trim();
+ // The detected version goes to the Rust provider unchanged, so the harness accepts exactly the Hosts setup applies automatically.
+ activeStep='preparation/host-version';hostVersions.codex=hostVersion('codex',versions.codex);hostVersions.claude=hostVersion('claude_code',versions.claude);
+ // Ask the provider before anything is created on the central server.
+ for(const [label,toolType]of [['codex','codex'],['claude','claude_code']]){activeStep='preparation/host-support/'+label;hostSupport[label]=JSON.parse(await run(provider,['--supports'],root,JSON.stringify({toolType,hostVersion:hostVersions[label]}))).supported===true;assert(hostSupport[label],'setup does not apply this Host version automatically');}
+ activeStep='preparation';
  const a=await prepare('codex','codex'),b=await prepare('claude','claude_code');
  activeStep='team/preparation';const team=await json(a,['team','create','--name','Synthetic onboarding '+randomUUID()]);secrets.push(team.inviteCode);await raw(a,['team','select','--id',String(team.teamId)]);await raw(b,['team','join','--code-stdin'],team.inviteCode+'\n');await raw(b,['team','select','--id',String(team.teamId)]);
  await configure(a);await configure(b);activeStep='preparation/request-baseline';baseline={...counters};assert.deepEqual(baseline,{agentCreates:2,tokenIssues:2,agentMutations:4});
@@ -180,5 +185,5 @@ finally{
  process.off('SIGINT',interrupt);process.off('SIGTERM',interrupt);
 }
 const scenarios=profiles.flatMap(p=>['initial','host-restart','broker-restart','ownership-conflict','broker-stopped','recovered','credentials-missing','credentials-restored'].map(phase=>({host:p.tool,phase,status:proofs.some(v=>v.host===p.tool&&v.phase===phase)?'verified':'unverified'})));
-const report={story:'S15P31D108-144',passed:!failure,versions,binaries,clientSourceCommit:(await run('git',['rev-parse','HEAD'],repoRoot)).trim(),sourceTreeDirty:Boolean((await run('git',['status','--porcelain=v1'],repoRoot)).trim()),verificationCodeSha256:verificationCodeHash,mcpDistSha256:hash(JSON.stringify(await distFiles(dirname(entry)))),cleanup,scenarios,retainedFixturePath:cleanup.fixture?null:root,failedStep:failure?activeStep:null,actualLlmHostsExecuted:[...new Set(proofs.map(p=>p.host))],serverCommit:commit,cliSha256:hash(await readFile(cli)),mcpEntrySha256:hash(await readFile(entry)),providerSha256:hash(await readFile(provider)),setupRequests:baseline,finalRequests:counters,additionalAgentCreates:baseline?counters.agentCreates-baseline.agentCreates:null,additionalTokenIssues:baseline?counters.tokenIssues-baseline.tokenIssues:null,metadataAdditionalInputs:!failure&&scenarios.length===16&&scenarios.every(s=>s.status==='verified')&&proofs.some(p=>p.registerCalls>0)&&proofs.filter(p=>p.registerCalls>0).every(p=>p.metadataInputs===0)?0:null,profiles:profiles.map(p=>({host:p.tool,agentId:p.agent?String(p.agent.agentId):null,configApplyMs:p.configApplyMs,recoveryWaitMs:p.recoveryWaitMs,ownerRetained:p.ownerRetained})),proofs,limitations:['Manual metadata baseline timing was not measured; do not claim a speedup.','Other fault classes use dedicated unit/native provider regressions, not simulated success in this actual Host report.']};
+const report={story:'S15P31D108-144',passed:!failure,versions,hostVersions,hostSupport,binaries,clientSourceCommit:(await run('git',['rev-parse','HEAD'],repoRoot)).trim(),sourceTreeDirty:Boolean((await run('git',['status','--porcelain=v1'],repoRoot)).trim()),verificationCodeSha256:verificationCodeHash,mcpDistSha256:hash(JSON.stringify(await distFiles(dirname(entry)))),cleanup,scenarios,retainedFixturePath:cleanup.fixture?null:root,failedStep:failure?activeStep:null,actualLlmHostsExecuted:[...new Set(proofs.map(p=>p.host))],serverCommit:commit,cliSha256:hash(await readFile(cli)),mcpEntrySha256:hash(await readFile(entry)),providerSha256:hash(await readFile(provider)),setupRequests:baseline,finalRequests:counters,additionalAgentCreates:baseline?counters.agentCreates-baseline.agentCreates:null,additionalTokenIssues:baseline?counters.tokenIssues-baseline.tokenIssues:null,metadataAdditionalInputs:!failure&&scenarios.length===16&&scenarios.every(s=>s.status==='verified')&&proofs.some(p=>p.registerCalls>0)&&proofs.filter(p=>p.registerCalls>0).every(p=>p.metadataInputs===0)?0:null,profiles:profiles.map(p=>({host:p.tool,agentId:p.agent?String(p.agent.agentId):null,configApplyMs:p.configApplyMs,recoveryWaitMs:p.recoveryWaitMs,ownerRetained:p.ownerRetained})),proofs,limitations:['Manual metadata baseline timing was not measured; do not claim a speedup.','Other fault classes use dedicated unit/native provider regressions, not simulated success in this actual Host report.']};
 safe(JSON.stringify(report));await writeFile(join(artifact,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({artifact,report},null,2));if(failure)process.exitCode=1;

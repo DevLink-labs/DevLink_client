@@ -781,7 +781,7 @@ $env:DEVLINK_MCP_BUILD = (Resolve-Path ../packages/mcp-server/dist).Path
 cargo test --offline --locked -p devlink-broker --test task_creation actual_mcp_ -- --ignored
 ```
 
-실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다. 지원 버전인 Codex `0.166.0`, Claude Code `2.1.317` 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
+실제 Host와 Spring/PostgreSQL 통합은 별도 검증이다. 이 절을 작성한 시점에 이 PC에서 확인한 Codex는 `0.163.0`과 `0.166.0-alpha.6`이며 Claude Code는 PATH에서 찾지 못했다(2026-11-10 기준 설치본은 아래 "자동 적용 버전 기준 변경" 절 참고). 지원 버전(2026-11-10부터 Codex `0.166.0` 이상, Claude Code `2.1.317` 이상) 및 전용 loopback 서버·DB로 [실제 Host 검증 절차](../../packages/mcp-server/docs/onboarding-host-verification.md)를 실행한다.
 
 ## 2026-11-08 데스크톱 다중 프로젝트 연결 보완
 
