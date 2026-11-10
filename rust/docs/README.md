@@ -30,7 +30,7 @@
 | Host 훅용 로컬 업데이트 요약 (`devlink updates-hook`) | [update-hook.md](update-hook.md) |
 | 데스크톱 알림용 세션 없는 로컬 업데이트 조회 (`devlink updates`) | [desktop-updates.md](desktop-updates.md) |
 | Git 수집 업로드의 허용 필드·작성자·경로 제한 (IDX-3-03) | [git-collection-scope.md](git-collection-scope.md) |
-| 작업 파일 30초 수집·탐색 직전 재확인 (IDX-3-02) | [working-files.md](working-files.md) |
+| 작업 파일 3초 변경 감지·30초 재전송·탐색 직전 재확인 (IDX-3-02) | [working-files.md](working-files.md) |
 | 커밋 이력 60초 동기화·90일 범위·체크포인트·작성자 판별 (IDX-3-01) | [commit-sync.md](commit-sync.md) |
 
 MCP 도구의 소비자 계약·Host 설정은 [MCP 문서](../../packages/mcp-server/README.md), 중앙과의 현재 연동 상태는 [중앙 연동 현재 상태](../../contracts/central/current-state.md)를 참고한다. 2026-10-29 [중앙 연동 결정표](../../contracts/central/README.md)는 역사 기록이다. Rust provider 구현과 MCP의 최종 입력 DTO 수렴(-97), 실제 Host 전체 왕복(-66)은 별도 범위다.

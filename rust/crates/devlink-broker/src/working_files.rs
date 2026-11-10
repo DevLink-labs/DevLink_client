@@ -1,10 +1,12 @@
 //! IDX-3-02 working-file collection (S15P31D108-186).
 //!
-//! Every 30 seconds the broker replaces the bound user's uncommitted-file list for the bound
-//! project's repository on central. An empty list is still an observation; central expires an
-//! observation 90 seconds after it arrives. `find_agent` asks for one more observation right
-//! before its central call and continues with the last valid one if that fails. Bodies come from
-//! `git_scope` (IDX-3-03), so only the branch, relative paths and change types leave the PC.
+//! Every 3 seconds the broker reads the bound project's uncommitted files. A changed list
+//! replaces the bound user's list for that repository on central at once, so the dependency
+//! tree shows work within seconds; an unchanged list is sent again every 30 seconds. An empty
+//! list is still an observation; central expires an observation 90 seconds after it arrives.
+//! `find_agent` asks for one more observation right before its central call and continues with
+//! the last valid one if that fails. Bodies come from `git_scope` (IDX-3-03), so only the
+//! branch, relative paths and change types leave the PC.
 use crate::{
     agent_profile::InspectionBinding,
     central::{CancellationToken, CentralState},
@@ -14,6 +16,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow, ensure};
 use reqwest::Method;
+use serde_json::Value;
 use std::{
     path::Path,
     sync::{Arc, OnceLock},
@@ -21,14 +24,23 @@ use std::{
 };
 use tokio::{
     sync::Mutex,
-    time::{MissedTickBehavior, interval, timeout},
+    time::{Instant, MissedTickBehavior, interval, timeout},
 };
 
+/// How often the working tree is read; a changed list is sent at once.
+pub const CHECK_INTERVAL: Duration = Duration::from_secs(3);
+/// An unchanged list is sent again after this long, well inside central's 90-second expiry.
 pub const INTERVAL: Duration = Duration::from_secs(30);
 /// Budget for the re-check right before `find_agent`; past it central uses the last observation.
 pub const REFRESH_LIMIT: Duration = Duration::from_secs(3);
 /// Remote whose URL hash identifies the repository when `dependencyRemote` is not configured.
 pub const DEFAULT_REMOTE: &str = "origin";
+
+/// The last observation central accepted from this collector.
+struct Sent {
+    body: Value,
+    at: Instant,
+}
 
 struct Collector {
     git: GitProject,
@@ -36,13 +48,16 @@ struct Collector {
     central: CentralState,
     client: TaskClient,
     path: String,
+    resend: Duration,
     // One observation at a time, so an older list never lands after a newer one.
-    sending: Mutex<()>,
+    last: Mutex<Option<Sent>>,
 }
 
 impl Collector {
-    async fn publish(&self) -> Result<()> {
-        let _sending = self.sending.lock().await;
+    /// Reads the working tree and sends it unless it equals the last accepted list sent less
+    /// than `resend` ago. `force` always sends. Returns whether a request was sent.
+    async fn publish(&self, force: bool) -> Result<bool> {
+        let mut last = self.last.lock().await;
         ensure!(
             bound_ready(&self.central, &self.binding).await,
             "Central is not ready for the bound Agent"
@@ -51,16 +66,27 @@ impl Collector {
         // A branch name central would reject is reported like a detached HEAD.
         let branch = branch.filter(|name| WorkingFiles::branch_allowed(name));
         let body = serde_json::to_value(WorkingFiles::new(branch.as_deref(), files)?)?;
+        if !force
+            && last
+                .as_ref()
+                .is_some_and(|sent| sent.body == body && sent.at.elapsed() < self.resend)
+        {
+            return Ok(false);
+        }
         let (status, reply) = self
             .client
-            .request_graph_http(Method::PUT, &self.path, Some(body))
+            .request_graph_http(Method::PUT, &self.path, Some(body.clone()))
             .await
             .map_err(|_| anyhow!("Working-file upload failed"))?;
         ensure!(
             (200..300).contains(&status) && reply.success,
             "Working-file upload rejected"
         );
-        Ok(())
+        *last = Some(Sent {
+            body,
+            at: Instant::now(),
+        });
+        Ok(true)
     }
 }
 
@@ -73,7 +99,9 @@ impl WorkingFileRefresher {
     /// new observation reached central.
     pub async fn refresh(&self, limit: Duration) -> bool {
         match self.0.get() {
-            Some(collector) => matches!(timeout(limit, collector.publish()).await, Ok(Ok(()))),
+            Some(collector) => {
+                matches!(timeout(limit, collector.publish(true)).await, Ok(Ok(true)))
+            }
             None => false,
         }
     }
@@ -87,9 +115,10 @@ pub(crate) async fn run(
     refresher: WorkingFileRefresher,
     cancel: CancellationToken,
 ) {
+    let timing = (CHECK_INTERVAL, INTERVAL);
     tokio::select! {
         _ = cancel.cancelled() => {},
-        _ = collect(binding, remote, central, client, refresher) => {},
+        _ = collect(binding, remote, central, client, refresher, timing) => {},
     }
 }
 
@@ -99,6 +128,7 @@ async fn collect(
     central: CentralState,
     client: TaskClient,
     refresher: WorkingFileRefresher,
+    (check, resend): (Duration, Duration),
 ) {
     let Ok(git) = GitProject::open(Path::new(&binding.project_root), &remote).await else {
         eprintln!(
@@ -116,10 +146,11 @@ async fn collect(
         central,
         client,
         path,
-        sending: Mutex::new(()),
+        resend,
+        last: Mutex::new(None),
     });
     let _ = refresher.0.set(collector.clone());
-    let mut tick = interval(INTERVAL);
+    let mut tick = interval(check);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut failed = false;
     loop {
@@ -127,7 +158,7 @@ async fn collect(
         if !bound_ready(&collector.central, &collector.binding).await {
             continue;
         }
-        let result = collector.publish().await;
+        let result = collector.publish(false).await;
         if result.is_err() && !failed {
             eprintln!(
                 "Working-file upload failed; central keeps the last observation until it expires."
@@ -364,5 +395,64 @@ mod tests {
         .await;
         assert!(!refresher.refresh(REFRESH_LIMIT).await);
         assert!(uploads.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn sends_a_change_at_the_next_check_and_an_unchanged_list_only_after_the_interval() {
+        let repo = repository();
+        let (sender, mut uploads) = mpsc::unbounded_channel();
+        let url = central(sender).await;
+        let cancel = CancellationToken::new();
+        let (check, resend) = (Duration::from_millis(100), Duration::from_secs(2));
+        let collector = collect(
+            binding(repo.path()),
+            DEFAULT_REMOTE.into(),
+            connected(3).await,
+            TaskClient::new(&url, TOKEN).unwrap(),
+            WorkingFileRefresher::default(),
+            (check, resend),
+        );
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = collector => {},
+                }
+            }
+        });
+        let first = tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let sent_at = Instant::now();
+        assert_eq!(first.body["files"].as_array().unwrap().len(), 4);
+
+        // Unchanged lists are read every check but not sent again before the interval.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(uploads.try_recv().is_err());
+
+        // A change goes out at the next check, long before the interval.
+        std::fs::write(repo.path().join("later.ts"), "l").unwrap();
+        let changed = tokio::time::timeout(Duration::from_millis(1_000), uploads.recv())
+            .await
+            .expect("a change must not wait for the interval")
+            .unwrap();
+        assert!(sent_at.elapsed() < resend);
+        let files = changed.body["files"].as_array().unwrap();
+        assert_eq!(files.len(), 5);
+        assert!(files.contains(&json!({"relativePath": "later.ts", "changeType": "UNTRACKED"})));
+
+        // Still unchanged: the same list is sent again once the interval passes.
+        let changed_at = Instant::now();
+        let again = tokio::time::timeout(Duration::from_secs(5), uploads.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(changed_at.elapsed() >= resend - check * 2);
+        assert_eq!(again.body, changed.body);
+
+        cancel.cancel();
+        task.await.unwrap();
     }
 }
