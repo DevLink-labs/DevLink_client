@@ -28,11 +28,16 @@ stories complete. Existing first-MVP work/result roundtrip checks remain separat
   configured model.
 - The Host CLI flags, transcript shapes and Codex login layout this harness
   relies on were written against Codex 0.166.0 and Claude Code 2.1.310
-  (2026-11-02); the Claude pin moved to 2.1.317 on 2026-11-06. They have not been
-  re-checked against later versions. A later Host that the provider accepts can
-  still fail the run on those; that is a harness compatibility problem, not a
-  provider decision, and such a failure is not evidence about the generated
-  configuration.
+  (2026-11-02); the Claude pin moved to 2.1.317 on 2026-11-06. With the current
+  harness, a complete run passed with Codex 0.167.0 and Claude Code 2.1.319 on
+  2026-11-10; it has not been re-run on other versions. A later Host that the
+  provider accepts can still fail the run on those; that is a harness
+  compatibility problem, not a provider decision, and such a failure is not
+  evidence about the generated configuration.
+- The Claude catalog check requires every tool on the harness allow-list to be
+  offered. The server may offer DevLink tools outside that list, so the model
+  can see them; Claude's permission mode denies them, and any such call fails
+  the exact-sequence proof.
 - A dedicated IPv4 loopback central server with disposable DB data. Record its
   exact 40-character source commit. Production URLs are rejected.
 - Use an absolute artifact directory outside tracked source. Captured transcripts
