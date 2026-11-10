@@ -12,7 +12,10 @@ use crate::{
     agent_profile::InspectionBinding,
     central::{CancellationToken, CentralState},
     config,
-    dependency_graph::{bound_ready, git::GitProject},
+    dependency_graph::{
+        bound_ready,
+        git::{GitProject, OutputLimitExceeded},
+    },
     git_identity::{IdentityCache, IdentityCheck, IdentityState},
     git_scope::{Author, CommitBatch, CommitChange, CommitRecord, RelativePath, RepoKey},
     private_file,
@@ -160,8 +163,39 @@ impl CommitSync {
 
     /// Sends one chunk; `None` if central disconnected meanwhile, else the skipped count.
     async fn upload(&self, ids: &[String], check: &IdentityCheck) -> Result<Option<usize>> {
-        let mut records = Vec::with_capacity(ids.len());
-        for commit in self.git.commits(ids).await? {
+        let mut pending = vec![ids];
+        let mut skipped = 0;
+        while let Some(ids) = pending.pop() {
+            let commits = match self.git.commits(ids).await {
+                Ok(commits) => commits,
+                Err(error) if error.is::<OutputLimitExceeded>() => {
+                    if ids.len() == 1 {
+                        skipped += 1;
+                    } else {
+                        let (first, second) = ids.split_at(ids.len() / 2);
+                        pending.push(second);
+                        pending.push(first);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some(part_skipped) = self.upload_records(ids.len(), commits, check).await? else {
+                return Ok(None);
+            };
+            skipped += part_skipped;
+        }
+        Ok(Some(skipped))
+    }
+
+    async fn upload_records(
+        &self,
+        count: usize,
+        commits: Vec<crate::dependency_graph::git::RawCommit>,
+        check: &IdentityCheck,
+    ) -> Result<Option<usize>> {
+        let mut records = Vec::with_capacity(count);
+        for commit in commits {
             let author = Author::from_attribution(&check.attribute(&commit.author_email));
             let files = commit.files.iter().filter_map(|(status, path)| {
                 Some((
@@ -174,7 +208,7 @@ impl CommitSync {
                 records.push(record);
             }
         }
-        let invalid = ids.len() - records.len().min(ids.len());
+        let invalid = count - records.len().min(count);
         let (batches, oversized) = CommitBatch::split(&self.repo_key, records)?;
         let mut skipped = invalid + oversized.len();
         for batch in &batches {
@@ -691,5 +725,113 @@ mod tests {
         other_server.sync_once().await.unwrap();
         assert_eq!(f.sent_to().len(), 1);
         assert_eq!(other_server.sync_once().await.unwrap(), Outcome::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn submodule_changes_do_not_follow_user_ignore_settings() {
+        let f = fixture().await;
+        let root = f.repo.path();
+        let first = commit(root, ME, "a.ts", "a");
+        git(root, ME, &["config", "diff.ignoreSubmodules", "all"]);
+        git(
+            root,
+            ME,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{first},sub"),
+            ],
+        );
+        git(root, ME, &["commit", "-q", "-m", "submodule"]);
+        let sha = git(root, ME, &["rev-parse", "HEAD"]);
+        f.identity.set_for_test(None).await;
+        f.sync.sync_once().await.unwrap();
+        let bodies = f.sent();
+        let commit = bodies
+            .iter()
+            .flat_map(|body| body["commits"].as_array().unwrap())
+            .find(|commit| commit["commitSha"] == sha)
+            .unwrap();
+        assert_eq!(
+            commit["files"],
+            json!([{"relativePath":"sub","changeType":"ADDED"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn history_filter_includes_the_boundary_and_ancestors_before_a_skewed_date() {
+        let f = fixture().await;
+        let root = f.repo.path();
+        let boundary = commit_at(root, "boundary.ts", "2024-01-01T00:00:00Z");
+        commit_at(root, "old.ts", "2020-01-01T00:00:00Z");
+        let tip = commit_at(root, "recent.ts", "2024-02-01T00:00:00Z");
+        let after = 1_704_067_200;
+        assert_eq!(
+            f.sync.git.commit_ids(None, &tip, after).await.unwrap(),
+            [boundary.clone(), tip.clone()]
+        );
+        assert_eq!(
+            f.sync
+                .git
+                .commit_ids(Some(&boundary), &tip, after)
+                .await
+                .unwrap(),
+            [tip]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_commit_larger_than_the_git_output_limit_does_not_block_later_history() {
+        use std::{io::Write, process::Stdio};
+        let f = fixture().await;
+        let root = f.repo.path();
+        let base = commit(root, ME, "base.ts", "b");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut commands = format!(
+            "blob\nmark :1\ndata 1\nx\ncommit refs/heads/large\ncommitter t <{ME}> {now} +0000\ndata 5\nlarge\nfrom {base}\n"
+        );
+        let prefix = format!("{}/{}/", "a".repeat(180), "b".repeat(180));
+        for i in 0..35_000 {
+            commands.push_str(&format!("M 100644 :1 {prefix}{i:05}{}\n", "c".repeat(125)));
+        }
+        commands.push_str(&format!("\ncommit refs/heads/large\ncommitter t <{ME}> {now} +0000\ndata 5\nsmall\nM 100644 :1 next.ts\n\n"));
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(commands.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git(root, ME, &["symbolic-ref", "HEAD", "refs/heads/large"]);
+        let tip = git(root, ME, &["rev-parse", "HEAD"]);
+        f.identity.set_for_test(None).await;
+        assert_eq!(
+            f.sync.sync_once().await.unwrap(),
+            Outcome::Synced {
+                commits: 2,
+                skipped: 1
+            }
+        );
+        assert_eq!(f.shas(), [base, tip]);
+        assert_eq!(f.sync.sync_once().await.unwrap(), Outcome::UpToDate);
+        assert!(f.sent().is_empty());
     }
 }

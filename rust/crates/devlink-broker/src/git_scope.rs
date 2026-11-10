@@ -19,6 +19,7 @@ pub const MAX_COMMITS_PER_BATCH: usize = 100;
 pub const MAX_BATCH_BYTES: usize = 128 * 1024;
 /// Central `relativePath` limit, counted in UTF-16 code units like Java `String.length`.
 pub const MAX_PATH_UTF16: usize = 500;
+pub const MAX_WORKING_PATH_BYTES: usize = 1000;
 pub const MAX_WORKING_FILES: usize = 2000;
 const MAX_BRANCH_CHARS: usize = 255;
 
@@ -331,6 +332,11 @@ pub struct WorkingFiles {
 }
 
 impl WorkingFiles {
+    /// 작업 파일에만 적용되는 중앙 UTF-8 바이트 한도 검사
+    pub fn path_allowed(path: &RelativePath) -> bool {
+        path.as_str().len() <= MAX_WORKING_PATH_BYTES
+    }
+
     /// Central branch rule: letters, digits and `._/-`, at most 255 UTF-16 units, no leading `-`
     /// and no `..`. A collector sends `null` rather than an unaccepted name.
     pub fn branch_allowed(branch: &str) -> bool {
@@ -350,7 +356,10 @@ impl WorkingFiles {
         if let Some(branch) = branch {
             ensure!(Self::branch_allowed(branch), "Invalid branch name");
         }
-        let files: BTreeMap<_, _> = files.into_iter().collect();
+        let files: BTreeMap<_, _> = files
+            .into_iter()
+            .filter(|(path, _)| Self::path_allowed(path))
+            .collect();
         ensure!(files.len() <= MAX_WORKING_FILES, "Too many changed files");
         Ok(Self {
             branch: branch.map(str::to_owned),
@@ -765,5 +774,42 @@ mod tests {
             WorkingChange::Deleted
         );
         assert_eq!(WorkingChange::from_porcelain(*b"A "), WorkingChange::Added);
+    }
+
+    #[test]
+    fn working_paths_enforce_bytes_without_discarding_other_files_or_commit_paths() {
+        let boundary = format!("{}/{}", "가".repeat(166), "나".repeat(167));
+        let oversized = format!("{}/{}", "가".repeat(167), "나".repeat(167));
+        assert_eq!(boundary.len(), MAX_WORKING_PATH_BYTES);
+        assert_eq!(oversized.len(), MAX_WORKING_PATH_BYTES + 3);
+        let allowed = path(&boundary);
+        let too_long = path(&oversized);
+        assert!(WorkingFiles::path_allowed(&allowed));
+        assert!(!WorkingFiles::path_allowed(&too_long));
+        let body = serde_json::to_value(
+            WorkingFiles::new(
+                None,
+                [
+                    (allowed, WorkingChange::Added),
+                    (too_long.clone(), WorkingChange::Modified),
+                    (path("src/normal.ts"), WorkingChange::Untracked),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 2);
+        assert!(body["files"].as_array().unwrap().iter().all(|file| {
+            file["relativePath"].as_str().unwrap().len() <= MAX_WORKING_PATH_BYTES
+        }));
+        let commit = CommitRecord::new(
+            SHA1,
+            TIME,
+            Author::UNVERIFIED,
+            [(too_long, CommitChange::Added)],
+        )
+        .unwrap();
+        let commit = serde_json::to_value(commit).unwrap();
+        assert_eq!(commit["files"][0]["relativePath"], oversized);
     }
 }

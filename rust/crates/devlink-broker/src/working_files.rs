@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::Mutex,
+    sync::{mpsc, oneshot},
     time::{Instant, MissedTickBehavior, interval, timeout},
 };
 
@@ -49,15 +49,13 @@ struct Collector {
     client: TaskClient,
     path: String,
     resend: Duration,
-    // One observation at a time, so an older list never lands after a newer one.
-    last: Mutex<Option<Sent>>,
+    last: Option<Sent>,
 }
 
 impl Collector {
     /// Reads the working tree and sends it unless it equals the last accepted list sent less
     /// than `resend` ago. `force` always sends. Returns whether a request was sent.
-    async fn publish(&self, force: bool) -> Result<bool> {
-        let mut last = self.last.lock().await;
+    async fn publish(&mut self, force: bool) -> Result<bool> {
         ensure!(
             bound_ready(&self.central, &self.binding).await,
             "Central is not ready for the bound Agent"
@@ -67,7 +65,8 @@ impl Collector {
         let branch = branch.filter(|name| WorkingFiles::branch_allowed(name));
         let body = serde_json::to_value(WorkingFiles::new(branch.as_deref(), files)?)?;
         if !force
-            && last
+            && self
+                .last
                 .as_ref()
                 .is_some_and(|sent| sent.body == body && sent.at.elapsed() < self.resend)
         {
@@ -82,7 +81,7 @@ impl Collector {
             (200..300).contains(&status) && reply.success,
             "Working-file upload rejected"
         );
-        *last = Some(Sent {
+        self.last = Some(Sent {
             body,
             at: Instant::now(),
         });
@@ -92,18 +91,25 @@ impl Collector {
 
 /// Handle `find_agent` uses for the re-check. Without a running collector it does nothing.
 #[derive(Clone, Default)]
-pub struct WorkingFileRefresher(Arc<OnceLock<Arc<Collector>>>);
+pub struct WorkingFileRefresher(Arc<OnceLock<mpsc::Sender<oneshot::Sender<bool>>>>);
 
 impl WorkingFileRefresher {
     /// Publishes a fresh observation within `limit`. Never fails the caller; returns whether a
     /// new observation reached central.
     pub async fn refresh(&self, limit: Duration) -> bool {
-        match self.0.get() {
-            Some(collector) => {
-                matches!(timeout(limit, collector.publish(true)).await, Ok(Ok(true)))
+        let Some(sender) = self.0.get() else {
+            return false;
+        };
+        // 호출자 제한 시간은 응답 대기에만 적용하고 이미 시작한 발행은 수집기가 완료
+        timeout(limit, async {
+            let (reply, result) = oneshot::channel();
+            if sender.send(reply).await.is_err() {
+                return false;
             }
-            None => false,
-        }
+            result.await.unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -140,31 +146,46 @@ async fn collect(
         "/api/v1/teams/{}/git/working-files/{}",
         binding.team_id, git.key
     );
-    let collector = Arc::new(Collector {
+    let mut collector = Collector {
         git,
         binding,
         central,
         client,
         path,
         resend,
-        last: Mutex::new(None),
-    });
-    let _ = refresher.0.set(collector.clone());
+        last: None,
+    };
+    let (sender, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
+    let _ = refresher.0.set(sender);
     let mut tick = interval(check);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut failed = false;
     loop {
-        tick.tick().await;
+        let reply = tokio::select! {
+            _ = tick.tick() => None,
+            Some(reply) = requests.recv() => {
+                if reply.is_closed() {
+                    continue;
+                }
+                Some(reply)
+            }
+        };
         if !bound_ready(&collector.central, &collector.binding).await {
+            if let Some(reply) = reply {
+                let _ = reply.send(false);
+            }
             continue;
         }
-        let result = collector.publish(false).await;
+        let result = collector.publish(reply.is_some()).await;
         if result.is_err() && !failed {
             eprintln!(
                 "Working-file upload failed; central keeps the last observation until it expires."
             );
         }
         failed = result.is_err();
+        if let Some(reply) = reply {
+            let _ = reply.send(matches!(result, Ok(true)));
+        }
     }
 }
 
@@ -180,8 +201,12 @@ mod tests {
     };
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
-    use std::{collections::BTreeSet, process::Command};
-    use tokio::sync::{RwLock, mpsc};
+    use std::{
+        collections::BTreeSet,
+        process::Command,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 
     const TOKEN: &str = "agent-token";
 
@@ -454,5 +479,132 @@ mod tests {
 
         cancel.cancel();
         task.await.unwrap();
+    }
+
+    struct DelayedServer {
+        count: AtomicUsize,
+        arrivals: mpsc::UnboundedSender<Value>,
+        release: Notify,
+        latest: Mutex<Option<Value>>,
+    }
+
+    async fn delayed_replace(
+        State(server): State<Arc<DelayedServer>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let index = server.count.fetch_add(1, Ordering::SeqCst);
+        server.arrivals.send(body.clone()).unwrap();
+        if index == 1 {
+            server.release.notified().await;
+        }
+        *server.latest.lock().await = Some(body);
+        Json(json!({"success": true, "data": null}))
+    }
+
+    async fn cancelled_refresh_preserves_upload_order(abort_caller: bool) {
+        let repo = repository();
+        let (sender, mut arrivals) = mpsc::unbounded_channel();
+        let remote = Arc::new(DelayedServer {
+            count: AtomicUsize::new(0),
+            arrivals: sender,
+            release: Notify::new(),
+            latest: Mutex::new(None),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/api/v1/teams/{team}/git/working-files/{key}",
+                put(delayed_replace),
+            )
+            .with_state(remote.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let refresher = WorkingFileRefresher::default();
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn({
+            let cancel = cancel.clone();
+            let refresher = refresher.clone();
+            let binding = binding(repo.path());
+            let state = connected(3).await;
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = collect(
+                        binding, DEFAULT_REMOTE.into(), state,
+                        TaskClient::new(&url, TOKEN).unwrap(), refresher,
+                        (Duration::from_secs(60), INTERVAL),
+                    ) => {},
+                }
+            }
+        });
+        timeout(Duration::from_secs(10), arrivals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(repo.path().join("slow.ts"), "slow").unwrap();
+        let old = tokio::spawn({
+            let refresher = refresher.clone();
+            async move {
+                refresher
+                    .refresh(if abort_caller {
+                        Duration::from_secs(10)
+                    } else {
+                        Duration::from_millis(50)
+                    })
+                    .await
+            }
+        });
+        let older_body = timeout(Duration::from_secs(10), arrivals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if abort_caller {
+            old.abort();
+            assert!(old.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(!old.await.unwrap());
+        }
+        // 시작하지 못한 만료 요청은 나중에 Git 조회나 업로드를 실행하지 않음
+        assert!(!refresher.refresh(Duration::from_millis(20)).await);
+        std::fs::write(repo.path().join("newest.ts"), "new").unwrap();
+        let newest = tokio::spawn({
+            let refresher = refresher.clone();
+            async move { refresher.refresh(Duration::from_secs(5)).await }
+        });
+        assert!(
+            timeout(Duration::from_millis(100), arrivals.recv())
+                .await
+                .is_err(),
+            "the older upload must finish before another observation starts"
+        );
+        remote.release.notify_one();
+        let newer_body = timeout(Duration::from_secs(5), arrivals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(newest.await.unwrap());
+        assert_ne!(newer_body, older_body);
+        assert!(
+            newer_body["files"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"relativePath": "newest.ts", "changeType": "UNTRACKED"}))
+        );
+        assert_eq!(*remote.latest.lock().await, Some(newer_body));
+        assert_eq!(remote.count.load(Ordering::SeqCst), 3);
+        cancel.cancel();
+        worker.await.unwrap();
+        assert!(!refresher.refresh(Duration::from_millis(50)).await);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_deadline_does_not_cancel_or_overtake_an_inflight_upload() {
+        cancelled_refresh_preserves_upload_order(false).await;
+    }
+
+    #[tokio::test]
+    async fn aborted_caller_and_expired_queue_do_not_cancel_or_overtake_an_upload() {
+        cancelled_refresh_preserves_upload_order(true).await;
     }
 }

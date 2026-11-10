@@ -6,12 +6,23 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
     time::timeout,
 };
 
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct OutputLimitExceeded;
+
+impl std::fmt::Display for OutputLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Git output exceeds analysis limit")
+    }
+}
+
+impl std::error::Error for OutputLimitExceeded {}
 
 pub(crate) struct GitProject {
     root: PathBuf,
@@ -105,8 +116,8 @@ impl GitProject {
     /// Unix time `after`, oldest first. Topological order puts every ancestor of a commit before
     /// it, so the range up to any listed commit can be checkpointed by that commit.
     ///
-    /// The date only filters: `--since` would stop at a commit with a skewed old date and drop
-    /// its recent ancestors. Git before 2.37 lacks `--since-as-filter` and falls back to it.
+    /// Filter streamed committer timestamps locally, using options available before Git 2.37.
+    /// A date traversal cutoff would drop recent ancestors of a commit with a skewed old date.
     pub(crate) async fn commit_ids(
         &self,
         since: Option<&str>,
@@ -118,31 +129,7 @@ impl GitProject {
             "Invalid Git commit ID"
         );
         let range = since.map_or_else(|| tip.to_owned(), |old| format!("{old}..{tip}"));
-        let list = |date: String| {
-            let range = range.clone();
-            async move {
-                let args = [
-                    "rev-list",
-                    "--no-merges",
-                    "--topo-order",
-                    "--reverse",
-                    &date,
-                    &range,
-                    "--",
-                ];
-                run(&self.root, &args, None, OUTPUT_LIMIT).await
-            }
-        };
-        let output = match list(format!("--since-as-filter=@{after}")).await {
-            Ok(output) => output,
-            Err(_) => list(format!("--since=@{after}")).await?,
-        };
-        let ids: Vec<String> = std::str::from_utf8(&output)?
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        ensure!(ids.iter().all(|id| valid_sha(id)), "Invalid Git commit ID");
-        Ok(ids)
+        history_ids(&self.root, &range, after).await
     }
 
     /// The listed commits in the given order. Root commits always list their files and rename
@@ -166,6 +153,7 @@ impl GitProject {
                 "--no-ext-diff",
                 "--no-color",
                 "--no-show-signature",
+                "--ignore-submodules=none",
                 "-M",
                 "-l1000",
                 "--name-status",
@@ -344,6 +332,9 @@ fn parse_status(status: &[u8]) -> Result<Vec<(RelativePath, WorkingChange)>> {
         let Ok(path) = RelativePath::new(path) else {
             continue;
         };
+        if !crate::git_scope::WorkingFiles::path_allowed(&path) {
+            continue;
+        }
         files.insert(path, WorkingChange::from_porcelain([record[0], record[1]]));
         ensure!(
             files.len() <= crate::git_scope::MAX_WORKING_FILES,
@@ -423,28 +414,72 @@ fn remote_identity(raw: &str) -> Result<String> {
     Ok(format!("{host}/{path}"))
 }
 
-async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>> {
+fn command(root: &Path, args: &[&str], input: bool) -> Command {
     use std::process::Stdio;
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(if input { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // 백그라운드 브로커는 콘솔이 없어서, 플래그 없이 git을 띄우면 3초마다 콘솔 창이 깜박인다.
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command
+}
+
+async fn history_ids(root: &Path, range: &str, after: u64) -> Result<Vec<String>> {
     timeout(Duration::from_secs(15), async {
-        let mut command = Command::new("git");
-        command
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        // 백그라운드 브로커는 콘솔이 없어서, 플래그 없이 git을 띄우면 3초마다 콘솔 창이 깜박인다.
-        #[cfg(windows)]
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        let mut child = command.spawn().context("Cannot start Git")?;
+        let mut child = command(
+            root,
+            &[
+                "rev-list",
+                "--timestamp",
+                "--no-merges",
+                "--topo-order",
+                "--reverse",
+                range,
+                "--",
+            ],
+            false,
+        )
+        .spawn()
+        .context("Cannot start Git")?;
+        let stdout = child.stdout.take().context("Cannot read Git output")?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        let mut ids = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line).await? == 0 {
+                break;
+            }
+            ensure!(line.len() <= 128, "Invalid Git history entry");
+            let text = std::str::from_utf8(&line)?.trim_end_matches(['\r', '\n']);
+            let (timestamp, sha) = text.split_once(' ').context("Invalid Git history entry")?;
+            ensure!(valid_sha(sha), "Invalid Git commit ID");
+            let timestamp: i64 = timestamp.parse().context("Invalid Git commit time")?;
+            if u64::try_from(timestamp).is_ok_and(|time| time >= after) {
+                ids.push(sha.to_owned());
+            }
+        }
+        ensure!(child.wait().await?.success(), "Git operation failed");
+        Ok(ids)
+    })
+    .await
+    .context("Git operation timed out")?
+}
+
+async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>> {
+    timeout(Duration::from_secs(15), async {
+        let mut child = command(root, args, input.is_some())
+            .spawn()
+            .context("Cannot start Git")?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("Cannot read Git output")?;
         let mut bytes = Vec::new();
@@ -452,7 +487,9 @@ async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -
         tokio::try_join!(
             async {
                 reader.read_to_end(&mut bytes).await?;
-                ensure!(bytes.len() <= limit, "Git output exceeds analysis limit");
+                if bytes.len() > limit {
+                    return Err(OutputLimitExceeded.into());
+                }
                 Ok::<_, anyhow::Error>(())
             },
             async {
@@ -507,6 +544,22 @@ mod tests {
             .flat_map(|i| format!("?? f{i}\0").into_bytes())
             .collect();
         assert!(parse_status(&many).is_err());
+    }
+
+    #[test]
+    fn status_discards_overlong_utf8_paths_before_counting_working_files() {
+        let mut status: Vec<u8> = (0..crate::git_scope::MAX_WORKING_FILES)
+            .flat_map(|i| format!("?? f{i}\0").into_bytes())
+            .collect();
+        let rejected = format!("{}/{}", "가".repeat(167), "나".repeat(167));
+        status.extend_from_slice(format!("?? {rejected}\0").as_bytes());
+        assert_eq!(
+            parse_status(&status).unwrap().len(),
+            crate::git_scope::MAX_WORKING_FILES
+        );
+        let boundary = format!("{}/{}", "가".repeat(166), "나".repeat(167));
+        let files = parse_status(format!("?? {boundary}\0").as_bytes()).unwrap();
+        assert_eq!(files[0].0.as_str(), boundary);
     }
 
     #[test]
