@@ -384,7 +384,10 @@ async fn context(origin: &str, token: &str) -> Result<Agent> {
 
 async fn owned(client: &mut UserClient, team: u64, id: u64) -> Result<Agent> {
     ensure!(valid_id(id), "Invalid Agent ID");
-    let agent: Agent = client.get(&format!("/api/v1/agents/{id}")).await?;
+    let agent = client
+        .get::<CentralAgent>(&format!("/api/v1/agents/{id}"))
+        .await?
+        .confirmed()?;
     agent.owned(client.user()?.user_id, team)?;
     ensure!(agent.agent_id == id, "Central Agent identity mismatch");
     Ok(agent)
@@ -416,7 +419,9 @@ async fn issue(
         issued.agent_id == agent.agent_id,
         "Issued Agent identity mismatch"
     );
-    let verified = context(&profile.origin, &issued.token).await?;
+    let verified = tokens::verify_reported(&profile.origin, &issued.token)
+        .await?
+        .confirmed()?;
     verified.owned(profile.user_id, profile.team_id)?;
     ensure!(
         verified.agent_id == agent.agent_id,
@@ -434,9 +439,12 @@ async fn issue(
 pub async fn list(config_path: &Path) -> Result<Vec<Agent>> {
     let mut client = UserClient::authenticated(config_path).await?;
     let team = teams::require_selected(config_path, &mut client).await?;
-    let agents: Vec<Agent> = client
-        .get(&format!("/api/v1/agents/teams/{}", team.team_id))
-        .await?;
+    let agents = client
+        .get::<Vec<CentralAgent>>(&format!("/api/v1/agents/teams/{}", team.team_id))
+        .await?
+        .into_iter()
+        .map(CentralAgent::confirmed)
+        .collect::<Result<Vec<_>>>()?;
     ensure!(
         agents
             .iter()
@@ -663,6 +671,18 @@ impl Reported {
 struct CentralAgent {
     agent: Agent,
     reported: Reported,
+}
+impl CentralAgent {
+    /// The Agent as central reported it. A reply without the part or the role tags is refused:
+    /// the defaults `Agent` would fill in are not central's values, so they must not be
+    /// compared with a request, cached in the profile or listed.
+    fn confirmed(self) -> Result<Agent> {
+        ensure!(
+            self.reported.complete(),
+            "CENTRAL_PROTOCOL_ERROR: central did not report the Agent part and role tags"
+        );
+        Ok(self.agent)
+    }
 }
 impl<'de> Deserialize<'de> for CentralAgent {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

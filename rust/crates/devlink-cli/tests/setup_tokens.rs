@@ -272,11 +272,14 @@ async fn uncertain_issuance_preserves_known_id_and_consumes_the_run_grant_withou
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_issued_identity_and_unverifiable_token_never_publish_ready() {
-    for mode in [2, 4, 9] {
+    for mode in [2, 4, 9, 10] {
         let (f, _, expected) = fixture().await;
         unissued(&f, &expected).await;
         if mode == 9 {
             f.state.wrong_context.store(true, Ordering::SeqCst);
+        } else if mode == 10 {
+            // GitHub #127: /agents/me verifies the token but leaves part/roles out.
+            f.state.agent_context_mode.store(4, Ordering::SeqCst);
         } else {
             f.state.token_mode.store(mode, Ordering::SeqCst);
         }
@@ -499,4 +502,20 @@ async fn issuance_permission_rechecks_frozen_user_team_project_and_tool() {
     assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), original);
     assert_eq!(counts(&f), (1, 0));
     assert_eq!(f.state.token_requests.load(Ordering::SeqCst), 0);
+}
+
+/// GitHub #127: the Agent cached before issuance must carry metadata central reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issuance_is_not_started_from_a_reply_without_part_and_roles() {
+    let (f, _, expected) = fixture().await;
+    unissued(&f, &expected).await;
+    let original = fs::read(agent_profile::path(&f.path)).unwrap();
+    f.state.update_mode.store(5, Ordering::SeqCst);
+    let error = tokens::ensure(&f.path, &expected, 201, true)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, FailureKind::Protocol);
+    assert_eq!(error.agent_id, Some(201));
+    assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), original);
+    assert_eq!(counts(&f), (1, 0));
 }

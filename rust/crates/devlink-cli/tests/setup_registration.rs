@@ -80,7 +80,8 @@ fn seed_pr37_agent(f: &Fixture, expected: &RegistrationContext, id: u64, owner: 
             "agentId":id,"teamId":expected.team_id,"ownerUserId":owner,
             "name":expected.project.metadata.agent_name,"roleDescription":"server profile",
             "toolType":tool,"projectName":"Different project display name",
-            "status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-11-03T00:00:00"
+            "status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-11-03T00:00:00",
+            "part":"OTHER","roles":[]
         }),
     );
 }
@@ -1047,7 +1048,8 @@ async fn explicit_owned_selection_preserves_java_long_ids_as_public_strings() {
     let id = i64::MAX as u64;
     let mut agent = json!({"agentId":id,"teamId":71,"ownerUserId":51,"name":"Remote Agent",
         "roleDescription":null,"toolType":"CODEX","projectName":"Remote project",
-        "status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-11-03T00:00:00"});
+        "status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-11-03T00:00:00",
+        "part":"OTHER","roles":[]});
     f.state.agents.lock().unwrap().insert(id, agent.clone());
     let selected = registration::ensure(&f.path, &expected, Some(Selection::Use(id)))
         .await
@@ -1247,5 +1249,38 @@ async fn review_explicit_same_id_refreshes_central_metadata_and_preserves_ready_
         }
     ));
     assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), stable);
+    assert_eq!(counts(&f), (1, 1));
+}
+
+/// GitHub #127: reuse is confirmed only against metadata central itself reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reuse_is_not_confirmed_by_a_reply_without_part_and_roles() {
+    let (f, _, expected) = fixture().await;
+    let metadata = &expected.project.metadata;
+    agent_profile::create(
+        &f.path,
+        agent_profile::CreateOptions {
+            name: metadata.agent_name.clone(),
+            role_description: metadata.role_description.clone(),
+            part: metadata.part,
+            roles: metadata.roles.clone(),
+            tool: agent_profile::Tool::Codex,
+            project_name: metadata.project_name.clone(),
+            project: expected.project.root.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let original = fs::read(agent_profile::path(&f.path)).unwrap();
+    // The saved metadata and the request are both the defaults here, so a reply read with
+    // defaults would look like a match.
+    f.state.update_mode.store(5, Ordering::SeqCst);
+    for selection in [None, Some(Selection::Create), Some(Selection::Use(201))] {
+        let error = registration::ensure(&f.path, &expected, selection)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, FailureKind::Protocol, "{selection:?}");
+        assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), original);
+    }
     assert_eq!(counts(&f), (1, 1));
 }

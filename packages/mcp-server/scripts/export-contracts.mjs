@@ -4,12 +4,13 @@ import { credentialSchema, principalSchema, sessionSchema } from '../dist/broker
 import { brokerEnvelopeSchema } from '../dist/broker/envelopes.js';
 import { contextSchema, snapshotSchema, connectionSchema } from '../dist/broker/onboarding.js';
 import { updatesSchema } from '../dist/broker/updates.js';
+import { teamContextSchema } from '../dist/broker/team-context.js';
 import { recommendationExamples, recommendationSchema } from '../dist/broker/recommendations.js';
 
 const destination = new URL('../../../contracts/local-broker/v1/', import.meta.url);
 const check = process.argv.includes('--check');
 if (!check) await mkdir(destination, { recursive: true });
-for (const [name, schema] of Object.entries({ credentials: credentialSchema, principal: principalSchema, session: sessionSchema, envelope: brokerEnvelopeSchema, context: contextSchema, snapshot: snapshotSchema, connection: connectionSchema, updates: updatesSchema, recommendation: recommendationSchema })) {
+for (const [name, schema] of Object.entries({ credentials: credentialSchema, principal: principalSchema, session: sessionSchema, envelope: brokerEnvelopeSchema, context: contextSchema, snapshot: snapshotSchema, connection: connectionSchema, 'team-context': teamContextSchema, updates: updatesSchema, recommendation: recommendationSchema })) {
   const value = { $id: `urn:devlink:local-broker:v1:${name}`, ...z.toJSONSchema(schema, { io: 'input' }) };
   const expected = `${JSON.stringify(value, null, 2)}\n`;
   const file = new URL(`${name}.schema.json`, destination);
