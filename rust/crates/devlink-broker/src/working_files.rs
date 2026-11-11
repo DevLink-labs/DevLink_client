@@ -174,6 +174,53 @@ fn revision_of(data: Option<&Value>) -> Result<String> {
     Ok(revision.hyphenated().to_string())
 }
 
+/// Wait before the next periodic attempt after consecutive failures: the check interval,
+/// doubled per failure up to the resend interval. A success clears it.
+struct Backoff {
+    base: Duration,
+    max: Duration,
+    delay: Duration,
+}
+
+/// What the periodic schedule should do after an attempt.
+#[derive(Debug, PartialEq, Eq)]
+enum Schedule {
+    /// Keep the regular check interval.
+    Keep,
+    /// The previous attempts failed and this one succeeded: return to the regular interval.
+    Recover,
+    /// Wait this long, counted from the end of the failed attempt.
+    Wait(Duration),
+}
+
+impl Backoff {
+    fn new(base: Duration, max: Duration) -> Self {
+        Self {
+            base,
+            max,
+            delay: Duration::ZERO,
+        }
+    }
+
+    fn record(&mut self, succeeded: bool) -> Schedule {
+        if succeeded {
+            let backing_off = !self.delay.is_zero();
+            self.delay = Duration::ZERO;
+            return if backing_off {
+                Schedule::Recover
+            } else {
+                Schedule::Keep
+            };
+        }
+        self.delay = if self.delay.is_zero() {
+            self.base
+        } else {
+            (self.delay * 2).min(self.max)
+        };
+        Schedule::Wait(self.delay)
+    }
+}
+
 /// Handle `find_agent` uses for the re-check. Without a running collector it does nothing.
 #[derive(Clone, Default)]
 pub struct WorkingFileRefresher(Arc<OnceLock<mpsc::Sender<oneshot::Sender<bool>>>>);
@@ -245,6 +292,7 @@ async fn collect(
     let mut tick = interval(check);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut failed = false;
+    let mut retry = Backoff::new(check, resend);
     loop {
         let reply = tokio::select! {
             _ = tick.tick() => None,
@@ -268,6 +316,14 @@ async fn collect(
             );
         }
         failed = result.is_err();
+        // After failures the next periodic check comes exactly when the backoff ends, so a
+        // central that keeps rejecting is not asked every few seconds. The re-check before
+        // find_agent arrives on its own channel and is never delayed.
+        match retry.record(result.is_ok()) {
+            Schedule::Keep => {}
+            Schedule::Recover => tick.reset(),
+            Schedule::Wait(delay) => tick.reset_after(delay),
+        }
         if let Some(reply) = reply {
             let _ = reply.send(matches!(result, Ok(true)));
         }
@@ -350,6 +406,8 @@ mod tests {
         uploads: mpsc::UnboundedSender<Upload>,
         revision: std::sync::Mutex<String>,
         log: std::sync::Mutex<Vec<String>>,
+        /// When each lookup arrived.
+        lookup_times: std::sync::Mutex<Vec<std::time::Instant>>,
         /// Another writer moves the revision right after the next lookup is answered.
         race_next_lookup: std::sync::atomic::AtomicBool,
         /// Written into the working tree before the next 412 is returned.
@@ -365,6 +423,7 @@ mod tests {
                 uploads,
                 revision: std::sync::Mutex::new(Uuid::new_v4().to_string()),
                 log: std::sync::Mutex::default(),
+                lookup_times: std::sync::Mutex::default(),
                 race_next_lookup: Default::default(),
                 write_on_conflict: Default::default(),
                 legacy: Default::default(),
@@ -393,6 +452,11 @@ mod tests {
 
     async fn lookup(State(central): State<Arc<Central>>) -> axum::response::Response {
         use axum::response::IntoResponse;
+        central
+            .lookup_times
+            .lock()
+            .unwrap()
+            .push(std::time::Instant::now());
         if central.legacy.load(Ordering::SeqCst) {
             central.log.lock().unwrap().push("GET 405".into());
             return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -781,6 +845,289 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_agent_route_uploads_the_current_working_files_before_asking_central() {
+        const LOCAL: &str = "local-mcp-token";
+        async fn me() -> Json<Value> {
+            Json(
+                json!({"success":true,"data":{"agentId":12,"teamId":7,"ownerUserId":3,"name":"Me",
+                "roleDescription":null,"toolType":"CODEX","projectName":"Demo","status":"ONLINE",
+                "lastSeenAt":null,"createdAt":"2026-10-29T00:00:00"}}),
+            )
+        }
+        async fn recommend(State(central): State<Arc<Central>>) -> Json<Value> {
+            central.log.lock().unwrap().push("RECOMMEND".into());
+            Json(
+                json!({"success":true,"data":{"status":"INSUFFICIENT_EVIDENCE",
+                "gitCoverage":{"state":"AVAILABLE","reason":null,"workingState":"FRESH"},
+                "evaluatedAt":"2026-11-11T00:00:00Z","candidates":[],
+                "insufficientReason":"NO_ELIGIBLE_AGENTS"}}),
+            )
+        }
+        let repo = repository();
+        let profile = tempfile::tempdir().unwrap();
+        let config = profile.path().join("config.json");
+        crate::config::init(&config).unwrap();
+        let (sender, mut uploads) = mpsc::unbounded_channel();
+        let state = Central::new(sender);
+        let central_url = serve(
+            Router::new()
+                .route(ROUTE, get(lookup).put(replace))
+                .route("/api/v1/agents/me", get(me))
+                .route(
+                    "/api/v1/teams/{team}/agents/recommendations",
+                    axum::routing::post(recommend),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let central = connected(3).await;
+        let client = TaskClient::new(&central_url, TOKEN).unwrap();
+        let refresher = WorkingFileRefresher::default();
+        let cancel = CancellationToken::new();
+
+        // The collector checks only every minute, so the second upload below can only come from
+        // the re-check of the find_agent route.
+        let collector = collect(
+            binding(repo.path()),
+            DEFAULT_REMOTE.into(),
+            central.clone(),
+            client.clone(),
+            refresher.clone(),
+            (Duration::from_secs(60), INTERVAL),
+        );
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = collector => {},
+                }
+            }
+        });
+        timeout(Duration::from_secs(10), uploads.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let sessions = crate::sessions::SessionManager::new(
+            Arc::new(crate::sessions::ReadyIdentityProvider::new(central.clone())),
+            central.clone(),
+        );
+        let context = crate::context_api::ContextReader::new(
+            central.clone(),
+            sessions.clone(),
+            config.clone(),
+        )
+        .unwrap();
+        let token = Arc::new(LOCAL.to_owned());
+        let app = crate::session_api::router(token.clone(), sessions.clone()).merge(
+            crate::agent_api::router_with_working_files(
+                token,
+                sessions,
+                client,
+                cancel.clone(),
+                context,
+                refresher,
+            ),
+        );
+        let broker = serve(app).await.replace("ws://", "http://");
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let post = |path: &str, body: Value| {
+            http.post(format!("{broker}{path}"))
+                .bearer_auth(LOCAL)
+                .json(&body)
+                .send()
+        };
+        let session: Value = post(
+            "/v1/sessions",
+            json!({"requestId":"claim","instanceId":"host","mode":"fresh","agentId":"12"}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let mut context = session["data"]["principal"].clone();
+        context["sessionId"] = session["data"]["sessionId"].clone();
+
+        std::fs::write(repo.path().join("for-find.ts"), "f").unwrap();
+        let before = state.log().len();
+        let response = post(
+            "/v1/agents/find",
+            json!({"requestId":Uuid::new_v4().to_string(),"mcpRequestId":7,
+                "operation":"find_agent","arguments":{"question":"로그인 오류"},"context":context}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 200, "{:?}", response.text().await);
+        let log = state.log();
+        assert_eq!(
+            log[before..]
+                .iter()
+                .map(|line| &line[..3])
+                .collect::<Vec<_>>(),
+            ["GET", "PUT", "REC"],
+            "{log:?}"
+        );
+        let refreshed = uploads.try_recv().unwrap();
+        assert!(
+            refreshed.body["files"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"relativePath": "for-find.ts", "changeType": "UNTRACKED"}))
+        );
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    fn lookups(state: &Central) -> usize {
+        state
+            .log()
+            .iter()
+            .filter(|line| line.starts_with("GET"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_back_off_periodic_checks_but_not_the_find_agent_recheck() {
+        let repo = repository();
+        let (sender, mut uploads) = mpsc::unbounded_channel();
+        let state = Central::new(sender);
+        // Every lookup fails, as on a central without the working-file API.
+        state.legacy.store(true, Ordering::SeqCst);
+        let url = central_with(state.clone()).await;
+        let refresher = WorkingFileRefresher::default();
+        let cancel = CancellationToken::new();
+        let (check, resend) = (Duration::from_millis(100), Duration::from_secs(2));
+        let collector = collect(
+            binding(repo.path()),
+            DEFAULT_REMOTE.into(),
+            connected(3).await,
+            TaskClient::new(&url, TOKEN).unwrap(),
+            refresher.clone(),
+            (check, resend),
+        );
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = collector => {},
+                }
+            }
+        });
+
+        // Measure from the first failure, so a slow start does not shorten the window.
+        timeout(Duration::from_secs(10), async {
+            while lookups(&state) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the collector looks the revision up");
+        let start = lookups(&state);
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        // Without the backoff a 100 ms check would look the revision up about 25 more times;
+        // with it the waits are 0.1, 0.2, 0.4, 0.8 and 1.6 s.
+        let failed = lookups(&state);
+        assert!(
+            (start + 1..=start + 6).contains(&failed),
+            "{start} then {failed} lookups"
+        );
+
+        // The re-check before find_agent runs at once despite the backoff.
+        assert!(!refresher.refresh(Duration::from_secs(2)).await);
+        assert!(
+            (failed + 1..=failed + 2).contains(&lookups(&state)),
+            "{:?}",
+            state.log()
+        );
+
+        // Once central answers again, the next due check succeeds and clears the backoff, so
+        // a later change goes out at the next check.
+        state.legacy.store(false, Ordering::SeqCst);
+        timeout(Duration::from_secs(5), uploads.recv())
+            .await
+            .expect("the backoff is at most the resend interval")
+            .unwrap();
+        std::fs::write(repo.path().join("after.ts"), "a").unwrap();
+        let changed = timeout(Duration::from_millis(1_500), uploads.recv())
+            .await
+            .expect("no backoff after a success")
+            .unwrap();
+        assert!(
+            changed.body["files"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"relativePath": "after.ts", "changeType": "UNTRACKED"}))
+        );
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn backoff_doubles_from_the_check_interval_up_to_the_resend_interval() {
+        let second = Duration::from_secs;
+        let mut retry = Backoff::new(second(3), second(30));
+        assert_eq!(retry.record(true), Schedule::Keep);
+        let waits: Vec<_> = (0..6).map(|_| retry.record(false)).collect();
+        assert_eq!(
+            waits,
+            [3, 6, 12, 24, 30, 30].map(|wait| Schedule::Wait(second(wait)))
+        );
+        assert_eq!(retry.record(true), Schedule::Recover);
+        assert_eq!(retry.record(true), Schedule::Keep);
+        assert_eq!(retry.record(false), Schedule::Wait(second(3)));
+    }
+
+    #[tokio::test]
+    async fn the_next_attempt_after_a_failure_comes_when_the_backoff_ends() {
+        let repo = repository();
+        let (sender, _uploads) = mpsc::unbounded_channel();
+        let state = Central::new(sender);
+        state.legacy.store(true, Ordering::SeqCst);
+        let url = central_with(state.clone()).await;
+        let cancel = CancellationToken::new();
+        let check = Duration::from_secs(1);
+        let collector = collect(
+            binding(repo.path()),
+            DEFAULT_REMOTE.into(),
+            connected(3).await,
+            TaskClient::new(&url, TOKEN).unwrap(),
+            WorkingFileRefresher::default(),
+            (check, Duration::from_secs(8)),
+        );
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = collector => {},
+                }
+            }
+        });
+        timeout(Duration::from_secs(15), async {
+            while state.lookup_times.lock().unwrap().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("three lookups");
+        cancel.cancel();
+        task.await.unwrap();
+        let times = state.lookup_times.lock().unwrap().clone();
+        let gaps = [times[1] - times[0], times[2] - times[1]];
+        // The waits are 1 s and 2 s from the end of each failed attempt; the gap adds only the
+        // attempt's own Git read and HTTP time. Waiting for the next whole check interval
+        // instead would make them about 2 s and 3 s.
+        assert!(gaps[0] >= check && gaps[0] < check * 17 / 10, "{gaps:?}");
+        assert!(
+            gaps[1] >= check * 2 && gaps[1] < check * 27 / 10,
+            "{gaps:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn central_without_revisions_never_receives_an_unprotected_upload() {
         async fn old_revision(State(central): State<Arc<Central>>) -> Json<Value> {
             central.log.lock().unwrap().push("GET".into());
@@ -826,7 +1173,15 @@ mod tests {
             refresher.clone(),
             cancel.clone(),
         ));
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait until the collector is running, so the refusal below comes from the identity
+        // check and not from a collector that has not started yet.
+        timeout(Duration::from_secs(10), async {
+            while refresher.0.get().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the collector registers its re-check channel");
         assert!(!refresher.refresh(REFRESH_LIMIT).await);
         assert!(uploads.try_recv().is_err());
         cancel.cancel();
@@ -853,7 +1208,9 @@ mod tests {
         let (sender, mut uploads) = mpsc::unbounded_channel();
         let url = central(sender).await;
         let cancel = CancellationToken::new();
-        let (check, resend) = (Duration::from_millis(100), Duration::from_secs(2));
+        // The resend interval leaves room for a slow Git or machine; the change below only has
+        // to arrive before it.
+        let (check, resend) = (Duration::from_millis(100), Duration::from_secs(5));
         let collector = collect(
             binding(repo.path()),
             DEFAULT_REMOTE.into(),
@@ -884,7 +1241,7 @@ mod tests {
 
         // A change goes out at the next check, long before the interval.
         std::fs::write(repo.path().join("later.ts"), "l").unwrap();
-        let changed = tokio::time::timeout(Duration::from_millis(1_000), uploads.recv())
+        let changed = tokio::time::timeout(Duration::from_secs(3), uploads.recv())
             .await
             .expect("a change must not wait for the interval")
             .unwrap();
@@ -895,7 +1252,7 @@ mod tests {
 
         // Still unchanged: the same list is sent again once the interval passes.
         let changed_at = Instant::now();
-        let again = tokio::time::timeout(Duration::from_secs(5), uploads.recv())
+        let again = tokio::time::timeout(Duration::from_secs(10), uploads.recv())
             .await
             .unwrap()
             .unwrap();

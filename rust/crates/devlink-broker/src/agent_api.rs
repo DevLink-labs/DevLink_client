@@ -19,7 +19,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
@@ -309,6 +309,36 @@ fn context_error(error: crate::context_api::ContextFailure) -> TaskError {
         },
     }
 }
+/// Room kept in `find`'s local budget for the session check after the central call.
+const FIND_MARGIN: Duration = Duration::from_millis(500);
+
+/// Time the working-file re-check may take before `find`'s central call: whatever the
+/// remaining budget leaves after the central call's own limit and a margin, at most
+/// `REFRESH_LIMIT`. A slow re-check then cannot make a timely central answer miss the budget.
+fn refresh_limit(remaining: Duration, central: Duration) -> Duration {
+    remaining
+        .saturating_sub(central + FIND_MARGIN)
+        .min(crate::working_files::REFRESH_LIMIT)
+}
+
+#[cfg(test)]
+#[test]
+fn find_keeps_the_central_limit_inside_its_budget() {
+    let second = Duration::from_secs;
+    // Default 8 s budget and 5 s central limit: 2.5 s for the re-check.
+    assert_eq!(
+        refresh_limit(LOCAL_BUDGET, second(5)),
+        Duration::from_millis(2_500)
+    );
+    // Plenty of budget: still at most REFRESH_LIMIT.
+    assert_eq!(
+        refresh_limit(LOCAL_BUDGET, second(2)),
+        crate::working_files::REFRESH_LIMIT
+    );
+    // No room left: the re-check is skipped instead of delaying the central call.
+    assert_eq!(refresh_limit(second(4), second(5)), Duration::ZERO);
+}
+
 /// S15P31D108-188: relay the central recommendation for the bound Agent's team.
 /// Read-only; the result never selects a recipient or creates a task.
 async fn find(State(api): State<Api>, request: Request) -> Response {
@@ -332,9 +362,12 @@ async fn find(State(api): State<Api>, request: Request) -> Response {
             .await
             .map_err(session_error)?;
         // IDX-3-02: one more working-file observation before scoring; on failure central uses
-        // the last valid one.
+        // the last valid one. It only gets the time the central call does not need.
         api.working_files
-            .refresh(crate::working_files::REFRESH_LIMIT)
+            .refresh(refresh_limit(
+                deadline.saturating_duration_since(Instant::now()),
+                api.central.timeout(),
+            ))
             .await;
         let data = api.central.find_agents(&actor, question, repo_key).await?;
         api.sessions

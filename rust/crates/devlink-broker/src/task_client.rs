@@ -113,6 +113,10 @@ impl TaskClient {
     pub fn origin(&self) -> String {
         self.origin.to_string()
     }
+    /// Time limit of one central call made by this client.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
     /// 기본 타임아웃(5초)으로 TaskClient 초기화
     pub fn new(server_url: &str, token: &str) -> Result<Self> {
         Self::with_timeout(server_url, token, Duration::from_secs(5))
