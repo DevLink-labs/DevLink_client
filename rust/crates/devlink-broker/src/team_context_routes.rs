@@ -16,7 +16,8 @@ use std::sync::Arc;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-/// Central `AgentPart` values accepted from callers.
+/// The parts the central context API knows. Checked for caller input here and for the
+/// verified Agent's own part in `TaskClient::team_context`.
 pub const PARTS: [&str; 4] = ["FRONTEND", "BACKEND", "INFRA", "OTHER"];
 
 #[derive(Clone)]
