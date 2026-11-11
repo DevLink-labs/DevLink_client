@@ -44,6 +44,8 @@ pub enum FailureKind {
 pub enum PortProblem {
     Unavailable,
     AssignmentFailed,
+    RangeQueryTimedOut,
+    RangeQueryFailed,
 }
 
 impl PortProblem {
@@ -55,6 +57,23 @@ impl PortProblem {
             Self::AssignmentFailed => {
                 "Setup could not assign a broker port outside the system's dynamic TCP port ranges. Check the active IPv4 TCP ranges and port restrictions, or set an available fixed port with devlink --config <FILE> config set localPort <FREE_PORT> and retry."
             }
+            Self::RangeQueryTimedOut => {
+                "Setup could not read the system's dynamic TCP port ranges in time, so no broker port was chosen. The system may be busy: run the command again, or set an available fixed port with devlink --config <FILE> config set localPort <FREE_PORT> and retry."
+            }
+            Self::RangeQueryFailed => {
+                "Setup could not read the system's dynamic TCP port ranges, so no broker port was chosen. Check the active IPv4 TCP ranges, or set an available fixed port with devlink --config <FILE> config set localPort <FREE_PORT> and retry."
+            }
+        }
+    }
+
+    /// The problem a broker child reported through its exit code, if it was a port failure.
+    fn from_child_exit(code: Option<i32>) -> Option<Self> {
+        match code? {
+            broker::PortFailure::UNAVAILABLE_EXIT => Some(Self::Unavailable),
+            broker::PortFailure::ASSIGNMENT_FAILED_EXIT => Some(Self::AssignmentFailed),
+            broker::PortFailure::RANGE_QUERY_TIMED_OUT_EXIT => Some(Self::RangeQueryTimedOut),
+            broker::PortFailure::RANGE_QUERY_FAILED_EXIT => Some(Self::RangeQueryFailed),
+            _ => None,
         }
     }
 }
@@ -230,6 +249,7 @@ pub fn startup_timeout(path: &Path) -> Duration {
     Duration::from_secs(8)
         + credentials::startup_validation_allowance()
         + crate::agent_profile::startup_allowance(path)
+        + broker::port_startup_allowance(path)
 }
 
 /// The caller supplies the CLI executable; current_exe in a library can be a test
@@ -323,16 +343,9 @@ async fn wait_for_start(
             .try_wait()
             .map_err(|e| classify(e.into(), FailureKind::ChildExited, path, Outcome::Unknown))?
         {
-            let (kind, outcome) = match exit.code() {
-                Some(broker::PortFailure::UNAVAILABLE_EXIT) => (
-                    FailureKind::Port(PortProblem::Unavailable),
-                    Outcome::NotApplied,
-                ),
-                Some(broker::PortFailure::ASSIGNMENT_FAILED_EXIT) => (
-                    FailureKind::Port(PortProblem::AssignmentFailed),
-                    Outcome::NotApplied,
-                ),
-                _ => (FailureKind::ChildExited, Outcome::Unknown),
+            let (kind, outcome) = match PortProblem::from_child_exit(exit.code()) {
+                Some(problem) => (FailureKind::Port(problem), Outcome::NotApplied),
+                None => (FailureKind::ChildExited, Outcome::Unknown),
             };
             return Err(failure(kind, path, outcome).into());
         }
