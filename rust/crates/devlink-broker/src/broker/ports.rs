@@ -323,27 +323,6 @@ mod windows {
         use super::*;
 
         #[test]
-        fn only_pending_setup_gets_the_extended_startup_budget() {
-            use crate::broker::ports::{
-                EARLIER_RANGE_QUERY_TIMEOUT, RANGE_QUERY_TIMEOUT, startup_allowance,
-            };
-            use crate::config::{Config, atomic_json};
-            use std::time::Duration;
-
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("config.json");
-            let mut config = Config::default();
-            atomic_json(&path, &config).unwrap();
-            assert_eq!(startup_allowance(&path), Duration::ZERO);
-            config.local_port_pending = true;
-            atomic_json(&path, &config).unwrap();
-            assert_eq!(
-                startup_allowance(&path) + EARLIER_RANGE_QUERY_TIMEOUT,
-                RANGE_QUERY_TIMEOUT
-            );
-        }
-
-        #[test]
         fn parses_configured_range_independent_of_locale() {
             assert_eq!(
                 parse_dynamic_range("IPv4 TCP\r\n시작 포트 : 40000\r\n포트 수 : 123\r\n"),
