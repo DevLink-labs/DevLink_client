@@ -59,7 +59,7 @@ node packages/mcp-server/scripts/verify-hosts.mjs --host both `
 
 | 시나리오 | 검사 내용 |
 | --- | --- |
-| 초기화·목록·ping | 당시 Claude init에서 도구 8개를 확인했다. 현재 중앙 왕복·알림 검증기는 필수 도구 14개의 이름이 목록에 있는지 확인한다. 두 Host에서 ping과 업무 도구 7개를 실제 호출했고, ping의 브로커 요청은 0건이었다. |
+| 초기화·목록·ping | 당시 Claude init에서 도구 8개를 확인했다. 현재 중앙 왕복·알림 검증기는 필수 도구 14개의 이름이 목록에 있는지 확인한다. 이 문서의 `verify-hosts`는 2026-11-11부터 허용 목록(`hostTools`, 현재 10개)이 Claude init 목록에 모두 있는지만 확인한다. 서버가 그 밖의 도구를 더 제공해도 통과하고, 허용 목록 밖 호출은 호출 수·순서 검사가 실패시킨다(GitHub #125). 이 변경 뒤로는 아직 실제 Host로 실행하지 않았다. 두 Host에서 ping과 업무 도구 7개를 실제 호출했고, ping의 브로커 요청은 0건이었다. |
 | 등록·목록·생성·조회 | Host별 `userId/teamId/agentId/toolType`을 HTTP 테스트 브로커에서 검증, 생성 직후 PENDING과 전달 UNKNOWN 구분 |
 | FAILED 입력 오류 | reason 생략을 의도적으로 호출, SDK 입력 오류가 Host에 노출되고 브로커에 도달하지 않음 |
 | 명시적 상태 전이·완료 | IN_PROGRESS 및 complete_task만 전달, 장애 때문에 FAILED를 자동 전송하거나 create_task를 재전송하지 않음 |
