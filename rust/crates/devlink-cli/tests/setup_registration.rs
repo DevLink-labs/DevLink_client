@@ -702,10 +702,26 @@ async fn setup_reports_required_input_known_ids_and_token_boundary_without_start
 struct InteractiveRecovery;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_ignoring_routing_metadata_leaves_creation_unknown_without_token_or_retry() {
+    unconfirmed_metadata_leaves_creation_unknown(5, true).await;
+}
+// GitHub #127: the default request (OTHER, no tags) equals what a missing field reads as
+// locally, so a reply without the fields must leave that creation unknown as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_omitting_routing_metadata_leaves_a_default_creation_unknown() {
+    unconfirmed_metadata_leaves_creation_unknown(5, false).await;
+}
+// The central reports both fields, but with its defaults instead of the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_storing_defaults_leaves_a_requested_creation_unknown() {
+    unconfirmed_metadata_leaves_creation_unknown(6, true).await;
+}
+async fn unconfirmed_metadata_leaves_creation_unknown(create_mode: u8, requested: bool) {
     let (f, _, mut expected) = fixture().await;
-    expected.project.metadata.part = devlink_broker::agent_metadata::AgentPart::Backend;
-    expected.project.metadata.roles = vec!["API".into()];
-    f.state.create_mode.store(5, Ordering::SeqCst);
+    if requested {
+        expected.project.metadata.part = devlink_broker::agent_metadata::AgentPart::Backend;
+        expected.project.metadata.roles = vec!["API".into()];
+    }
+    f.state.create_mode.store(create_mode, Ordering::SeqCst);
     for _ in 0..2 {
         let result = registration::ensure(&f.path, &expected, Some(Selection::Create))
             .await

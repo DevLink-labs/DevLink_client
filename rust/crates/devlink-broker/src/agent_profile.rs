@@ -514,9 +514,9 @@ pub async fn create(config_path: &Path, mut options: CreateOptions) -> Result<Va
         },
     };
     save(config_path, &profile)?; // Crash/unknown HTTP outcome must never trigger another creation.
-    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name,"part":options.part,"roles":options.roles}),prepared).await;
-    let agent = match result {
-        Ok(agent) => agent,
+    let result=client.post_prepared::<CentralAgent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name,"part":options.part,"roles":options.roles}),prepared).await;
+    let CentralAgent { agent, reported } = match result {
+        Ok(created) => created,
         Err(error) => {
             if user_auth::rejection_status(&error).is_some_and(|s| (400..500).contains(&s)) {
                 profile.state = State::Vacant;
@@ -528,8 +528,10 @@ pub async fn create(config_path: &Path, mut options: CreateOptions) -> Result<Va
         }
     };
     agent.owned(user, team.team_id)?;
+    // A reply without part/roles reads as OTHER and no tags, which is also the default
+    // request. Only values central actually sent confirm the creation (GitHub #127).
     ensure!(
-        agent.part == options.part && agent.roles == options.roles,
+        reported.complete() && agent.part == options.part && agent.roles == options.roles,
         "Agent creation metadata not confirmed; inspect agent list before retrying"
     );
     profile.state = State::NeedsToken {
@@ -650,6 +652,12 @@ fn update_fault(kind: UpdateFaultKind, message: &'static str) -> anyhow::Error {
 pub(crate) struct Reported {
     part: bool,
     roles: bool,
+}
+impl Reported {
+    /// Central sent both routing fields, so neither value is a local default.
+    fn complete(self) -> bool {
+        self.part && self.roles
+    }
 }
 /// A central Agent reply together with what it actually reported.
 struct CentralAgent {

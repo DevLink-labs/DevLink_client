@@ -126,6 +126,20 @@ async fn invalid_creation_metadata_never_contacts_central() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_ignoring_part_does_not_issue_a_token_or_repeat_creation() {
+    creation_is_not_confirmed(5, &["--part", "BACKEND", "--roles", "API"]).await;
+}
+// GitHub #127: OTHER and no tags are what a missing field reads as locally, so a reply
+// without the fields must not confirm that request either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_omitting_part_and_roles_does_not_confirm_a_default_request() {
+    creation_is_not_confirmed(5, &[]).await;
+}
+// The central reports both fields, but with its defaults instead of the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_storing_defaults_does_not_confirm_a_requested_part_or_roles() {
+    creation_is_not_confirmed(6, &["--part", "BACKEND", "--roles", "API"]).await;
+}
+async fn creation_is_not_confirmed(create_mode: u8, metadata: &[&str]) {
     let f = Fixture::new().await;
     assert!(f.login().status.success());
     assert!(
@@ -133,8 +147,8 @@ async fn server_ignoring_part_does_not_issue_a_token_or_repeat_creation() {
             .status
             .success()
     );
-    f.state.create_mode.store(5, Ordering::SeqCst);
-    let args = [
+    f.state.create_mode.store(create_mode, Ordering::SeqCst);
+    let mut args = vec![
         "agent",
         "create",
         "--name",
@@ -145,14 +159,14 @@ async fn server_ignoring_part_does_not_issue_a_token_or_repeat_creation() {
         "Project",
         "--project",
         f._root.path().to_str().unwrap(),
-        "--part",
-        "BACKEND",
-        "--roles",
-        "API",
     ];
-    for _ in 0..2 {
+    args.extend_from_slice(metadata);
+    // The first run stops at the unconfirmed reply; the rerun finds the pending creation
+    // and refuses to create again.
+    for reason in ["metadata not confirmed", "AGENT_CREATION_UNKNOWN"] {
         let output = f.run(&args, None);
         assert!(!output.status.success());
+        assert!(text(&output).contains(reason), "{}", text(&output));
         assert_no_secrets(&output);
     }
     assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 1);

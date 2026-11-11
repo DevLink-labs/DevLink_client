@@ -496,7 +496,7 @@ pub async fn ensure_tracked(
     })?;
     *creation_pending = true;
     let response = client
-        .post_prepared::<Agent>(
+        .post_prepared::<CentralAgent>(
             &format!("/api/v1/agents/teams/{}", expected.team_id),
             json!({"name":metadata.agent_name,"projectName":metadata.project_name,
             "roleDescription":metadata.role_description,"toolType":tool(expected),
@@ -504,8 +504,8 @@ pub async fn ensure_tracked(
             prepared,
         )
         .await;
-    let agent = match response {
-        Ok(agent) => agent,
+    let CentralAgent { agent, reported } = match response {
+        Ok(created) => created,
         Err(error) => {
             if user_auth::rejection_status(&error).is_some_and(|s| (400..500).contains(&s)) {
                 profile.state = State::Vacant;
@@ -527,7 +527,12 @@ pub async fn ensure_tracked(
         }
     };
     // An untrusted success remains pending; never bind a different principal or DTO.
-    if validate_agent(&agent, expected).is_err() || !matches_metadata(&agent, expected) {
+    // A reply without part/roles reads as the default request, so only values central
+    // actually sent can match (GitHub #127).
+    if validate_agent(&agent, expected).is_err()
+        || !reported.complete()
+        || !matches_metadata(&agent, expected)
+    {
         return Ok(Registration {
             state: RegistrationState::CreationUnknown,
             agent_id: None,
