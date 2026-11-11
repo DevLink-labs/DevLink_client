@@ -499,6 +499,15 @@ impl TaskClient {
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
+    /// Agent task detail (`GET /api/v1/tasks/{taskId}`): the `data` of a 200 answer.
+    /// Central lets only members of the task's team read it; callers check the IDs.
+    pub(crate) async fn task_detail(&self, task_id: u64) -> Result<Value, TaskError> {
+        if numeric_id(&task_id.to_string()).is_none() {
+            return Err(TaskError::rejected("VALIDATION_FAILED", 400));
+        }
+        self.read(&format!("/api/v1/tasks/{task_id}")).await
+    }
+
     async fn read(&self, path: &str) -> Result<Value, TaskError> {
         let (status, envelope) = self.request(path, None).await?;
         if status != 200 || !envelope.success {

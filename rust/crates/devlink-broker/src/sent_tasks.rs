@@ -3,11 +3,17 @@
 //! The broker records each task this Agent created. When a recorded task has had no
 //! COMPLETED, FAILED or REJECTED notification for `taskOverdueMinutes`, one
 //! `TASK_OVERDUE` event is appended for the local update feed. Central task state is
-//! never changed, nothing is cancelled or retried, and a missed central notification can
-//! make a finished task look overdue: `get_task_result` stays authoritative.
+//! never changed and nothing is cancelled or retried. The same records drive the final
+//! status recovery in `sent_task_recovery`: right before a task is decided, and on every
+//! central READY, a task without a retained final status is looked up in central, so a
+//! final status missed while the broker was off is stored and never reported as overdue.
+//! `get_task_result` stays authoritative.
 use crate::{
-    central::endpoint_url, config, notifications::Notifications, private_file,
-    task_operations::TaskStatus,
+    central::endpoint_url,
+    config,
+    notifications::{Notifications, is_final},
+    private_file,
+    sent_task_recovery::Recovery,
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -39,7 +45,8 @@ struct SentTask {
     task_id: u64,
     /// Local time the broker saw the successful create (milliseconds since the epoch).
     created_at_ms: u64,
-    /// Overdue was decided (reported, or the task already had a final status).
+    /// Overdue was decided (reported, the task already had a final status, or it was
+    /// recorded while the check was off).
     settled: bool,
 }
 
@@ -142,6 +149,9 @@ pub struct Ledger {
     /// must not let this broker's queued records restore it, and while the broker runs
     /// the file cannot be cleared, so no valid record is lost by refusing.
     generation: Option<u64>,
+    /// `taskOverdueMinutes > 0`. Off, tasks are still recorded for final status recovery,
+    /// but already settled, so enabling the check later never flags them at once.
+    overdue: bool,
 }
 impl Ledger {
     pub fn new(config_path: &Path, server_url: &str) -> Result<Self> {
@@ -155,7 +165,13 @@ impl Ledger {
                     .and_then(|_guard| read(&path).ok())
                     .map(|s| s.generation)
             },
+            overdue: true,
         })
+    }
+    /// Record for final status recovery only (`taskOverdueMinutes = 0`).
+    pub fn without_overdue(mut self) -> Self {
+        self.overdue = false;
+        self
     }
     /// The synchronous write behind `created`, exposed for ordering tests.
     pub fn record_now(
@@ -170,11 +186,14 @@ impl Ledger {
         })?;
         record_in(
             &self.config_path,
-            &self.origin,
-            requester_agent_id,
-            team_id,
-            task_id,
-            created_at_ms,
+            SentTask {
+                origin: self.origin.to_string(),
+                requester_agent_id,
+                team_id,
+                task_id,
+                created_at_ms,
+                settled: !self.overdue,
+            },
             Some(generation),
         )
     }
@@ -199,29 +218,25 @@ pub fn record(
 ) -> Result<()> {
     record_in(
         config_path,
-        origin,
-        requester_agent_id,
-        team_id,
-        task_id,
-        created_at_ms,
+        SentTask {
+            origin: origin.to_string(),
+            requester_agent_id,
+            team_id,
+            task_id,
+            created_at_ms,
+            settled: false,
+        },
         None,
     )
 }
 /// As `record`, but refused when the ledger was cleared after `generation` was read.
-fn record_in(
-    config_path: &Path,
-    origin: &str,
-    requester_agent_id: u64,
-    team_id: u64,
-    task_id: u64,
-    created_at_ms: u64,
-    generation: Option<u64>,
-) -> Result<()> {
+/// `task.settled` records it already decided (recovery only).
+fn record_in(config_path: &Path, mut task: SentTask, generation: Option<u64>) -> Result<()> {
     ensure!(
-        valid_id(requester_agent_id) && valid_id(team_id) && valid_id(task_id),
+        valid_id(task.requester_agent_id) && valid_id(task.team_id) && valid_id(task.task_id),
         "Invalid sent task"
     );
-    let origin = endpoint_url(origin)?.to_string();
+    task.origin = endpoint_url(&task.origin)?.to_string();
     let path = path(config_path);
     let _guard = locked(&path)?;
     let mut snapshot = read(&path)?;
@@ -230,35 +245,26 @@ fn record_in(
         "Sent task ledger was cleared after this broker started"
     );
     if snapshot.tasks.iter().any(|t| {
-        t.origin == origin && t.requester_agent_id == requester_agent_id && t.task_id == task_id
+        t.origin == task.origin
+            && t.requester_agent_id == task.requester_agent_id
+            && t.task_id == task.task_id
     }) {
         return Ok(());
     }
     // A replay after the record was pruned must not lead to a second advisory.
     let reported = snapshot.events.iter().any(|e| {
-        e.origin == origin && e.requester_agent_id == requester_agent_id && e.task_id == task_id
+        e.origin == task.origin
+            && e.requester_agent_id == task.requester_agent_id
+            && e.task_id == task.task_id
     });
     if snapshot.tasks.len() >= MAX_TASKS {
         // Prefer forgetting tasks already decided; otherwise the oldest record.
         let index = snapshot.tasks.iter().position(|t| t.settled).unwrap_or(0);
         snapshot.tasks.remove(index);
     }
-    snapshot.tasks.push(SentTask {
-        origin,
-        requester_agent_id,
-        team_id,
-        task_id,
-        created_at_ms,
-        settled: reported,
-    });
+    task.settled |= reported;
+    snapshot.tasks.push(task);
     private_file::write(&path, &snapshot, MAX_BYTES)
-}
-
-fn finished(status: TaskStatus) -> bool {
-    matches!(
-        status,
-        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Rejected
-    )
 }
 
 /// Decide every recorded task past `minutes`: append one overdue event if no final
@@ -283,7 +289,7 @@ pub fn scan(config_path: &Path, minutes: u64, now_ms: u64) -> Result<usize> {
         if !finished_by_scope.contains_key(&key) {
             let done = Notifications::events_config(config_path, &key.0, key.1)?
                 .into_iter()
-                .filter(|event| finished(event.status()))
+                .filter(|event| is_final(event.status()))
                 .map(|event| event.task_id())
                 .collect();
             finished_by_scope.insert(key.clone(), done);
@@ -351,18 +357,108 @@ pub fn clear_config(config_path: &Path) -> Result<()> {
     )
 }
 
-/// Background check every minute while the broker runs. Failures are retried next round.
-pub async fn run(config_path: PathBuf, minutes: u64, cancel: CancellationToken) {
-    if minutes == 0 {
+/// A recorded task of one requester without a retained final status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unfinished {
+    pub task_id: u64,
+    pub team_id: u64,
+    pub created_at_ms: u64,
+}
+
+/// Recorded tasks of `agent` under `origin` that have no final status notification. With
+/// `due = Some((minutes, now))`, only those the next `scan` would decide. Read-only, like
+/// the update feed: the ledger and notifications are replaced atomically.
+pub(crate) fn unfinished(
+    config_path: &Path,
+    origin: &str,
+    agent: u64,
+    due: Option<(u64, u64)>,
+) -> Result<Vec<Unfinished>> {
+    let origin = endpoint_url(origin)?.to_string();
+    let snapshot = read(&path(config_path))?;
+    let done: std::collections::HashSet<u64> =
+        Notifications::events_config(config_path, &origin, agent)?
+            .into_iter()
+            .filter(|event| is_final(event.status()))
+            .map(|event| event.task_id())
+            .collect();
+    Ok(snapshot
+        .tasks
+        .into_iter()
+        .filter(|t| t.origin == origin && t.requester_agent_id == agent)
+        .filter(|t| !done.contains(&t.task_id))
+        .filter(|t| {
+            due.is_none_or(|(minutes, now)| {
+                minutes > 0
+                    && !t.settled
+                    && now
+                        >= t.created_at_ms
+                            .saturating_add(minutes.saturating_mul(60_000))
+            })
+        })
+        .map(|t| Unfinished {
+            task_id: t.task_id,
+            team_id: t.team_id,
+            created_at_ms: t.created_at_ms,
+        })
+        .collect())
+}
+
+/// Central confirmed a final status: the task is never reported overdue, even when the
+/// rebuilt notification could not be stored.
+pub(crate) fn settle(config_path: &Path, origin: &str, agent: u64, task_id: u64) -> Result<()> {
+    let origin = endpoint_url(origin)?.to_string();
+    let path = path(config_path);
+    let _guard = locked(&path)?;
+    let mut snapshot = read(&path)?;
+    let Some(task) = snapshot.tasks.iter_mut().find(|t| {
+        t.origin == origin && t.requester_agent_id == agent && t.task_id == task_id && !t.settled
+    }) else {
+        return Ok(());
+    };
+    task.settled = true;
+    private_file::write(&path, &snapshot, MAX_BYTES)
+}
+
+/// Background worker while the broker runs. Every minute, tasks about to be decided are
+/// looked up in central first, then `scan` runs. A central READY wakes a lookup of every
+/// unfinished task. Failures are retried next round; passes never overlap.
+pub async fn run(
+    config_path: PathBuf,
+    minutes: u64,
+    recovery: Option<Recovery>,
+    cancel: CancellationToken,
+) {
+    if minutes == 0 && recovery.is_none() {
         return;
     }
+    let wake = recovery.as_ref().map(Recovery::wake);
     loop {
-        tokio::select! {
+        let ready = tokio::select! {
             _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(SCAN_INTERVAL) => {}
+            _ = async {
+                match &wake {
+                    Some(wake) => wake.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => true,
+            _ = tokio::time::sleep(SCAN_INTERVAL) => false,
+        };
+        // One time for the lookup and the scan, so no task becomes due in between.
+        let now = now_ms();
+        if let Some(recovery) = &recovery
+            && (ready || minutes > 0)
+        {
+            let due = (!ready).then_some((minutes, now));
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = recovery.pass(&config_path, due) => {}
+            }
         }
-        let path = config_path.clone();
-        let _ = tokio::task::spawn_blocking(move || scan(&path, minutes, now_ms())).await;
+        if !ready && minutes > 0 {
+            let path = config_path.clone();
+            let _ = tokio::task::spawn_blocking(move || scan(&path, minutes, now)).await;
+        }
     }
 }
 
@@ -371,7 +467,7 @@ mod tests {
     use super::*;
     use crate::{
         notifications::{CompletedPayload, StatusPayload, TaskNotification},
-        task_operations::Version,
+        task_operations::{TaskStatus, Version},
     };
 
     const ORIGIN: &str = "ws://127.0.0.1:9";

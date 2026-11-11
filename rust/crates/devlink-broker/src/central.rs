@@ -109,6 +109,7 @@ pub struct CentralState {
     inbox: Option<Inbox>,
     notifications: Option<crate::notifications::Notifications>,
     task_messages: Option<crate::task_messages::TaskMessages>,
+    sent_task_wake: Option<Arc<tokio::sync::Notify>>,
     subject_changes: watch::Sender<u64>,
     auth_failures: watch::Sender<u64>,
 }
@@ -141,6 +142,7 @@ impl CentralState {
             inbox: None,
             notifications: None,
             task_messages: None,
+            sent_task_wake: None,
             context_client: None,
             subject_changes: watch::channel(0).0,
             auth_failures: watch::channel(0).0,
@@ -163,6 +165,12 @@ impl CentralState {
     /// Question/answer pull trigger. READY and valid notices only signal; the worker pulls.
     pub fn with_task_messages(mut self, store: crate::task_messages::TaskMessages) -> Self {
         self.task_messages = Some(store);
+        self
+    }
+
+    /// Sent task final status recovery trigger. READY only wakes the worker.
+    pub fn with_sent_task_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
+        self.sent_task_wake = Some(wake);
         self
     }
 
@@ -894,6 +902,11 @@ async fn session(
                                     // Every connect/reconnect catches up on messages missed offline.
                                     if let Some(store) = &handle.state.task_messages {
                                         store.signal();
+                                    }
+                                    // Final statuses whose socket events central gave up on
+                                    // while this requester was offline are looked up again.
+                                    if let Some(wake) = &handle.state.sent_task_wake {
+                                        wake.notify_one();
                                     }
                                 }
                                 _ => {
