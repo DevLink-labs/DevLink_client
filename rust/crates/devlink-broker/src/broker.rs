@@ -274,6 +274,12 @@ pub async fn run(path: &Path) -> Result<()> {
             cancel.clone(),
             sent_tasks,
         ))
+        .merge(crate::team_context_routes::router(
+            mcp_token.clone(),
+            sessions.clone(),
+            task_client.clone(),
+            cancel.clone(),
+        ))
         .merge(crate::task_routes::router(
             mcp_token,
             sessions,

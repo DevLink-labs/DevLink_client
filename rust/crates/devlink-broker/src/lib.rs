@@ -40,6 +40,7 @@ pub mod task_messages;
 pub mod task_operations;
 pub mod task_requests;
 pub mod task_routes;
+pub mod team_context_routes;
 pub mod teams;
 pub mod tool_discovery;
 pub mod update_hook;
