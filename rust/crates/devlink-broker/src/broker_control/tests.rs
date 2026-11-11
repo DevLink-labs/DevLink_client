@@ -193,7 +193,8 @@ fn a_first_start_on_windows_allows_for_the_longer_range_query() {
     config.local_port_pending = true;
     config::atomic_json(&path, &config).unwrap();
     let extra = if cfg!(windows) {
-        Duration::from_secs(3)
+        // The base startup budget includes the original 3-second query.
+        Duration::from_secs(9)
     } else {
         Duration::ZERO
     };

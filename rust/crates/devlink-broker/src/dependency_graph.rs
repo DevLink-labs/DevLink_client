@@ -1,5 +1,5 @@
 mod analyze;
-mod git;
+pub(crate) mod git;
 
 use crate::{
     agent_profile::InspectionBinding,
@@ -11,11 +11,7 @@ use git::GitProject;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::time::{MissedTickBehavior, interval};
 
 const VERSION: u32 = 1;
@@ -58,77 +54,39 @@ async fn run_project(
 ) -> Result<()> {
     let git = Arc::new(GitProject::open(Path::new(&binding.project_root), &remote).await?);
     let route = format!("/api/v1/teams/{}/git", binding.team_id);
-    let ready = || async {
-        central
-            .with_ready_context(|status, identity, _| {
-                status == ConnectionStatus::Connected
-                    && identity.is_some_and(|identity| {
-                        identity.team_id == Some(binding.team_id)
-                            && identity.agent_id == binding.agent_id
-                            && identity.user_id == Some(binding.user_id)
-                    })
-            })
-            .await
-    };
-    let publish = async {
-        let mut tick = interval(Duration::from_secs(60));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut failed = false;
-        loop {
-            tick.tick().await;
-            if !ready().await {
-                continue;
-            }
-            let result = publish_snapshot(&git, &client, &route, &ready).await;
-            if result.is_err() && !failed {
-                eprintln!(
-                    "Dependency graph analysis or upload failed; the last successful graph is retained."
-                );
-            }
-            failed = result.is_err();
+    let ready = || bound_ready(&central, &binding);
+    // Working files are published by `working_files` (IDX-3-02), which replaced the temporary
+    // 3-second tree collector; the tree reads the same `working_files` rows.
+    let mut tick = interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut failed = false;
+    loop {
+        tick.tick().await;
+        if !ready().await {
+            continue;
         }
-    };
-    // Temporary tree-only collector on a tree-specific path. The request body already follows the
-    // IDX-3-02 working-file contract, so once that upload lands this block and `GitProject::working`
-    // are removed and the tree keeps reading the same `working_files` rows.
-    let observe_for_tree = async {
-        let mut tick = interval(Duration::from_secs(3));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut previous = None;
-        let path = format!("{route}/dependency-graph/working-files/{}", git.key);
-        loop {
-            tick.tick().await;
-            if !ready().await {
-                continue;
-            }
-            let Ok((branch, files)) = git.working().await else {
-                continue;
-            };
-            let observation = json!({
-                "branch": branch,
-                "files": files.into_iter().map(|(relative_path, change_type)| json!({
-                    "relativePath": relative_path, "changeType": change_type
-                })).collect::<Vec<_>>(),
-            });
-            if previous
-                .as_ref()
-                .is_some_and(|(value, sent): &(Value, Instant)| {
-                    value == &observation && sent.elapsed() < Duration::from_secs(30)
+        let result = publish_snapshot(&git, &client, &route, &ready).await;
+        if result.is_err() && !failed {
+            eprintln!(
+                "Dependency graph analysis or upload failed; the last successful graph is retained."
+            );
+        }
+        failed = result.is_err();
+    }
+}
+
+/// Central is connected as exactly the bound Agent, user and team.
+pub(crate) async fn bound_ready(central: &CentralState, binding: &InspectionBinding) -> bool {
+    central
+        .with_ready_context(|status, identity, _| {
+            status == ConnectionStatus::Connected
+                && identity.is_some_and(|identity| {
+                    identity.team_id == Some(binding.team_id)
+                        && identity.agent_id == binding.agent_id
+                        && identity.user_id == Some(binding.user_id)
                 })
-            {
-                continue;
-            }
-            if ready().await
-                && send(&client, Method::PUT, &path, Some(observation.clone()))
-                    .await
-                    .is_ok()
-            {
-                previous = Some((observation, Instant::now()));
-            }
-        }
-    };
-    tokio::join!(publish, observe_for_tree);
-    Ok(())
+        })
+        .await
 }
 
 async fn publish_snapshot<F, R>(

@@ -204,13 +204,23 @@ fn decode_hash(value: &str) -> Option<[u8; 32]> {
 }
 
 struct Snapshot {
-    user_id: u64,
-    hash: [u8; 32],
+    /// `None` after a successful check that found no registered Git email.
+    identity: Option<(u64, [u8; 32])>,
     checked_at: Instant,
 }
 
 #[derive(Clone, Default)]
 pub struct IdentityCache(Arc<RwLock<Option<Snapshot>>>);
+
+/// What a fresh comparison says about the bound user's Git email.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdentityState {
+    /// Not checked yet, or the last check is older than the refresh interval.
+    Unknown,
+    Unregistered,
+    /// Opaque fingerprint of the user ID and email hash; never the email or its hash.
+    Registered(String),
+}
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -227,9 +237,8 @@ impl IdentityCache {
         match client.comparison().await {
             Ok(comparison) => {
                 // Publish only a complete result, without blocking readers on HTTP.
-                *self.0.write().await = comparison.map(|(user_id, hash)| Snapshot {
-                    user_id,
-                    hash,
+                *self.0.write().await = Some(Snapshot {
+                    identity: comparison,
                     checked_at: Instant::now(),
                 });
                 Ok(())
@@ -258,8 +267,66 @@ impl IdentityCache {
         AuthorAttribution {
             author_user_id: snapshot
                 .as_ref()
-                .filter(|s| s.checked_at.elapsed() < REFRESH_INTERVAL && Some(s.hash) == hash)
-                .map(|s| s.user_id.to_string()),
+                .filter(|s| s.checked_at.elapsed() < REFRESH_INTERVAL)
+                .and_then(|s| s.identity)
+                .filter(|(_, stored)| Some(*stored) == hash)
+                .map(|(user_id, _)| user_id.to_string()),
+        }
+    }
+
+    /// Publishes a fresh check: `Some((user ID, email))` or unregistered.
+    #[cfg(test)]
+    pub(crate) async fn set_for_test(&self, identity: Option<(u64, &str)>) {
+        *self.0.write().await = Some(Snapshot {
+            identity: identity
+                .map(|(user_id, email)| (user_id, decode_hash(&email_hash(email)).expect("hash"))),
+            checked_at: Instant::now(),
+        });
+    }
+
+    pub async fn state(&self) -> IdentityState {
+        self.check()
+            .await
+            .map_or(IdentityState::Unknown, |check| check.state())
+    }
+
+    /// The current fresh check, kept as is so a long collection attributes every commit and
+    /// records its state with the same result even if the cache expires or is cleared meanwhile.
+    pub async fn check(&self) -> Option<IdentityCheck> {
+        self.0
+            .read()
+            .await
+            .as_ref()
+            .filter(|s| s.checked_at.elapsed() < REFRESH_INTERVAL)
+            .map(|s| IdentityCheck(s.identity))
+    }
+}
+
+/// One fresh comparison result taken from [`IdentityCache::check`].
+#[derive(Clone, Copy)]
+pub struct IdentityCheck(Option<(u64, [u8; 32])>);
+
+impl IdentityCheck {
+    pub fn attribute(&self, author_email: &str) -> AuthorAttribution {
+        let hash = decode_hash(&email_hash(author_email));
+        AuthorAttribution {
+            author_user_id: self
+                .0
+                .filter(|(_, stored)| Some(*stored) == hash)
+                .map(|(user_id, _)| user_id.to_string()),
+        }
+    }
+
+    pub fn state(&self) -> IdentityState {
+        match self.0 {
+            None => IdentityState::Unregistered,
+            Some((user_id, hash)) => {
+                let mut digest = Sha256::new();
+                digest.update(b"devlink-git-identity\0");
+                digest.update(user_id.to_be_bytes());
+                digest.update(hash);
+                IdentityState::Registered(format!("{:x}", digest.finalize()))
+            }
         }
     }
 }
@@ -377,8 +444,7 @@ mod tests {
     async fn seeded(age: Duration) -> IdentityCache {
         let cache = IdentityCache::default();
         *cache.0.write().await = Some(Snapshot {
-            user_id: 51,
-            hash: decode_hash(&email_hash("old@example.test")).unwrap(),
+            identity: Some((51, decode_hash(&email_hash("old@example.test")).unwrap())),
             checked_at: Instant::now() - age,
         });
         cache
@@ -506,8 +572,10 @@ mod tests {
     async fn attribution_expires_and_serializes_only_the_optional_user_id() {
         let cache = IdentityCache::default();
         *cache.0.write().await = Some(Snapshot {
-            user_id: 9223372036854775807,
-            hash: decode_hash(&email_hash("user@example.com")).unwrap(),
+            identity: Some((
+                9223372036854775807,
+                decode_hash(&email_hash("user@example.com")).unwrap(),
+            )),
             checked_at: Instant::now(),
         });
         assert_eq!(
@@ -524,5 +592,47 @@ mod tests {
             cache.attribute("user@example.com").await.author_user_id,
             None
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn state_separates_unknown_unregistered_and_registered_without_the_email() {
+        let cache = IdentityCache::default();
+        assert_eq!(cache.state().await, IdentityState::Unknown);
+        cache.set_for_test(None).await;
+        assert_eq!(cache.state().await, IdentityState::Unregistered);
+        cache.set_for_test(Some((51, "user@example.com"))).await;
+        let IdentityState::Registered(first) = cache.state().await else {
+            panic!("registered state expected");
+        };
+        assert!(!first.contains(&email_hash("user@example.com")));
+        assert!(!first.contains("user@example.com"));
+        cache.set_for_test(Some((51, "other@example.com"))).await;
+        assert_ne!(cache.state().await, IdentityState::Registered(first));
+        tokio::time::advance(REFRESH_INTERVAL).await;
+        assert_eq!(cache.state().await, IdentityState::Unknown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_taken_check_keeps_one_result_after_the_cache_expires_or_clears() {
+        let cache = IdentityCache::default();
+        assert!(cache.check().await.is_none());
+        cache.set_for_test(Some((51, "user@example.com"))).await;
+        let check = cache.check().await.unwrap();
+        let state = check.state();
+        tokio::time::advance(REFRESH_INTERVAL).await;
+        cache.clear().await;
+        assert_eq!(
+            cache.attribute("user@example.com").await.author_user_id,
+            None
+        );
+        assert_eq!(
+            check
+                .attribute(" User@Example.com ")
+                .author_user_id
+                .as_deref(),
+            Some("51")
+        );
+        assert_eq!(check.attribute("other@example.com").author_user_id, None);
+        assert_eq!(check.state(), state);
     }
 }
