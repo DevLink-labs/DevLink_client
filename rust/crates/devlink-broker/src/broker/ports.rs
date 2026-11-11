@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 /// Windows reads its dynamic range by running `netsh`, which slows down with the rest of a busy
 /// system. One longer wait serves that case better than restarting the command: a restart
 /// repeats the slow start-up that used up the first wait.
-const RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
+const RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 /// The bound this query had when the base startup timeout was sized.
 const EARLIER_RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 

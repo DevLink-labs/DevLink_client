@@ -315,36 +315,11 @@ impl GitProject {
             OUTPUT_LIMIT,
         )
         .await?;
-        let mut paths = Vec::new();
-        let mut requests = Vec::new();
-        for entry in listing
-            .split(|byte| *byte == 0)
-            .filter(|entry| !entry.is_empty())
-        {
-            let Some(separator) = entry.iter().position(|byte| *byte == b'\t') else {
-                bail!("Invalid Git tree entry")
-            };
-            let header = std::str::from_utf8(&entry[..separator])?;
-            let Ok(path) = std::str::from_utf8(&entry[separator + 1..]) else {
-                continue;
-            };
-            let Some(oid) = header
-                .strip_prefix("100644 blob ")
-                .or_else(|| header.strip_prefix("100755 blob "))
-            else {
-                continue;
-            };
-            if !valid_path(path) || !source_path(path) {
-                continue;
-            }
-            ensure!(paths.len() < 5000, "Too many source files");
-            requests.extend_from_slice(oid.as_bytes());
-            requests.push(b'\n');
-            paths.push((path, oid));
-        }
+        let paths = parse_tree(&listing)?;
         if paths.is_empty() {
             return Ok(Vec::new());
         }
+        let requests = lines(paths.iter().map(|&(_, oid)| oid));
         let bytes = run(
             &self.root,
             &["cat-file", "--batch"],
@@ -352,35 +327,7 @@ impl GitProject {
             OUTPUT_LIMIT,
         )
         .await?;
-        let mut position = 0;
-        let mut files = Vec::with_capacity(paths.len());
-        for (path, oid) in paths {
-            let rest = bytes
-                .get(position..)
-                .context("Git blob header is missing")?;
-            let newline = rest
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .context("Invalid Git blob header")?;
-            let header = std::str::from_utf8(&rest[..newline])?;
-            let size: usize = header
-                .strip_prefix(oid)
-                .and_then(|tail| tail.strip_prefix(" blob "))
-                .context("Git blob is missing")?
-                .parse()?;
-            let start = position + newline + 1;
-            let end = start.checked_add(size).context("Invalid Git blob size")?;
-            ensure!(bytes.get(end) == Some(&b'\n'), "Invalid Git blob boundary");
-            if let Ok(text) = std::str::from_utf8(&bytes[start..end]) {
-                files.push(SourceFile {
-                    path: path.to_owned(),
-                    text: text.to_owned(),
-                });
-            }
-            position = end + 1;
-        }
-        ensure!(position == bytes.len(), "Unexpected Git blob data");
-        Ok(files)
+        parse_blobs(&bytes, &paths)
     }
 
     /// Current branch (`None` on a detached HEAD) and the working-tree changes, following the
@@ -417,6 +364,71 @@ impl GitProject {
         let (files, omitted) = within_central_limit(parse_status(&status)?);
         Ok((branch, files, omitted))
     }
+}
+
+fn parse_tree(listing: &[u8]) -> Result<Vec<(&str, &str)>> {
+    ensure!(
+        listing.is_empty() || listing.ends_with(b"\0"),
+        "Truncated Git tree entry"
+    );
+    let mut paths = Vec::new();
+    for entry in listing
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some(separator) = entry.iter().position(|byte| *byte == b'\t') else {
+            bail!("Invalid Git tree entry")
+        };
+        let header = std::str::from_utf8(&entry[..separator])?;
+        let Ok(path) = std::str::from_utf8(&entry[separator + 1..]) else {
+            continue;
+        };
+        let Some(oid) = header
+            .strip_prefix("100644 blob ")
+            .or_else(|| header.strip_prefix("100755 blob "))
+        else {
+            continue;
+        };
+        if !valid_path(path) || !source_path(path) {
+            continue;
+        }
+        ensure!(paths.len() < 5000, "Too many source files");
+        ensure!(valid_sha(oid), "Invalid Git blob ID");
+        paths.push((path, oid));
+    }
+    Ok(paths)
+}
+
+fn parse_blobs(bytes: &[u8], paths: &[(&str, &str)]) -> Result<Vec<SourceFile>> {
+    let mut position = 0;
+    let mut files = Vec::with_capacity(paths.len());
+    for &(path, oid) in paths {
+        let rest = bytes
+            .get(position..)
+            .context("Git blob header is missing")?;
+        let newline = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .context("Invalid Git blob header")?;
+        let header = std::str::from_utf8(&rest[..newline])?;
+        let size: usize = header
+            .strip_prefix(oid)
+            .and_then(|tail| tail.strip_prefix(" blob "))
+            .context("Git blob is missing")?
+            .parse()?;
+        let start = position + newline + 1;
+        let end = start.checked_add(size).context("Invalid Git blob size")?;
+        ensure!(bytes.get(end) == Some(&b'\n'), "Invalid Git blob boundary");
+        if let Ok(text) = std::str::from_utf8(&bytes[start..end]) {
+            files.push(SourceFile {
+                path: path.to_owned(),
+                text: text.to_owned(),
+            });
+        }
+        position = end + 1;
+    }
+    ensure!(position == bytes.len(), "Unexpected Git blob data");
+    Ok(files)
 }
 
 fn valid_sha(sha: &str) -> bool {
@@ -718,6 +730,47 @@ async fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_entries_keep_utf8_source_paths_and_skip_links_and_submodules() {
+        let oid = "1".repeat(40);
+        let listing = format!(
+            "100644 blob {oid}\tsrc/한 글.ts\0\
+             100755 blob {oid}\tbuild.js\0\
+             120000 blob {oid}\tlink.ts\0\
+             160000 commit {oid}\tmodule.ts\0\
+             100644 blob {oid}\t../outside.ts\0\
+             100644 blob {oid}\tREADME.md\0"
+        );
+        assert_eq!(
+            parse_tree(listing.as_bytes()).unwrap(),
+            [("src/한 글.ts", oid.as_str()), ("build.js", oid.as_str())]
+        );
+        assert!(parse_tree(listing.trim_end_matches('\0').as_bytes()).is_err());
+        assert!(parse_tree(b"100644 blob invalid\tfile.ts\0").is_err());
+        assert!(parse_tree(b"no tab\0").is_err());
+    }
+
+    #[test]
+    fn batch_blob_records_use_the_declared_byte_length_and_expected_object_id() {
+        let first = "1".repeat(40);
+        let second = "2".repeat(40);
+        let paths = [("a.ts", first.as_str()), ("b.ts", second.as_str())];
+        let body = format!("{first} blob 5\n한\nx\n{second} blob 0\n\n");
+        let files = parse_blobs(body.as_bytes(), &paths).unwrap();
+        assert_eq!(
+            (files[0].path.as_str(), files[0].text.as_str()),
+            ("a.ts", "한\nx")
+        );
+        assert_eq!(
+            (files[1].path.as_str(), files[1].text.as_str()),
+            ("b.ts", "")
+        );
+        assert!(parse_blobs(body.trim_end_matches('\n').as_bytes(), &paths).is_err());
+        assert!(parse_blobs(format!("{body}\n").as_bytes(), &paths).is_err());
+        assert!(parse_blobs(body.as_bytes(), &[paths[1], paths[0]]).is_err());
+        assert!(parse_blobs(format!("{first} missing\n").as_bytes(), &paths).is_err());
+    }
 
     #[test]
     fn status_records_become_sorted_working_changes() {
