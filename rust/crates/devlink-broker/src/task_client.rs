@@ -3,10 +3,7 @@
 //! WebSocket 접속 origin으로부터 HTTP/HTTPS 엔드포인트를 도출하며,
 //! Bearer 인증 토큰을 안전하게 주입하고 로그, URL, 에러 메시지에 인증 정보가 누출되지 않도록 보장합니다.
 
-use crate::{
-    agent_metadata::AgentPart, central::endpoint_url, protocol::MAX_CENTRAL_MESSAGE_BYTES,
-    sessions::Principal,
-};
+use crate::{central::endpoint_url, protocol::MAX_CENTRAL_MESSAGE_BYTES, sessions::Principal};
 use anyhow::{Context, Result, ensure};
 use reqwest::{
     Client,
@@ -401,7 +398,12 @@ impl TaskClient {
     ) -> Result<Value, TaskError> {
         tokio::time::timeout(self.timeout, async {
             let agent = self.confirm_agent(actor).await?;
-            let part = agent["part"].as_str().ok_or_else(protocol_error)?;
+            // `PublicAgent` passes any string part through so that other tools never fail on
+            // it. Only this read needs one of the parts the context API knows.
+            let part = agent["part"]
+                .as_str()
+                .filter(|part| crate::team_context_routes::PARTS.contains(part))
+                .ok_or_else(protocol_error)?;
             if requested_part.is_some_and(|requested| requested != part) {
                 return Err(TaskError::rejected("VALIDATION_FAILED", 400));
             }
@@ -483,17 +485,27 @@ struct PublicAgent {
     owner_user_id: u64,
     name: String,
     role_description: Option<String>,
+    // S15P31D108-183: shown as central sent them. Identity checks never depend on these,
+    // so a missing, null or unexpected value is left out instead of failing the Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    part: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roles: Option<Value>,
     tool_type: String,
     project_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    part: Option<AgentPart>,
     status: String,
     last_seen_at: Option<String>,
     created_at: String,
 }
 impl PublicAgent {
     fn decode(data: Value) -> Result<Self, TaskError> {
-        let agent: Self = serde_json::from_value(data).map_err(|_| protocol_error())?;
+        let mut agent: Self = serde_json::from_value(data).map_err(|_| protocol_error())?;
+        agent.part = agent.part.filter(Value::is_string);
+        agent.roles = agent.roles.filter(|roles| {
+            roles
+                .as_array()
+                .is_some_and(|tags| tags.iter().all(Value::is_string))
+        });
         if [agent.agent_id, agent.team_id, agent.owner_user_id]
             .into_iter()
             .any(|id| id == 0 || id > i64::MAX as u64)

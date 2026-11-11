@@ -101,6 +101,15 @@ pub struct SetupArgs {
 pub enum SetupCommand {
     /// List available Host tools as JSON using local version probes only
     Tools,
+    /// Read project MCP guidance without starting a broker or changing files
+    McpGuide {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+        #[arg(long, value_name = "FILE")]
+        node_path: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        mcp_entry: Option<PathBuf>,
+    },
     /// Inspect setup readiness without changing the profile, broker, or Host
     Status {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -136,6 +145,22 @@ impl std::error::Error for SetupExit {}
 
 pub async fn run(path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     match args.command {
+        Some(SetupCommand::McpGuide {
+            output,
+            node_path,
+            mcp_entry,
+        }) => {
+            return mcp_guide(
+                path,
+                output,
+                setup_mcp::Options {
+                    node: node_path,
+                    entry: mcp_entry,
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
         Some(SetupCommand::Tools) => {
             let available: Vec<_> = ToolSearch::default()
                 .detect(None, None)
@@ -316,6 +341,63 @@ async fn run_batch<W: Write>(
     });
     control.deadline = Some(start + plan.timeout);
     flow::run_controlled(context, stages, |event| output.progress(event), control).await
+}
+
+async fn mcp_guide(
+    path: &Path,
+    format: OutputFormat,
+    options: setup_mcp::Options,
+) -> anyhow::Result<()> {
+    let profile = path.to_path_buf();
+    let executable = std::env::current_exe()?;
+    let observation = tokio::task::spawn_blocking(move || {
+        mcp_config::guide::inspect(&profile, &options, &executable)
+            .map_err(|error| Box::new(super::stages::mcp_error(Step::ConfigureMcp, error)))
+    })
+    .await?;
+    let (status, exit_code, completion) = match observation {
+        Ok(data) => (RunStatus::Succeeded, 0, Completion::Success { data }),
+        Err(error) => (
+            RunStatus::Failed,
+            error.code.exit_code(),
+            Completion::Failure { error },
+        ),
+    };
+    let result = RunResult {
+        schema_version: 1,
+        event_type: "result",
+        run_id: uuid::Uuid::new_v4().to_string(),
+        sequence: 1,
+        status,
+        exit_code,
+        stages: vec![],
+        completion,
+    };
+    let mut renderer = Renderer::new(std::io::stdout().lock(), format);
+    renderer.result(&result).map_err(|_| SetupExit(1))?;
+    if matches!(format, OutputFormat::Human)
+        && let Completion::Success { data } = &result.completion
+    {
+        writeln!(
+            renderer.writer,
+            "Target: {}\nState: {} ({})",
+            data.target_path.display(),
+            data.file_state,
+            data.reason
+        )?;
+        for item in &data.copy_items {
+            writeln!(
+                renderer.writer,
+                "{} [{}]\n{}",
+                item.title, item.scope, item.snippet
+            )?;
+        }
+    }
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(SetupExit(exit_code).into())
+    }
 }
 
 async fn status(

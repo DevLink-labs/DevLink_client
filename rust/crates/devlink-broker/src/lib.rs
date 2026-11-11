@@ -18,6 +18,7 @@ pub use dependency_graph::dependency_repo_key;
 pub mod git_identity;
 pub mod inbox;
 pub mod local;
+pub mod local_updates;
 pub mod mcp_config;
 pub mod notifications;
 pub mod owner_process;

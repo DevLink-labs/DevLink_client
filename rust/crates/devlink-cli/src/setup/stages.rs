@@ -2166,7 +2166,7 @@ impl<I: LoginInput, T: TeamInput, U: ToolInput, A: AgentInput, M: McpInput>
         StepResult::Failed(error)
     }
 }
-fn mcp_error(step: Step, error: mcp_config::ConfigError) -> SetupError {
+pub(super) fn mcp_error(step: Step, error: mcp_config::ConfigError) -> SetupError {
     let code = match error.code {
         "SETUP_INPUT_INVALID" => ErrorCode::InputInvalid,
         "SETUP_PROJECT_INVALID" => ErrorCode::ProjectPathInvalid,

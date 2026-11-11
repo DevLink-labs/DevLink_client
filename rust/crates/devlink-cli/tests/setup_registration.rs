@@ -367,6 +367,41 @@ async fn pr37_owned_choices_validate_the_filter_and_reach_progress_and_explicit_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_create_replaces_only_a_binding_whose_agent_central_deleted() {
+    let (f, _, expected) = fixture().await;
+    registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
+    assert_eq!(profile(&f)["state"]["agent"]["agentId"], 201);
+    // 웹에서 Agent 삭제. 중앙 ID는 재사용되지 않으므로 다른 팀 Agent로 다음 ID를 202로 둔다
+    {
+        let mut agents = f.state.agents.lock().unwrap();
+        agents.remove(&201);
+        agents.insert(900, json!({"agentId":900,"teamId":999}));
+    }
+    let original = fs::read(agent_profile::path(&f.path)).unwrap();
+    // 새 연결을 명시하지 않은 재사용·기존 ID 선택은 그대로 거부하고 로컬 연결을 보존
+    for selection in [None, Some(Selection::Use(201))] {
+        let rejected = registration::ensure(&f.path, &expected, selection)
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.kind, FailureKind::Rejected);
+        assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), original);
+    }
+    assert_eq!(counts(&f), (1, 0));
+
+    let replaced = registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
+    assert!(replaced.created && !replaced.reused);
+    assert_eq!(replaced.state, R::TokenRequired);
+    assert_eq!(replaced.agent_id, Some(202));
+    assert_eq!(profile(&f)["state"]["kind"], "needs_token");
+    assert_eq!(profile(&f)["state"]["agent"]["agentId"], 202);
+    assert_eq!(counts(&f), (2, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creation_is_explicit_durable_and_never_issues_a_token_or_sends_local_paths() {
     let (f, _, expected) = fixture().await;
     assert_eq!(

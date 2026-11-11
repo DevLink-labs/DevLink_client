@@ -125,6 +125,19 @@ pub enum Commands {
         #[arg(long)]
         event: String,
     },
+    /// Print the bound Agent's next local task updates as JSON for desktop notifications.
+    /// Reads local stores only: never acknowledges, accepts or marks anything read, and
+    /// keeps no cursor (store nextCursor yourself; Host hook and MCP cursors are untouched).
+    Updates {
+        /// nextCursor from the previous page; omit to start at the oldest retained entry
+        #[arg(long, conflicts_with = "latest")]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=50))]
+        limit: u16,
+        /// Skip retained history and return only the cursor at its end
+        #[arg(long)]
+        latest: bool,
+    },
     /// Install, inspect or remove the user-level Host hooks that run updates-hook
     Hooks {
         #[command(subcommand)]
@@ -278,13 +291,22 @@ pub enum AgentCommand {
     },
     /// Explicitly issue/rotate the current Agent token while its broker is stopped
     Token,
-    /// Change the bound Agent's project name or role; never creates an Agent or token
-    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description"])))]
+    /// Change the bound Agent's project name, role, part or role tags; never creates an Agent or token
+    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description", "part", "roles", "clear_roles"])))]
     Update {
         #[arg(long)]
         project_name: Option<String>,
         #[arg(long)]
         role_description: Option<String>,
+        /// FRONTEND, BACKEND, INFRA or OTHER; omit to keep the current part
+        #[arg(long, value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: Option<devlink_broker::agent_metadata::AgentPart>,
+        /// Replace all role tags (nouns for owned areas, e.g. login,payment); omit to keep them
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Option<Vec<String>>,
+        /// Remove every role tag
+        #[arg(long, conflicts_with = "roles")]
+        clear_roles: bool,
     },
     /// Show public profile metadata and verify a stored central token
     Status,
@@ -343,6 +365,34 @@ fn updates_hook(config_path: Option<PathBuf>, host: &str, event: &str) {
     let _ = print_json(&serde_json::json!({
         "hookSpecificOutput": {"hookEventName": event, "additionalContext": context}
     }));
+}
+
+/// Prints exactly one JSON object: a page, or `{"error":{code,message}}` with exit 2 for
+/// invalid input and 1 otherwise, so a desktop caller never parses free text.
+fn updates(config_path: Option<PathBuf>, cursor: Option<&str>, limit: u16, latest: bool) -> i32 {
+    use devlink_broker::local_updates::{self, Start, UpdatesError};
+    let start = if latest {
+        Start::Latest
+    } else {
+        Start::After(cursor)
+    };
+    let result = config::config_path(config_path)
+        .map_err(|_| UpdatesError::UNAVAILABLE)
+        .and_then(|path| local_updates::page(&path, start, limit.into()));
+    match result {
+        Ok(page) => i32::from(print_json(&page).is_err()),
+        Err(error) => {
+            let _ = print_json(&serde_json::json!({
+                "schemaVersion": local_updates::SCHEMA_VERSION,
+                "error": {"code": error.code, "message": error.message()},
+            }));
+            if error == UpdatesError::INPUT_INVALID {
+                2
+            } else {
+                1
+            }
+        }
+    }
 }
 
 /// Turn a hook provider error into a message that names the problem and the file.
@@ -471,6 +521,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         updates_hook(cli.config.clone(), host, event);
         return Ok(());
     }
+    if let Commands::Updates {
+        cursor,
+        limit,
+        latest,
+    } = &cli.command
+    {
+        match updates(cli.config.clone(), cursor.as_deref(), *limit, *latest) {
+            0 => return Ok(()),
+            code => std::process::exit(code),
+        }
+    }
     let path = config::config_path(cli.config)?;
     match cli.command {
         Commands::GitIdentity { command } => {
@@ -497,6 +558,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
+        // Handled before config path resolution so every outcome is one JSON object.
+        Commands::Updates { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
         Commands::DependencyRepoKey { remote } => {
             let root = std::env::current_dir().context("Cannot read the working directory")?;
@@ -612,11 +675,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 AgentCommand::Update {
                     project_name,
                     role_description,
+                    part,
+                    roles,
+                    clear_roles,
                 } => agent_profile::update(
                     &path,
                     agent_profile::UpdateOptions {
                         project_name,
                         role_description,
+                        part,
+                        roles: if clear_roles { Some(Vec::new()) } else { roles },
                     },
                     None,
                 )

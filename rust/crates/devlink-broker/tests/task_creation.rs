@@ -158,8 +158,13 @@ async fn central_agent(State(state): State<MockState>, headers: HeaderMap) -> Re
     if mode == 10 {
         agent["teamId"] = json!(999);
     }
-    if mode != 11 {
+    // By default `/agents/me` answers like a central that predates part/roles (-183).
+    // Mode 11 reports a part, mode 13 a part the broker does not know.
+    if mode == 11 {
         agent["part"] = json!("BACKEND");
+    }
+    if mode == 13 {
+        agent["part"] = json!("DESIGN");
     }
     Json(json!({"success":true,"data":agent})).into_response()
 }
@@ -172,14 +177,20 @@ async fn central_agents(
     assert_eq!(headers["authorization"], format!("Bearer {AGENT}"));
     state.agent_calls.fetch_add(1, Ordering::SeqCst);
     let mut agent = public_agent(i64::MAX as u64);
+    // S15P31D108-183: this row carries routing metadata. `/agents/me` answers like a
+    // central that predates part/roles, and the first list row holds values the broker
+    // does not recognise.
+    agent["part"] = json!("BACKEND");
+    agent["roles"] = json!(["로그인", "결제 API"]);
+    let mut unexpected = public_agent(12);
+    unexpected["part"] = Value::Null;
+    unexpected["roles"] = json!(["API", 7]);
     match state.agent_mode.load(Ordering::SeqCst) {
         7 => agent["teamId"] = json!(999),
         8 => agent["agentId"] = json!(9223372036854775808_u64),
         _ => {}
     }
-    let mut own_agent = public_agent(12);
-    own_agent["part"] = json!("BACKEND");
-    Json(json!({"success":true,"data":[own_agent,agent]})).into_response()
+    Json(json!({"success":true,"data":[unexpected,agent]})).into_response()
 }
 
 async fn central_context(
@@ -523,8 +534,10 @@ async fn register_confirms_existing_agent_and_list_preserves_long_ids_without_cr
         assert_eq!(status, 200, "{result}");
         assert_eq!(result["data"]["agentId"], "12");
         assert_eq!(result["data"]["ownerUserId"], "3");
-        assert_eq!(result["data"]["part"], "BACKEND");
         assert!(result["data"].get("unexpectedCredential").is_none());
+        // A central reply without part/roles is passed on without inventing them.
+        assert!(result["data"].get("part").is_none());
+        assert!(result["data"].get("roles").is_none());
     }
     let list = agent_request(&session, "list_agents", json!({}));
     assert_eq!(
@@ -548,8 +561,14 @@ async fn register_confirms_existing_agent_and_list_preserves_long_ids_without_cr
         "9223372036854775807"
     );
     assert_eq!(result["data"]["agents"][0]["toolType"], "CODEX");
-    assert_eq!(result["data"]["agents"][0]["part"], "BACKEND");
-    assert!(result["data"]["agents"][1].get("part").is_none());
+    // A null part or a non-string tag never fails the Agent or the list; it is left out.
+    assert!(result["data"]["agents"][0].get("part").is_none());
+    assert!(result["data"]["agents"][0].get("roles").is_none());
+    assert_eq!(result["data"]["agents"][1]["part"], "BACKEND");
+    assert_eq!(
+        result["data"]["agents"][1]["roles"],
+        json!(["로그인", "결제 API"])
+    );
     assert!(remote.state.calls.lock().await.is_empty());
     assert!(!TaskRequests::path(&dir.path().join("config.json")).exists());
     broker.stop().await;
@@ -1443,6 +1462,7 @@ async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_i
         .await;
     assert_eq!(result["error"]["code"], "AGENT_UNREGISTERED");
     let session = broker.claim("host", true).await;
+    remote.state.agent_mode.store(11, Ordering::SeqCst);
     let (status, result) = broker
         .post(
             "/v1/teams/context",
@@ -1494,18 +1514,41 @@ async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_i
         .await;
     assert_eq!(status, 400);
     assert_eq!(result["error"]["code"], "VALIDATION_FAILED");
-    remote.state.agent_mode.store(11, Ordering::SeqCst);
-    for args in [json!({}), json!({"part":"BACKEND"})] {
-        let (_, result) = broker
-            .post(
-                "/v1/teams/context",
-                &agent_request(&session, "get_team_context", args),
-            )
-            .await;
-        assert_eq!(result["error"]["code"], "CENTRAL_PROTOCOL_ERROR");
+    // The central reports no part (0) or one the context API does not know (13): the
+    // context read is refused before any context call, with or without a requested part.
+    for mode in [0, 13] {
+        remote.state.agent_mode.store(mode, Ordering::SeqCst);
+        for args in [json!({}), json!({"part":"BACKEND"})] {
+            let (_, result) = broker
+                .post(
+                    "/v1/teams/context",
+                    &agent_request(&session, "get_team_context", args),
+                )
+                .await;
+            assert_eq!(
+                result["error"]["code"], "CENTRAL_PROTOCOL_ERROR",
+                "{mode}: {result}"
+            );
+        }
     }
-    remote.state.agent_mode.store(0, Ordering::SeqCst);
     assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
+    // An unknown part breaks only the context read: confirming and listing Agents still work.
+    let (status, result) = broker
+        .post(
+            "/v1/agents/register",
+            &agent_request(&session, "register_agent", json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["data"]["part"], "DESIGN");
+    let (status, result) = broker
+        .post(
+            "/v1/agents/list",
+            &agent_request(&session, "list_agents", json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    remote.state.agent_mode.store(11, Ordering::SeqCst);
     for (mode, code) in [
         (1, "CENTRAL_UNAUTHENTICATED"),
         (2, "CENTRAL_PROTOCOL_ERROR"),

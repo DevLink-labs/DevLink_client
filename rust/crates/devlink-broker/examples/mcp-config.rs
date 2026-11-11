@@ -1,6 +1,6 @@
 //! Provider demonstration, not the product setup CLI (-111 owns that integration).
 use devlink_broker::mcp_config::{
-    ConfigError, InspectionInput, McpConfig, PlanInput, VerifiedHost,
+    ConfigError, InspectionInput, McpConfig, PlanInput, ToolType, VerifiedHost,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,6 +10,14 @@ use std::io::{Read, Write};
 struct Request {
     host_version: String,
     input: PlanInput,
+}
+/// `--supports` asks only whether the provider applies this Host version automatically.
+/// It reads no path and writes nothing.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SupportRequest {
+    tool_type: ToolType,
+    host_version: String,
 }
 fn run(request: Request, mode: &str) -> Result<Value, ConfigError> {
     let mut provider = McpConfig::new(VerifiedHost::new(
@@ -42,24 +50,31 @@ fn main() {
     let mode = args.first().map(String::as_str).unwrap_or("--plan");
     let invalid = json!({"error":{"code":"SETUP_INPUT_INVALID","outcome":"not_applied","rollback":"not_needed"}});
     let mut bytes = Vec::new();
-    let request = if args.len() <= 1
-        && ["--plan", "--apply", "--inspect"].contains(&mode)
+    let readable = args.len() <= 1
+        && ["--plan", "--apply", "--inspect", "--supports"].contains(&mode)
         && std::io::stdin()
             .take(131073)
             .read_to_end(&mut bytes)
             .is_ok()
-        && bytes.len() <= 131072
-    {
-        serde_json::from_slice::<Request>(&bytes).ok()
+        && bytes.len() <= 131072;
+    let (value, code) = if !readable {
+        (invalid, 2)
+    } else if mode == "--supports" {
+        match serde_json::from_slice::<SupportRequest>(&bytes) {
+            Ok(request) => {
+                let supported = VerifiedHost::new(request.tool_type, &request.host_version).is_ok();
+                (json!({ "supported": supported }), 0)
+            }
+            Err(_) => (invalid, 2),
+        }
     } else {
-        None
-    };
-    let (value, code) = match request {
-        Some(request) => match run(request, mode) {
-            Ok(value) => (value, 0),
-            Err(error) => (json!({"error":error}), 1),
-        },
-        None => (invalid, 2),
+        match serde_json::from_slice::<Request>(&bytes) {
+            Ok(request) => match run(request, mode) {
+                Ok(value) => (value, 0),
+                Err(error) => (json!({"error":error}), 1),
+            },
+            Err(_) => (invalid, 2),
+        }
     };
     let mut stdout = std::io::stdout().lock();
     if serde_json::to_writer(&mut stdout, &value).is_err() || stdout.write_all(b"\n").is_err() {
