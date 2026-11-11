@@ -167,7 +167,9 @@ export async function verifyHosts(options) {
         assert.equal(ping.calls[0].value.status, 'ok');
         await fixture.broker.drain();
         assert.equal(fixture.broker.arrivals.length, before, 'Catalog/ping activated the broker');
-        if (host === 'claude') assert.deepEqual(ping.catalog.toSorted(), hostTools.toSorted(), 'Claude catalog differs');
+        // The server may expose tools added after this harness was written (`--allowedTools` limits
+        // calls, not the catalog). Every tool the harness allows must be offered.
+        if (host === 'claude') assert.deepEqual(hostTools.filter((tool) => !ping.catalog.includes(tool)), [], 'Claude catalog lacks an allowed DevLink tool');
         result.model = ping.model;
         result.stages.push({ name: 'initialize-catalog-ping', passed: true, calls: 1, brokerCalls: 0, ownedMcpProcessesAfterExit: 0 });
 
