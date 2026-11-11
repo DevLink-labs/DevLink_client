@@ -20,10 +20,11 @@ const code = (expected) => (error) => error.code === expected;
 const faultOf = (promise) => promise.then(() => assert.fail('Expected rejection'), (error) => error);
 async function fixture(t, options = {}, unbound = false) {
   const broker = await fakeBroker();
-  const client = new BrokerClient({ settings: { ...broker.settings, ...(unbound ? {} : { agentId: 'agent-a' }) },
-    heartbeatMs: 60_000, retryBaseMs: 60_000, ...options });
+  const clientOptions = { settings: { ...broker.settings, ...(unbound ? {} : { agentId: 'agent-a' }) },
+    heartbeatMs: 60_000, retryBaseMs: 60_000, ...options };
+  const client = new BrokerClient(clientOptions);
   t.after(async () => { await client.close(); await broker.close(); });
-  return { broker, client };
+  return { broker, client, clientOptions };
 }
 async function drained(client) {
   const deadline = Date.now() + 1000;
@@ -384,20 +385,48 @@ test('a caller deadline preserves a healthy shared session and a concurrent regi
   assert.equal(broker.calls.filter((call) => call.path.endsWith('/bind')).length, 1);
 });
 
-test('queued registration deadline and client close prevent subsequent IO', { timeout: 5000 }, async (t) => {
-  for (const mode of ['deadline', 'close']) {
-    const { broker, client } = await fixture(t, { callTimeoutMs: mode === 'deadline' ? 60 : 1000 });
-    const entered = gate();
-    broker.setHook(({ body }) => { if (body.operation !== 'register_agent') return false; entered.resolve(); return true; });
-    const first = faultOf(client.execute('register_agent', { name: 'first' }));
-    const second = faultOf(client.execute('register_agent', { name: 'queued' }));
-    await entered.promise;
-    if (mode === 'close') await client.close();
-    const results = await Promise.all([first, second]);
-    assert.ok(results.every((error) => error.code === (mode === 'close' ? 'CLIENT_CLOSED' : 'BROKER_TIMEOUT')));
-    await drained(client);
-    assert.equal(broker.calls.filter((call) => call.body.operation === 'register_agent').length, 1);
-  }
+test('a registration that times out in the queue stays local when the queue drains', { timeout: 5000 }, async (t) => {
+  const { broker, client, clientOptions } = await fixture(t, { callTimeoutMs: 10_000 });
+  const entered = gate();
+  broker.setHook(({ body }) => {
+    if (body.operation !== 'register_agent' || body.arguments.name !== 'first') return false;
+    entered.resolve();
+    return true;
+  });
+  const pending = new AbortController();
+  const first = faultOf(client.execute('register_agent', { name: 'first' }, { signal: pending.signal }));
+  await entered.promise;
+
+  // Keep the first registration in flight until the queued call has timed out.
+  clientOptions.callTimeoutMs = 60;
+  const expired = await faultOf(client.execute('register_agent', { name: 'queued' }));
+  assert.equal(expired.code, 'BROKER_TIMEOUT');
+  clientOptions.callTimeoutMs = 10_000;
+  pending.abort();
+  assert.equal((await first).code, 'REQUEST_ABORTED');
+
+  // A subsequent tool call waits for the registration queue before sending its own request.
+  await client.execute('get_tasks', {});
+  await drained(client);
+  assert.equal(broker.calls.filter((call) => call.body.operation === 'register_agent').length, 1);
+});
+
+test('closing the client prevents a queued registration from reaching the broker', { timeout: 5000 }, async (t) => {
+  const { broker, client } = await fixture(t, { callTimeoutMs: 10_000 });
+  const entered = gate();
+  broker.setHook(({ body }) => {
+    if (body.operation !== 'register_agent') return false;
+    entered.resolve();
+    return true;
+  });
+  const first = faultOf(client.execute('register_agent', { name: 'first' }));
+  await entered.promise;
+  const queued = faultOf(client.execute('register_agent', { name: 'queued' }));
+  await client.close();
+  assert.equal((await first).code, 'CLIENT_CLOSED');
+  assert.equal((await queued).code, 'CLIENT_CLOSED');
+  await drained(client);
+  assert.equal(broker.calls.filter((call) => call.body.operation === 'register_agent').length, 1);
 });
 
 test('SDK argument errors and unknown-tool protocol errors retain their wire ID without a broker call', async (t) => {
