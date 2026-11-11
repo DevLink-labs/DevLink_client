@@ -424,7 +424,10 @@ impl TaskClient {
             if status != 200 || !envelope.success {
                 return Err(central_error(status, envelope.code.as_deref()));
             }
-            envelope.data.ok_or_else(protocol_error)
+            envelope
+                .data
+                .and_then(|data| team_context_view(&data, team_id, part, counterpart))
+                .ok_or_else(protocol_error)
         })
         .await
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
@@ -471,6 +474,68 @@ impl TaskClient {
         }
         envelope.data.ok_or_else(protocol_error)
     }
+}
+
+/// The central contexts reply as the local contract publishes it
+/// (`contracts/local-broker/v1/team-context.schema.json`). `None` when the reply is malformed
+/// or is not the answer to this team, part and counterpart.
+///
+/// Only the known fields are forwarded, and IDs and the version become decimal strings like
+/// every other local ID. The summary entries are text the central derived from task questions
+/// and answers; they are passed through unread, as objects.
+fn team_context_view(
+    data: &Value,
+    team_id: u64,
+    part: &str,
+    counterpart: Option<&str>,
+) -> Option<Value> {
+    use crate::team_context_routes::PARTS;
+    // Central may leave an unset field out or send it as null.
+    let field = |context: &Value, name: &str| context.get(name).cloned().unwrap_or(Value::Null);
+    // Central IDs and versions are Java longs; the published schema allows no more.
+    let long = |value: &Value| value.as_u64().filter(|value| *value <= i64::MAX as u64);
+    let text = |value: Value| (value.is_null() || value.is_string()).then_some(value);
+    let entries = |value: Value| {
+        value
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_object))
+            .then_some(value)
+    };
+    if data.get("teamId")?.as_u64()? != team_id || data.get("part")?.as_str()? != part {
+        return None;
+    }
+    let mut seen = Vec::new();
+    let mut views = Vec::new();
+    for context in data.get("contexts")?.as_array()? {
+        let other = context
+            .get("counterpart")?
+            .as_str()
+            .filter(|other| PARTS.contains(other))?;
+        if seen.contains(&other) || counterpart.is_some_and(|requested| requested != other) {
+            return None;
+        }
+        seen.push(other);
+        let last_event = match field(context, "lastEventId") {
+            Value::Null => Value::Null,
+            id => json!(long(&id).filter(|id| *id > 0)?.to_string()),
+        };
+        views.push(json!({
+            "counterpart": other,
+            "version": long(context.get("version")?)?.to_string(),
+            "lastEventId": last_event,
+            "updatedAt": text(field(context, "updatedAt"))?,
+            "model": text(field(context, "model"))?,
+            "promptVersion": text(field(context, "promptVersion"))?,
+            "common": entries(field(context, "common"))?,
+            "changed": entries(field(context, "changed"))?,
+            "issues": entries(field(context, "issues"))?,
+        }));
+    }
+    // A named counterpart is answered with exactly that pair.
+    if counterpart.is_some() && views.len() != 1 {
+        return None;
+    }
+    Some(json!({"teamId": team_id.to_string(), "part": part, "contexts": views}))
 }
 
 fn protocol_error() -> TaskError {

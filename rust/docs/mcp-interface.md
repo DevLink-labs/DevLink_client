@@ -91,7 +91,7 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | get_task_result | /v1/tasks/result | [상세·결과](task-operations.md) |
 | ask_question | /v1/tasks/questions | [질문·답변](task-operations.md#질문답변-s15p31d108-166) |
 | answer_question | /v1/tasks/answers | [질문·답변](task-operations.md#질문답변-s15p31d108-166) |
-| get_team_context | /v1/teams/context | 팀·파트 맥락 요약 조회(읽기 전용). bound 세션의 Agent 파트를 `/api/v1/agents/me`로 확인해 중앙 `GET /api/v1/teams/{teamId}/context?part=&counterpart=`에 전달한다. 요청의 `part`는 생략할 수 있으며 명시할 경우 확인한 파트와 일치해야 한다. 중앙이 파트를 보내지 않거나 `FRONTEND / BACKEND / INFRA / OTHER`가 아니면 중앙 context를 호출하지 않고 `CENTRAL_PROTOCOL_ERROR`를 돌려준다 |
+| get_team_context | /v1/teams/context | 팀·파트 맥락 요약 조회(읽기 전용). bound 세션의 Agent 파트를 `/api/v1/agents/me`로 확인해 중앙 `GET /api/v1/teams/{teamId}/context?part=&counterpart=`에 전달한다. 요청의 `part`는 생략할 수 있으며 명시할 경우 확인한 파트와 일치해야 한다. 응답은 요청한 팀·파트·상대 파트의 것인지와 형태를 확인한 뒤 계약 필드만 돌려준다(`contracts/local-broker/v1/team-context.schema.json`, ID·버전은 10진 문자열). 다른 팀·파트의 응답, 모르는 상대 파트, 중복된 쌍, 형태가 다른 응답, 256KB를 넘는 응답은 `CENTRAL_PROTOCOL_ERROR`다. `counterpart`를 지정했는데 그 쌍 하나가 아닌 응답도 같다. (분류 근거: `part`를 보내지 않는 중앙은 지원하지 않고(GitHub #127), 네 값 밖의 파트는 이 클라이언트가 모르는 계약이다(GitHub #126). 이 경우의 해결은 재시도가 아니라 `agent update`로 파트를 정하거나 클라이언트를 올리는 것이다.) 중앙이 파트를 보내지 않거나 `FRONTEND / BACKEND / INFRA / OTHER`가 아니면 중앙 context를 호출하지 않고 `CENTRAL_PROTOCOL_ERROR`를 돌려준다 |
 
 register_agent는 최초 Agent 생성이 아니라 bootstrap 자격의 기존 Agent 확인이다. 목록·생성·상태 변경·완료는 bound 세션을 요구한다. 업무 권한·상태 전이·원자 저장은 중앙이 판단한다.
 

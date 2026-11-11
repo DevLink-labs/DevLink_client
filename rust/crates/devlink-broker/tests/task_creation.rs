@@ -41,6 +41,7 @@ struct MockState {
     agent_calls: Arc<AtomicUsize>,
     context_mode: Arc<AtomicU8>,
     context_calls: Arc<AtomicUsize>,
+    context_query: Arc<std::sync::Mutex<HashMap<String, String>>>,
     calls: Arc<Mutex<Vec<Value>>>,
     saved: Arc<Mutex<HashMap<String, u64>>>,
     active: Arc<AtomicUsize>,
@@ -206,16 +207,63 @@ async fn central_context(
     assert_eq!(headers["authorization"], format!("Bearer {AGENT}"));
     assert!(!headers.contains_key("cookie"));
     state.context_calls.fetch_add(1, Ordering::SeqCst);
-    match state.context_mode.load(Ordering::SeqCst) {
-        1 => (StatusCode::UNAUTHORIZED, SECRET).into_response(),
-        2 => (StatusCode::FOUND, [("location", state.redirect)], SECRET).into_response(),
-        _ => Json(
-            json!({"success":true,"data":{"teamId":team_id,"query":query,"version":3,
+    *state.context_query.lock().unwrap() = query.clone();
+    // The shape of central `TeamContextResponse` (DevLink_server#92): one view per pair.
+    let view = |counterpart: &str| {
+        json!({"counterpart":counterpart,"version":3,"lastEventId":205,
+            "updatedAt":"2026-11-11T00:00:00Z","model":"structural","promptVersion":null,
             "common":[{"statement":"작업 상세는 /api/v1/tasks/{id}","evidence":["101:2"]}],
-            "changed":[],"issues":[{"topic":"404 vs empty 200","evidence":["102:5"]}]}}),
-        )
-        .into_response(),
+            "changed":[],"issues":[{"topic":"404 vs empty 200","evidence":["102:5"]}]})
+    };
+    let contexts = match query.get("counterpart") {
+        Some(counterpart) => vec![view(counterpart)],
+        None => vec![view("FRONTEND"), view("INFRA")],
+    };
+    let mut data = json!({"teamId":team_id,"part":query.get("part"),"contexts":contexts,
+        "internal":SECRET});
+    match state.context_mode.load(Ordering::SeqCst) {
+        1 => return (StatusCode::UNAUTHORIZED, SECRET).into_response(),
+        2 => {
+            return (StatusCode::FOUND, [("location", state.redirect)], SECRET).into_response();
+        }
+        3 => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"success":false,"code":"RESOURCE_NOT_FOUND","message":SECRET})),
+            )
+                .into_response();
+        }
+        4 => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"success":false,"code":"INTERNAL_ERROR","message":SECRET})),
+            )
+                .into_response();
+        }
+        5 => sleep(Duration::from_millis(1500)).await,
+        6 => data["contexts"][0]["common"] = json!([{"statement":"x".repeat(300_000)}]),
+        7 => data["teamId"] = json!(2),
+        8 => data["part"] = json!("OTHER"),
+        9 => data["contexts"][0]["counterpart"] = json!("DESIGN"),
+        10 => data["contexts"][0]["version"] = json!(-1),
+        11 => data["contexts"][0]["issues"] = json!("none"),
+        12 => data["contexts"] = json!({}),
+        13 => data["contexts"][0]["common"] = json!(["text"]),
+        14 => data["contexts"] = json!([view("FRONTEND"), view("FRONTEND")]),
+        15 => data["contexts"][0]["lastEventId"] = json!("205"),
+        17 => data["contexts"] = json!([view("FRONTEND")]),
+        18 => data["contexts"] = json!([]),
+        19 => data["contexts"][0]["version"] = json!(u64::MAX),
+        16 => {
+            // Unset fields left out instead of sent as null.
+            let fields = data["contexts"][0].as_object_mut().unwrap();
+            for name in ["lastEventId", "updatedAt", "model", "promptVersion"] {
+                fields.remove(name);
+            }
+        }
+        _ => {}
     }
+    Json(json!({"success":true,"data":data})).into_response()
 }
 
 struct Central {
@@ -245,6 +293,7 @@ impl Central {
             agent_calls: Arc::default(),
             context_mode: Arc::default(),
             context_calls: Arc::default(),
+            context_query: Arc::default(),
             calls: Arc::default(),
             saved: Arc::default(),
             active: Arc::default(),
@@ -1474,11 +1523,18 @@ async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_i
         )
         .await;
     assert_eq!(status, 200, "{result}");
-    assert_eq!(result["data"]["teamId"], 1);
-    assert_eq!(result["data"]["query"]["part"], "BACKEND");
-    assert_eq!(result["data"]["query"]["counterpart"], "FRONTEND");
-    assert_eq!(result["data"]["version"], 3);
-    assert_eq!(result["data"]["issues"][0]["evidence"][0], "102:5");
+    let sent = || remote.state.context_query.lock().unwrap().clone();
+    assert_eq!(sent()["part"], "BACKEND");
+    assert_eq!(sent()["counterpart"], "FRONTEND");
+    // Only the contract fields come back, with IDs and the version as decimal strings.
+    assert_eq!(
+        result["data"],
+        json!({"teamId":"1","part":"BACKEND","contexts":[{
+            "counterpart":"FRONTEND","version":"3","lastEventId":"205",
+            "updatedAt":"2026-11-11T00:00:00Z","model":"structural","promptVersion":null,
+            "common":[{"statement":"작업 상세는 /api/v1/tasks/{id}","evidence":["101:2"]}],
+            "changed":[],"issues":[{"topic":"404 vs empty 200","evidence":["102:5"]}]}]})
+    );
     let (status, result) = broker
         .post(
             "/v1/teams/context",
@@ -1486,8 +1542,15 @@ async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_i
         )
         .await;
     assert_eq!(status, 200, "{result}");
-    assert_eq!(result["data"]["query"]["part"], "BACKEND");
-    assert!(result["data"]["query"].get("counterpart").is_none());
+    assert_eq!(sent()["part"], "BACKEND");
+    assert!(!sent().contains_key("counterpart"));
+    let counterparts: Vec<_> = result["data"]["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["counterpart"].clone())
+        .collect();
+    assert_eq!(counterparts, [json!("FRONTEND"), json!("INFRA")]);
     assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
     for args in [
         json!({"part":null}),
@@ -1548,10 +1611,37 @@ async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_i
         )
         .await;
     assert_eq!(status, 200, "{result}");
+    // The central reports this Agent in another team: nothing is read for either team.
+    remote.state.agent_mode.store(10, Ordering::SeqCst);
+    let (status, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(&session, "get_team_context", json!({})),
+        )
+        .await;
+    assert_eq!(status, 403, "{result}");
+    assert_eq!(result["error"]["code"], "FORBIDDEN", "{result}");
+    assert_eq!(remote.state.context_calls.load(Ordering::SeqCst), 2);
     remote.state.agent_mode.store(11, Ordering::SeqCst);
+    // Central failures keep their class; a reply that is too large, is for another team or
+    // part, or does not have the contract shape is a protocol error. Nothing of it is shown.
     for (mode, code) in [
         (1, "CENTRAL_UNAUTHENTICATED"),
         (2, "CENTRAL_PROTOCOL_ERROR"),
+        (3, "RESOURCE_NOT_FOUND"),
+        (4, "CENTRAL_UNAVAILABLE"),
+        (5, "CENTRAL_TIMEOUT"),
+        (6, "CENTRAL_PROTOCOL_ERROR"),
+        (7, "CENTRAL_PROTOCOL_ERROR"),
+        (8, "CENTRAL_PROTOCOL_ERROR"),
+        (9, "CENTRAL_PROTOCOL_ERROR"),
+        (10, "CENTRAL_PROTOCOL_ERROR"),
+        (11, "CENTRAL_PROTOCOL_ERROR"),
+        (12, "CENTRAL_PROTOCOL_ERROR"),
+        (13, "CENTRAL_PROTOCOL_ERROR"),
+        (14, "CENTRAL_PROTOCOL_ERROR"),
+        (15, "CENTRAL_PROTOCOL_ERROR"),
+        (19, "CENTRAL_PROTOCOL_ERROR"),
     ] {
         remote.state.context_mode.store(mode, Ordering::SeqCst);
         let (status, result) = broker
@@ -1562,7 +1652,51 @@ async fn team_context_uses_the_verified_part_and_rejects_invalid_or_mismatched_i
             .await;
         assert_ne!(status, 401);
         assert_eq!(result["error"]["code"], code, "{mode}: {result}");
+        assert!(result.get("data").is_none(), "{mode}: {result}");
+        assert!(!result.to_string().contains(SECRET), "{mode}");
     }
+    // A named counterpart must be answered with exactly that pair: not another known pair
+    // (17) and not an empty list (18).
+    for mode in [17, 18] {
+        remote.state.context_mode.store(mode, Ordering::SeqCst);
+        let (_, result) = broker
+            .post(
+                "/v1/teams/context",
+                &agent_request(&session, "get_team_context", json!({"counterpart":"INFRA"})),
+            )
+            .await;
+        assert_eq!(
+            result["error"]["code"], "CENTRAL_PROTOCOL_ERROR",
+            "{mode}: {result}"
+        );
+    }
+    // Without a counterpart central lists only the pairs that have a stored summary, so an
+    // empty list is a valid answer.
+    let (status, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(&session, "get_team_context", json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        result["data"],
+        json!({"teamId":"1","part":"BACKEND","contexts":[]})
+    );
+    // Unset fields that central leaves out are published as null.
+    remote.state.context_mode.store(16, Ordering::SeqCst);
+    let (status, result) = broker
+        .post(
+            "/v1/teams/context",
+            &agent_request(&session, "get_team_context", json!({"counterpart":"INFRA"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{result}");
+    let context = &result["data"]["contexts"][0];
+    for name in ["lastEventId", "updatedAt", "model", "promptVersion"] {
+        assert_eq!(context[name], Value::Null, "{name}: {result}");
+    }
+    assert!(!result.to_string().contains(SECRET));
     assert_eq!(remote.trapped.load(Ordering::SeqCst), 0);
     broker.stop().await;
 }
