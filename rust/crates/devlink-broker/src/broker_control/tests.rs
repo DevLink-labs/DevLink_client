@@ -158,6 +158,48 @@ async fn another_runtime_pid_cannot_satisfy_readiness_or_be_force_cleaned_up() {
     assert!(local::running(&path).unwrap());
 }
 
+#[test]
+fn each_port_failure_exit_code_maps_to_its_own_problem_and_message() {
+    let problems = [
+        (98, PortProblem::Unavailable),
+        (99, PortProblem::AssignmentFailed),
+        (97, PortProblem::RangeQueryTimedOut),
+        (96, PortProblem::RangeQueryFailed),
+    ];
+    for (code, problem) in problems {
+        assert_eq!(PortProblem::from_child_exit(Some(code)), Some(problem));
+    }
+    for code in [None, Some(0), Some(1), Some(95), Some(100)] {
+        assert_eq!(PortProblem::from_child_exit(code), None);
+    }
+    let messages: std::collections::HashSet<_> = problems
+        .iter()
+        .map(|(_, problem)| problem.message())
+        .collect();
+    assert_eq!(messages.len(), problems.len());
+    assert!(
+        PortProblem::RangeQueryTimedOut
+            .message()
+            .contains("in time")
+    );
+}
+
+#[test]
+fn a_first_start_on_windows_allows_for_the_longer_range_query() {
+    let (_root, path) = fixture();
+    let fixed = startup_timeout(&path);
+    let mut config = Config::load(&path).unwrap();
+    config.local_port = 0;
+    config.local_port_pending = true;
+    config::atomic_json(&path, &config).unwrap();
+    let extra = if cfg!(windows) {
+        Duration::from_secs(3)
+    } else {
+        Duration::ZERO
+    };
+    assert_eq!(startup_timeout(&path), fixed + extra);
+}
+
 #[tokio::test]
 async fn early_child_exit_is_reported_and_reaped() {
     let (_root, path) = fixture();
