@@ -386,9 +386,11 @@ impl GitProject {
     /// Current branch (`None` on a detached HEAD) and the working-tree changes, following the
     /// IDX-3-02 working-file contract: at most 2,000 distinct paths. Paths outside the central
     /// path rules are skipped.
+    /// The current branch, the changed files central can take, and how many changed files were
+    /// left out to stay within its limit.
     pub(crate) async fn working(
         &self,
-    ) -> Result<(Option<String>, Vec<(RelativePath, WorkingChange)>)> {
+    ) -> Result<(Option<String>, Vec<(RelativePath, WorkingChange)>, usize)> {
         let branch = match run(&self.root, &["branch", "--show-current"], None, 1024).await {
             Ok(raw) => std::str::from_utf8(&raw)
                 .ok()
@@ -412,7 +414,8 @@ impl GitProject {
             OUTPUT_LIMIT,
         )
         .await?;
-        Ok((branch, parse_status(&status)?))
+        let (files, omitted) = within_central_limit(parse_status(&status)?);
+        Ok((branch, files, omitted))
     }
 }
 
@@ -484,12 +487,29 @@ fn parse_status(status: &[u8]) -> Result<Vec<(RelativePath, WorkingChange)>> {
             continue;
         };
         files.insert(path, WorkingChange::from_porcelain([record[0], record[1]]));
-        ensure!(
-            files.len() <= crate::git_scope::MAX_WORKING_FILES,
-            "Too many changed files"
-        );
     }
     Ok(files.into_iter().collect())
+}
+
+/// Central takes at most `MAX_WORKING_FILES` changed files. Past that, changes to tracked files
+/// are kept first and untracked files fill the rest, so files a missing `.gitignore` entry
+/// exposes (such as `node_modules`) cannot push the real work out. Each group keeps path order,
+/// so the same tree always gives the same list. Returns the kept files in path order and how
+/// many were left out.
+fn within_central_limit(
+    files: Vec<(RelativePath, WorkingChange)>,
+) -> (Vec<(RelativePath, WorkingChange)>, usize) {
+    let limit = crate::git_scope::MAX_WORKING_FILES;
+    if files.len() <= limit {
+        return (files, 0);
+    }
+    let omitted = files.len() - limit;
+    let (tracked, untracked): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(_, change)| *change != WorkingChange::Untracked);
+    let mut kept: Vec<_> = tracked.into_iter().chain(untracked).take(limit).collect();
+    kept.sort_by(|a, b| a.0.cmp(&b.0));
+    (kept, omitted)
 }
 
 pub(super) fn valid_path(path: &str) -> bool {
@@ -715,16 +735,52 @@ mod tests {
     }
 
     #[test]
-    fn status_skips_paths_central_rejects_and_bounds_the_list() {
+    fn status_skips_paths_central_rejects() {
         let files = parse_status(b" M ok.ts\0 M bad\\name.ts\0?? \xff\xfe\0").unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0.as_str(), "ok.ts");
         assert!(parse_status(b"XM\0").is_err());
         assert!(parse_status(b"MMXpath\0").is_err());
-        let many: Vec<u8> = (0..=crate::git_scope::MAX_WORKING_FILES)
-            .flat_map(|i| format!("?? f{i}\0").into_bytes())
+    }
+
+    #[test]
+    fn past_the_central_limit_tracked_changes_come_first_and_untracked_files_fill_the_rest() {
+        let limit = crate::git_scope::MAX_WORKING_FILES;
+        let within: Vec<u8> = (0..limit)
+            .flat_map(|i| format!("?? f{i:05}\0").into_bytes())
             .collect();
-        assert!(parse_status(&many).is_err());
+        let (files, omitted) = within_central_limit(parse_status(&within).unwrap());
+        assert_eq!((files.len(), omitted), (limit, 0));
+
+        // 2,500 untracked files sort before the three real changes, which must still survive.
+        let mut status: Vec<u8> = (0..2_500)
+            .flat_map(|i| format!("?? a/node_modules/m{i:05}.js\0").into_bytes())
+            .collect();
+        status.extend_from_slice(b" M src/z.ts\0D  src/gone.ts\0UU src/both.ts\0");
+        let (files, omitted) = within_central_limit(parse_status(&status).unwrap());
+        assert_eq!((files.len(), omitted), (limit, 503));
+        let tracked: Vec<_> = files
+            .iter()
+            .filter(|(_, change)| *change != WorkingChange::Untracked)
+            .map(|(path, change)| (path.as_str(), *change))
+            .collect();
+        assert_eq!(
+            tracked,
+            [
+                ("src/both.ts", WorkingChange::Unmerged),
+                ("src/gone.ts", WorkingChange::Deleted),
+                ("src/z.ts", WorkingChange::Modified),
+            ]
+        );
+        // Untracked files fill the rest in path order, and the list stays sorted by path.
+        assert_eq!(files[0].0.as_str(), "a/node_modules/m00000.js");
+        assert_eq!(files[limit - 4].0.as_str(), "a/node_modules/m01996.js");
+        assert!(files.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        // The same tree always gives the same list.
+        assert_eq!(
+            within_central_limit(parse_status(&status).unwrap()),
+            (files, omitted)
+        );
     }
 
     #[test]

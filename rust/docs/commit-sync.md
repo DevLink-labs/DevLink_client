@@ -4,7 +4,7 @@
 
 ## 동작
 
-- 브로커가 시작될 때 바인딩된 Agent 프로필이 있으면 동기화를 시작한다. 원격·저장소 키 규칙은 [작업 파일 수집](working-files.md)과 같다(`dependencyRemote`, 비어 있으면 `origin`). Git 저장소가 아니거나 원격을 찾지 못하면 한 번 알리고 동기화하지 않는다.
+- 브로커가 시작될 때 바인딩된 Agent 프로필이 있으면 동기화를 시작한다. `gitCollection`이 `false`이면 작업 파일 수집과 함께 시작하지 않는다(기본 `true`). 원격·저장소 키 규칙은 [작업 파일 수집](working-files.md)과 같다(`dependencyRemote`, 비어 있으면 `origin`). Git 저장소가 아니거나 원격을 찾지 못하면 한 번 알리고 동기화하지 않는다.
 - 시작 직후, 이후 60초마다 `HEAD`에서 도달하는 병합 제외 커밋 중 마지막 체크포인트 이후의 범위를 정한다. 체크포인트의 `HEAD`·작성자 판별 기준·shallow 경계가 모두 같으면 보내지 않는다.
 - 커밋 시각이 최근 90일 안인 커밋만 보낸다. 중앙 추천이 최근 90일 커밋만 쓰기 때문이다(`RecommendationScorePolicy.COMMIT_WINDOW`). 개수 제한은 없다. 범위 안의 커밋은 첫 동기화든 이후 동기화든 모두 보낸다.
 - 범위는 `git rev-list --timestamp --no-merges --topo-order --reverse`로 오래된 순서대로 순회한다. 출력은 한 줄씩 읽고 committer 시각이 최근 90일인 SHA만 로컬에서 남긴다. Git 2.37 미만에서도 같은 명령을 쓰며 `--since`로 순회를 조기에 끊지 않는다. 그래서 시계가 틀린 PC에서 만든 오래된 시각의 커밋 앞에 있는 최근 조상도 수집한다. 선택한 SHA는 1,000개씩 묶어 `git log --no-walk --name-status -z`로 파일 목록을 읽는다.

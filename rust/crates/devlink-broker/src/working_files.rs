@@ -63,6 +63,8 @@ struct Collector {
     path: String,
     resend: Duration,
     last: Option<Sent>,
+    /// The current list was cut to central's limit and that was already reported.
+    cut_noted: bool,
 }
 
 impl Collector {
@@ -134,8 +136,17 @@ impl Collector {
     }
 
     /// The current working tree as an upload body.
-    async fn observe(&self) -> Result<Value> {
-        let (branch, files) = self.git.working().await?;
+    async fn observe(&mut self) -> Result<Value> {
+        let (branch, files, omitted) = self.git.working().await?;
+        // Over central's limit the list keeps tracked changes first (see `GitProject::working`).
+        // Say so once per stretch, since it usually means a missing `.gitignore` entry.
+        if omitted > 0 && !self.cut_noted {
+            eprintln!(
+                "More than {} changed files: {omitted} are left out of the working-file upload, untracked files first. Check .gitignore.",
+                crate::git_scope::MAX_WORKING_FILES
+            );
+        }
+        self.cut_noted = omitted > 0;
         // A branch name central would reject is reported like a detached HEAD.
         let branch = branch.filter(|name| WorkingFiles::branch_allowed(name));
         Ok(serde_json::to_value(WorkingFiles::new(
@@ -286,6 +297,7 @@ async fn collect(
         path,
         resend,
         last: None,
+        cut_noted: false,
     };
     let (sender, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
     let _ = refresher.0.set(sender);
@@ -561,6 +573,7 @@ mod tests {
             path,
             resend: INTERVAL,
             last: None,
+            cut_noted: false,
         }
     }
 
@@ -1155,6 +1168,47 @@ mod tests {
         }
         assert!(!state.log().iter().any(|line| line.starts_with("PUT")));
         assert!(uploads.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn too_many_changes_upload_the_tracked_changes_and_fill_up_with_untracked_files() {
+        let repo = repository();
+        let modules = repo.path().join("node_modules");
+        std::fs::create_dir(&modules).unwrap();
+        for i in 0..crate::git_scope::MAX_WORKING_FILES + 5 {
+            std::fs::write(modules.join(format!("m{i:05}.js")), "").unwrap();
+        }
+        let (sender, mut uploads) = mpsc::unbounded_channel();
+        let url = central(sender).await;
+        let mut collector = collector(repo.path(), &url).await;
+
+        assert!(collector.publish(false).await.unwrap());
+        assert!(collector.cut_noted);
+        let files = uploads.recv().await.unwrap().body["files"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(files.len(), crate::git_scope::MAX_WORKING_FILES);
+        // The real work in the fixture repository survives the cut.
+        for change in [
+            json!({"relativePath": "gone.ts", "changeType": "DELETED"}),
+            json!({"relativePath": "src/a.ts", "changeType": "MODIFIED"}),
+            json!({"relativePath": "src/new.ts", "changeType": "ADDED"}),
+        ] {
+            assert!(files.contains(&change), "{change}");
+        }
+
+        // Back under the limit, the whole list is sent again and the notice resets.
+        std::fs::remove_dir_all(&modules).unwrap();
+        assert!(collector.publish(false).await.unwrap());
+        assert!(!collector.cut_noted);
+        assert_eq!(
+            uploads.recv().await.unwrap().body["files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[tokio::test]

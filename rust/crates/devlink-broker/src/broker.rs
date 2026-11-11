@@ -176,16 +176,24 @@ pub async fn run(path: &Path) -> Result<()> {
                 ))
             })
     };
-    // Git 근거 수집: 작업 파일 (IDX-3-02, 30초·find_agent 직전), 커밋 이력 (IDX-3-01, 시작 시·60초)
+    // Git 근거 수집: 작업 파일 (IDX-3-02, 3초 확인·30초 재전송·find_agent 직전),
+    // 커밋 이력 (IDX-3-01, 시작 시·60초). gitCollection=false이면 둘 다 시작하지 않는다.
     let working_files = crate::working_files::WorkingFileRefresher::default();
     let git_remote = if config.dependency_remote.is_empty() {
         crate::working_files::DEFAULT_REMOTE.to_owned()
     } else {
         config.dependency_remote.clone()
     };
-    let git_binding = crate::agent_profile::inspection_binding(path)
-        .ok()
-        .flatten();
+    let git_binding = if config.git_collection {
+        crate::agent_profile::inspection_binding(path)
+            .ok()
+            .flatten()
+    } else {
+        eprintln!(
+            "Git collection is off (gitCollection=false): working files and commit history are not uploaded."
+        );
+        None
+    };
     let working_sync = git_binding.clone().map(|binding| {
         tokio::spawn(crate::working_files::run(
             binding,

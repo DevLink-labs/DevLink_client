@@ -41,7 +41,7 @@
 
 ## 작업 파일
 
-IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD나 UTF-8로 해석할 수 없는 브랜치는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 작업 파일 경로는 500코드포인트와 UTF-8 1,000바이트 한도를 모두 만족해야 한다. 초과 경로만 제외하고 정상 파일은 유지한다. 수집 가능한 파일은 2,000개 이하다. 브랜치는 중앙 규칙(문자·숫자·`._/-`, 255코드포인트 이하, `-` 시작·`..` 금지)을 따르며 `WorkingFiles::branch_allowed`로 확인한다. 수집기는 [작업 파일 수집](working-files.md)이다.
+IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD나 UTF-8로 해석할 수 없는 브랜치는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 작업 파일 경로는 500코드포인트와 UTF-8 1,000바이트 한도를 모두 만족해야 한다. 초과 경로만 제외하고 정상 파일은 유지한다. 한 번에 보내는 파일은 2,000개 이하다. 넘으면 추적 중인 파일의 변경을 먼저 넣고 미추적 파일로 남는 자리를 채운다. 브랜치는 중앙 규칙(문자·숫자·`._/-`, 255코드포인트 이하, `-` 시작·`..` 금지)을 따르며 `WorkingFiles::branch_allowed`로 확인한다. 수집기는 [작업 파일 수집](working-files.md)이다.
 
 ## 검증
 

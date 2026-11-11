@@ -43,8 +43,14 @@ pub struct Config {
     /// 보낸 작업에 이 시간(분) 동안 완료·실패·거절 알림이 없으면 로컬 지연 알림을 남김 (기본값: 30, 0이면 끔)
     #[serde(default = "task_overdue_minutes")]
     pub task_overdue_minutes: u64,
+    /// Git remote for the repository key; empty means `origin`. Also turns on the dependency
+    /// graph upload, which is sent only when this is set.
     #[serde(default)]
     pub dependency_remote: String,
+    /// Upload the bound project's working files (IDX-3-02) and commit history (IDX-3-01).
+    /// Default on; `false` stops both collectors after a broker restart.
+    #[serde(default = "git_collection")]
+    pub git_collection: bool,
 }
 
 pub(crate) const DEFAULT_LOCAL_PORT: u16 = 43127;
@@ -66,6 +72,9 @@ fn task_message_sync_interval() -> u64 {
 }
 fn task_overdue_minutes() -> u64 {
     30
+}
+fn git_collection() -> bool {
+    true
 }
 
 /// Safe field diagnostics, shared by config commands and setup.
@@ -101,6 +110,7 @@ impl Default for Config {
             task_message_sync_interval_ms: task_message_sync_interval(),
             task_overdue_minutes: task_overdue_minutes(),
             dependency_remote: String::new(),
+            git_collection: git_collection(),
         }
     }
 }
@@ -449,6 +459,29 @@ mod tests {
             assert_eq!(config.validate().is_ok(), ok, "{minutes}");
         }
         assert_eq!(Config::default().task_overdue_minutes, 30);
+    }
+
+    #[test]
+    fn git_collection_defaults_on_for_old_files_and_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A config written before the setting existed keeps collecting.
+        std::fs::write(
+            &path,
+            r#"{"serverUrl":"wss://api.devlink.ai.kr","agent":"codex","autoReconnect":true}"#,
+        )
+        .unwrap();
+        assert!(Config::load(&path).unwrap().git_collection);
+        assert!(Config::default().git_collection);
+
+        set(&path, "gitCollection", "false").unwrap();
+        assert!(!Config::load(&path).unwrap().git_collection);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["gitCollection"], false);
+        assert!(set(&path, "gitCollection", "\"no\"").is_err());
+        set(&path, "gitCollection", "true").unwrap();
+        assert!(Config::load(&path).unwrap().git_collection);
     }
 
     use super::*;
