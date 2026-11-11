@@ -389,6 +389,47 @@ impl TaskClient {
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
+    /// Read the latest team-part context summary for the actor's own team.
+    pub async fn team_context(
+        &self,
+        actor: &Principal,
+        requested_part: Option<&str>,
+        counterpart: Option<&str>,
+    ) -> Result<Value, TaskError> {
+        tokio::time::timeout(self.timeout, async {
+            let agent = self.confirm_agent(actor).await?;
+            // `PublicAgent` passes any string part through so that other tools never fail on
+            // it. Only this read needs one of the parts the context API knows.
+            let part = agent["part"]
+                .as_str()
+                .filter(|part| crate::team_context_routes::PARTS.contains(part))
+                .ok_or_else(protocol_error)?;
+            if requested_part.is_some_and(|requested| requested != part) {
+                return Err(TaskError::rejected("VALIDATION_FAILED", 400));
+            }
+            let team_id = numeric_id(actor.team_id.as_str())
+                .ok_or_else(|| TaskError::rejected("VALIDATION_FAILED", 400))?;
+            let mut query = vec![("part".to_string(), part.to_string())];
+            if let Some(counterpart) = counterpart {
+                query.push(("counterpart".to_string(), counterpart.to_string()));
+            }
+            let (status, envelope) = self
+                .request_http(
+                    reqwest::Method::GET,
+                    &format!("/api/v1/teams/{team_id}/context"),
+                    &query,
+                    None,
+                )
+                .await?;
+            if status != 200 || !envelope.success {
+                return Err(central_error(status, envelope.code.as_deref()));
+            }
+            envelope.data.ok_or_else(protocol_error)
+        })
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
+    }
+
     /// S15P31D108-188: read-only central Agent recommendation for the verified team.
     /// `question` and `repo_key` must already satisfy `agent_recommendations`.
     pub async fn find_agents(
