@@ -6,6 +6,7 @@ export const operationRoutes = {
   register_agent: '/v1/agents/register',
   list_agents: '/v1/agents/list',
   update_agent: '/v1/agents/update',
+  find_agent: '/v1/agents/find',
   create_task: '/v1/tasks/create',
   update_task_status: '/v1/tasks/status',
   complete_task: '/v1/tasks/complete',
@@ -14,6 +15,7 @@ export const operationRoutes = {
   get_updates: '/v1/updates',
   ask_question: '/v1/tasks/questions',
   answer_question: '/v1/tasks/answers',
+  get_team_context: '/v1/teams/context',
 } as const;
 export type BrokerOperation = keyof typeof operationRoutes;
 

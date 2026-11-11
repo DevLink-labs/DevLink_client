@@ -7,8 +7,13 @@ log in, select a team, create an Agent, issue a token, or deploy anything.
 
 Create `VerifiedHost::new(toolType, detectedVersion)` and then `McpConfig::new(host)`.
 The tested automatic formats are **Codex 0.166.0** and **Claude Code 2.1.317**.
-Unknown versions return `SETUP_TOOL_UNAVAILABLE` for a manual path. Supporting a
-new version requires its actual parser/Host verification, not silently guessing.
+Since 2026-11-10 those are minimum versions: the same or a later release is
+applied automatically on the assumption that it keeps the tested format. Versions
+are ordered by semantic-version precedence, so a pre-release of a later version
+(e.g. `0.167.0-alpha.1`) is also accepted and build metadata is ignored.
+Older versions, a pre-release of the minimum itself, and versions that are not
+`major.minor.patch` return `SETUP_TOOL_UNAVAILABLE` for a manual path. A release
+that changes the settings format needs its own parser/Host verification.
 
 The -108 adapter must verify Node >=24 and the built MCP entry before calling the
 provider. Version 1 accepts only an existing absolute Node executable and argv
@@ -121,6 +126,11 @@ builds a small demonstration harness. It accepts the example JSON on stdin and
 `--apply` plans and applies within that one invocation. This harness is for
 reproduction/integration tests, not a replacement for -111's setup flow or a
 persistent reviewed-plan store. The product CLI must retain the same plan instance.
+
+`--supports` takes `{"toolType":"codex","hostVersion":"0.167.0"}` on stdin and
+prints `{"supported":true|false}` with exit 0: whether `VerifiedHost::new` accepts
+that version. It reads no path and writes nothing. A malformed request exits 2
+with `SETUP_INPUT_INVALID`, as in the other modes.
 
 ```json
 {

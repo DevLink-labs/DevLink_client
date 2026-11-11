@@ -215,13 +215,40 @@ async fn real_node_loads_npm_esm_entries_for_both_hosts_and_reuses_saved_paths()
 }
 
 #[tokio::test]
-async fn explicit_korean_path_is_reusable_outside_path_and_unknown_versions_are_provider_decisions()
-{
+async fn hosts_newer_than_the_verified_minimum_support_automatic_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    tool_fixture::host(root.path(), "codex", "codex-cli 0.167.0");
+    tool_fixture::host(root.path(), "claude", "2.1.319 (Claude Code)");
+    let reports = search(root.path()).detect(None, None).await;
+    assert_eq!(reports.len(), 2);
+    for report in &reports {
+        assert_eq!(report.status, DetectionStatus::Available, "{reports:?}");
+        assert!(report.mcp_automatic_supported, "{reports:?}");
+        assert!(report.selected.as_ref().unwrap().verified_host().is_ok());
+    }
+}
+
+#[tokio::test]
+async fn a_pre_release_of_the_minimum_is_available_but_not_applied_automatically() {
+    let root = tempfile::tempdir().unwrap();
+    tool_fixture::host(root.path(), "codex", "codex-cli 0.166.0-alpha.6");
+    let reports = search(root.path()).detect(None, None).await;
+    let report = reports
+        .iter()
+        .find(|r| r.tool_type == ToolType::Codex)
+        .unwrap();
+    assert_eq!(report.status, DetectionStatus::Available, "{reports:?}");
+    assert_eq!(report.selected.as_ref().unwrap().version, "0.166.0-alpha.6");
+    assert!(!report.mcp_automatic_supported);
+}
+
+#[tokio::test]
+async fn explicit_korean_path_is_reusable_outside_path_and_older_versions_are_provider_decisions() {
     let root = tempfile::tempdir().unwrap();
     let exe = tool_fixture::host(
         &root.path().join("한글 with spaces"),
         "codex",
-        "codex-cli 9.9.9",
+        "codex-cli 0.0.1",
     );
     let reports = search(root.path())
         .detect(None, Some((ToolType::Codex, &exe)))

@@ -56,6 +56,8 @@ devlink [--config <FILE>] setup status --output json
 | `agent.id` | use일 때 필수, create일 때 금지 | 이름 일치로 ID를 추정하지 않음 |
 | `agent.name` | create일 때 필수, use일 때 금지 | 중앙 표시명 |
 | `agent.roleDescription` | create일 때 선택 문자열 | 생략은 없음. use는 중앙 메타데이터를 변경하지 않음 |
+| `agent.part` | create일 때 선택, `FRONTEND / BACKEND / INFRA / OTHER` | 생략은 `OTHER`. 대소문자까지 정확히 일치해야 하며 use에서는 금지 |
+| `agent.roles` | create일 때 선택 문자열 배열 | 생략은 `[]`. 최대 10개, 각 태그는 공백만으로 구성할 수 없고 UTF-16 64자 이하. use에서는 금지 |
 | `agent.issueToken` | use일 때 선택 boolean, 기본 false | 토큰이 없거나 무효이면 true일 때만 발급/회전. create에서는 금지. true인 호출을 네트워크 오류 후 자동 반복하지 않음 |
 | `mcp.mode` | `apply | replace | manual`, 필수 | apply는 기존 DevLink 항목이 다르면 충돌로 보존. replace는 백업 후 DevLink 항목만 현재 프로필로 교체. manual은 설정 안내만 반환하고 종료 3 |
 | `mcp.targetPath` | apply·replace일 때 필수 절대 경로 | 선택 도구와 일치하는 프로젝트 범위 설정 파일. 전역 파일·프로젝트 밖 경로는 거부. manual에서는 금지 |
@@ -91,9 +93,19 @@ ID는 `1..9223372036854775807` 범위의 정규 십진 **문자열**이다. 선�
 {
   "action": "create",
   "name": "DevLink 작업 Agent",
-  "roleDescription": "프로젝트 작업과 검증"
+  "roleDescription": "프로젝트 작업과 검증",
+  "part": "BACKEND",
+  "roles": ["API", "인증"]
 }
 ```
+
+### SET-3-01 담당 정보 계약
+
+서버 메타데이터 API 변경 커밋 `42e4ea0`의 생성 DTO·서비스를 기준으로 한다. 태그 제한은 정규화 전 입력에 적용하며, 각 문자열의 앞뒤 U+0000–U+0020을 제거하고 중복을 첫 등장 순서로 제거한다. `roleDescription`과 `roles`는 독립된 필드다. null, 비문자열 요소, 소문자 파트 등은 중앙 호출 전에 거부한다. 생성 요청과 중앙 응답의 담당 정보가 다르면 생성 결과 불명으로 보존하며 자동 생성 재시도나 토큰 발급을 진행하지 않는다.
+
+대화형 setup은 새 Agent 생성 시 생략된 담당 파트와 역할 태그를 질문한다. 빈 파트 입력은 `OTHER`, 빈 태그 입력은 `[]`이다. `--part BACKEND --roles API,인증`으로 지정할 수도 있다. 기존 Agent 재사용에서는 저장된 담당 정보를 유지하고, `--agent-id`와 담당 정보 옵션을 함께 지정할 수 없다. JSONL 진행·최종 응답 형식과 계약 버전은 유지한다.
+
+데스크톱의 `ProjectConnectView`는 폴더 선택 후 AI 도구·담당 파트·역할 태그를 입력받아 명시적으로 연결을 시작한다. `setup.run` 네 번째 인자와 `desktop/setup-ipc.js`를 통해 동일한 `agent.part`·`agent.roles` 필드를 전달하고 검증한다. 비밀번호 재입력과 연결 재시도에도 담당 정보를 유지한다. 입력 화면에서 지정하지 않은 필드는 생략해 CLI가 신규 등록 시 `OTHER`·`[]`, 기존 프로필 재사용 시 저장값을 사용하도록 한다. 이 계약은 서버 변경 배포를 전제로 하며, 로컬 mock 회귀 통과와 실제 중앙 서버에서의 저장·조회 확인은 구분한다.
 
 ## 3. 단계와 상태
 
@@ -323,7 +335,7 @@ McpConfig.inspect({toolType, targetPath, brokerFile, executable}) -> ConfigInspe
 - apply는 동일 경로/예상 digest를 다시 확인하고 DevLink 항목만 병합한다. 다른 MCP 서버 항목은 보존한다. 기존 DevLink 항목이 다른 실행 경로/자격 파일을 가리키면 conflict이며 묵시적으로 덮어쓰지 않는다. global 설정은 이번 범위에서 제외한다.
 - 기존 파일이 있으면 같은 사용자 전용 위치에 비공개 백업을 내구 저장한 후 원자 교체한다. 원본/백업·부모의 링크/권한을 검사한다. 성공 후 해당 항목을 다시 파싱해 확인한다. 검사 실패 시 본인이 쓴 버전인 경우만 백업 복원하며, 동시 변경이 발견되면 덮어쓰지 않고 오류를 반환한다. 백업 내용은 출력하지 않는다.
 - apply 결과: `status: applied | unchanged`, targetPath, 선택 backupPath, restartRequired. 백업 저장소 용량 한도 오류는 선택 recoveryDirectory로 수동 점검 위치를 제공한다. 실패도 `outcome`과 `rollback: restored | not_needed | failed | conflict`를 보존한다. inspect 결과는 `applied | missing | conflict | unknown`과 targetPath다.
-- 도구별 파일 문법/프로젝트 설정 지원·실행 경로는 adapter 구현에서 고정 지원 버전에 대조한다. 지원하지 않는 Host 버전은 명시적으로 manual 또는 TOOL_UNAVAILABLE이며, 임의 전역 경로에 대신 쓰지 않는다.
+- 도구별 파일 문법/프로젝트 설정 지원·실행 경로는 adapter 구현에서 검증한 최소 지원 버전에 대조한다(최소 버전 이상이면 지원). 지원하지 않는 Host 버전은 명시적으로 manual 또는 TOOL_UNAVAILABLE이며, 임의 전역 경로에 대신 쓰지 않는다.
 - manual은 안전한 DevLink 설정 조각과 적용 위치/재시작 안내만 반환한다. 적용 완료로 표시하지 않는다. 적용 후 새 setup 실행에서 inspect가 일치하면 unchanged로 통과한다.
 
 ### 6.3 연결 상태: 최보경 연동 창구

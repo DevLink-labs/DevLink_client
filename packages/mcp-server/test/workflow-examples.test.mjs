@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { recommendationExamples } from '../dist/broker/recommendations.js';
 import { createServer } from '../dist/server.js';
 
 const examples = JSON.parse(await readFile(new URL('../examples/workflow.json', import.meta.url), 'utf8'));
@@ -10,7 +11,7 @@ const guide = await readFile(new URL('../docs/agent-workflow.md', import.meta.ur
 
 test('published workflow JSON blocks match the reusable tool examples', () => {
   const blocks = [...guide.matchAll(/<!-- example:(\w+) -->\s*```json\r?\n([\s\S]*?)\r?\n```/g)];
-  assert.equal(blocks.length, 8);
+  assert.equal(blocks.length, 9);
   const names = new Set();
   for (const [, name, json] of blocks) {
     assert.ok(!names.has(name), `Duplicate document example ${name}`); names.add(name);
@@ -23,7 +24,9 @@ test('every workflow example is accepted by the actual registered MCP tool schem
   const observed = [];
   const adapter = { async execute(operation, args, options) {
     observed.push({ operation, args });
-    return { requestId: `example-${observed.length}`, mcpRequestId: options.mcpRequestId, data: { operation, arguments: args } };
+    // find_agent output is validated against the recommendation schema, so answer with a real example.
+    const data = operation === 'find_agent' ? recommendationExamples.matchedWithGit : { operation, arguments: args };
+    return { requestId: `example-${observed.length}`, mcpRequestId: options.mcpRequestId, data };
   } };
   const server = createServer({ debug() {}, info() {}, error() {} }, adapter);
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
@@ -35,11 +38,11 @@ test('every workflow example is accepted by the actual registered MCP tool schem
     assert.ok(catalog.includes(call.name), `Missing registered tool ${call.name}`);
     const response = await client.callTool(call);
     assert.notEqual(response.isError, true, `Invalid ${call.name} example`);
-    assert.deepEqual(response.structuredContent.data, { operation: call.name, arguments: call.arguments });
+    assert.deepEqual(response.structuredContent.data, call.name === 'find_agent' ? recommendationExamples.matchedWithGit : { operation: call.name, arguments: call.arguments });
     assert.deepEqual(JSON.parse(response.content[0].text), response.structuredContent);
   }
   assert.equal(observed.length, Object.keys(examples.calls).length);
-  assert.equal(new Set(observed.map((call) => call.operation)).size, 7);
+  assert.equal(new Set(observed.map((call) => call.operation)).size, 8);
 });
 
 test('workflow result examples carry all MVP reporting information even when DTO fields are optional', () => {

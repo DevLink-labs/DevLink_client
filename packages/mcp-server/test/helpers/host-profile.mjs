@@ -2,6 +2,15 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 export const authDigest=bytes=>createHash('sha256').update(bytes).digest('hex');
+/** The bare version in a Host's `--version` output. It only reads the output: whether
+ * that version is applied automatically stays the Rust provider's decision. */
+export function hostVersion(tool,output){
+ // Rust's `str::trim` keeps a byte order mark, so the product parser rejects it; do the same here.
+ const raw=String(output),text=raw.includes('\uFEFF')?'':raw.trim(),codex=tool==='codex';
+ const version=codex?(text.startsWith('codex-cli ')?text.slice(10):''):(text.endsWith(' (Claude Code)')?text.slice(0,-14):'');
+ if(version.length>64||!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?$/.test(version))throw new Error('Unrecognized '+(codex?'Codex':'Claude Code')+' version output');
+ return version;
+}
 /** A private access-token-only login: the user's refresh token never reaches a child. */
 export async function prepareCodexHome({directory,project,originalHome,run}){
  const script=String.raw`import os,json,tomllib,datetime,time,base64

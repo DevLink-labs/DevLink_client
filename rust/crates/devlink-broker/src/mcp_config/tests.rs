@@ -2,6 +2,133 @@ use super::*;
 use crate::credentials;
 use serde_json::json;
 use std::fs;
+
+#[test]
+fn guide_classifies_json_without_exposing_existing_values_or_writing_files() {
+    let f = Fixture::new();
+    let input = storage::normalize(ToolType::ClaudeCode, f.input(ToolType::ClaudeCode)).unwrap();
+    for (bytes, state, kind, scope) in [
+        (None, "file_missing", "create_file", "whole_file"),
+        (
+            Some(br#"{"custom":"SECRET"}"#.as_slice()),
+            "entry_missing",
+            "add_container",
+            "container",
+        ),
+        (
+            Some(br#"{"mcpServers":{"other":{"env":{"token":"SECRET"}}}}"#.as_slice()),
+            "entry_missing",
+            "add_entry",
+            "entry",
+        ),
+        (
+            Some(br#"{"mcpServers":{"devlink":{"command":"OLD_SECRET"}}}"#.as_slice()),
+            "different",
+            "replace_entry",
+            "entry",
+        ),
+    ] {
+        let (actual, edit, items, _) = guide::classify(&input, bytes).unwrap();
+        assert_eq!((actual, edit, items[0].scope), (state, kind, scope));
+        assert!(!items[0].snippet.contains("SECRET"));
+        let applied = match scope {
+            "whole_file" => items[0].snippet.clone(),
+            "container" => format!(r#"{{"custom":"SECRET",{}}}"#, items[0].snippet),
+            _ => format!(
+                r#"{{"mcpServers":{{"other":{{"command":"keep"}},{}}}}}"#,
+                items[0].snippet
+            ),
+        };
+        assert_eq!(
+            format::configured_entry(input.tool, applied.as_bytes()).unwrap(),
+            Some(format::entry(&input))
+        );
+    }
+    for bytes in [
+        br#"{"mcpServers":[]}"#.as_slice(),
+        br#"{"mcpServers":{},"mcpServers":{}}"#,
+        b"{ broken",
+    ] {
+        let (state, _, copies, _) = guide::classify(&input, Some(bytes)).unwrap();
+        assert_eq!(state, "invalid");
+        assert!(copies.is_empty());
+    }
+    let (_, applied) = format::merge(input.tool, None, &format::entry(&input)).unwrap();
+    assert_eq!(
+        guide::classify(&input, Some(&applied)).unwrap().0,
+        "matches"
+    );
+    assert!(!f.input(input.tool).target_path.exists());
+}
+
+#[test]
+fn guide_rejects_copied_credentials_even_when_devlink_entry_matches() {
+    let f = Fixture::new();
+    let input = storage::normalize(ToolType::ClaudeCode, f.input(ToolType::ClaudeCode)).unwrap();
+    let (_, applied) = format::merge(input.tool, None, &format::entry(&input)).unwrap();
+    let mut root: serde_json::Value = serde_json::from_slice(&applied).unwrap();
+    root["localToken"] = json!("SECRET");
+    root["brokerUrl"] = json!("http://127.0.0.1:43127");
+    let leaked = serde_json::to_vec(&root).unwrap();
+    assert_eq!(
+        format::configured_entry(input.tool, &leaked).unwrap(),
+        Some(format::entry(&input))
+    );
+    assert_eq!(
+        guide::classify(&input, Some(&leaked)).unwrap_err().code,
+        "SETUP_UNSAFE_FILE"
+    );
+    assert_eq!(
+        format::merge(input.tool, Some(&leaked), &format::entry(&input))
+            .unwrap_err()
+            .code,
+        "SETUP_UNSAFE_FILE"
+    );
+}
+
+#[test]
+fn guide_codex_table_and_inline_snippets_preserve_other_settings() {
+    let f = Fixture::new();
+    let input = storage::normalize(ToolType::Codex, f.input(ToolType::Codex)).unwrap();
+    let (_, _, items, _) = guide::classify(
+        &input,
+        Some(b"model='keep'\n[mcp_servers.other]\ncommand='SECRET'\n"),
+    )
+    .unwrap();
+    assert!(!items[0].snippet.contains("SECRET"));
+    assert!(items[0].snippet.contains("[mcp_servers.devlink]"));
+    let applied = format!(
+        "model='keep'\n[mcp_servers.other]\ncommand='SECRET'\n{}",
+        items[0].snippet
+    );
+    assert_eq!(
+        format::configured_entry(input.tool, applied.as_bytes()).unwrap(),
+        Some(format::entry(&input))
+    );
+    let (_, _, copies, reason) =
+        guide::classify(&input, Some(b"mcp_servers={other={command='SECRET'}}\n")).unwrap();
+    assert_eq!(reason, "edit_inline_container");
+    let inline = format!(
+        "mcp_servers={{other={{command='SECRET'}},{}}}\n",
+        copies[0].snippet
+    );
+    assert_eq!(
+        format::configured_entry(input.tool, inline.as_bytes()).unwrap(),
+        Some(format::entry(&input))
+    );
+    for bytes in [
+        b"[mcp_servers.devlink]\ncommand='old'\nstartup_timeout_sec=20\n".as_slice(),
+        b"[mcp_servers]\ndevlink={command='old'}\n".as_slice(),
+        b"[mcp_servers.devlink]\ncommand='old'\n[mcp_servers.devlink.env]\nsecret='SECRET'\n",
+    ] {
+        let (state, kind, copies, _) = guide::classify(&input, Some(bytes)).unwrap();
+        assert_eq!((state, kind), ("different", "replace_entry"));
+        assert!(!copies[0].snippet.contains("SECRET"));
+    }
+    let (state, _, copies, _) = guide::classify(&input, Some(b"[mcp_servers\n")).unwrap();
+    assert_eq!(state, "invalid");
+    assert!(copies.is_empty());
+}
 #[derive(Clone, Copy)]
 pub(super) enum Fault {
     BeforeCommitFailure,
@@ -97,16 +224,7 @@ impl Fixture {
         }
     }
     fn manager(tool: ToolType) -> McpConfig {
-        McpConfig::new(
-            VerifiedHost::new(
-                tool,
-                match tool {
-                    ToolType::Codex => CODEX_VERSIONS[0],
-                    ToolType::ClaudeCode => CLAUDE_VERSIONS[0],
-                },
-            )
-            .unwrap(),
-        )
+        McpConfig::new(VerifiedHost::new(tool, &minimum(tool)).unwrap())
     }
     fn seed(&self, tool: ToolType, bytes: &[u8]) {
         let p = self.input(tool);
@@ -346,20 +464,77 @@ fn write_and_post_inspection_failures_restore_only_the_owned_version() {
     }
 }
 
+fn minimum(tool: ToolType) -> String {
+    let [major, minor, patch] = match tool {
+        ToolType::Codex => CODEX_MIN_VERSION,
+        ToolType::ClaudeCode => CLAUDE_MIN_VERSION,
+    };
+    format!("{major}.{minor}.{patch}")
+}
+
 #[test]
-fn only_listed_versions_of_the_selected_host_are_verified() {
-    for (tool, versions, other) in [
-        (ToolType::Codex, CODEX_VERSIONS, CLAUDE_VERSIONS),
-        (ToolType::ClaudeCode, CLAUDE_VERSIONS, CODEX_VERSIONS),
+fn the_minimum_host_version_and_later_releases_are_verified() {
+    for (tool, verified, older) in [
+        (
+            ToolType::Codex,
+            [
+                "0.166.0",
+                "0.166.0+build.7",
+                // A hyphen inside build metadata is not a pre-release marker.
+                "0.166.0+build-1",
+                "0.166.1",
+                "0.167.0",
+                "0.167.0-alpha.1",
+                "1.0.0",
+                "0.1000.0",
+            ],
+            [
+                "0.165.9",
+                "0.166.0-beta.1",
+                "0.166.0-alpha.6+build",
+                "0.99.999",
+            ],
+        ),
+        (
+            ToolType::ClaudeCode,
+            [
+                "2.1.317",
+                "2.1.317+build.7",
+                "2.1.317+exp-sha.5",
+                "2.1.319",
+                "2.2.0",
+                "2.2.0-rc.1",
+                "3.0.0",
+                "2.1.1000",
+            ],
+            ["2.1.316", "2.1.317-beta.1", "2.0.999", "1.9.999"],
+        ),
     ] {
-        assert!(!versions.is_empty());
-        for version in versions {
-            assert!(VerifiedHost::new(tool, version).is_ok());
+        assert!(VerifiedHost::new(tool, &minimum(tool)).is_ok());
+        for version in verified {
+            assert!(VerifiedHost::new(tool, version).is_ok(), "{version}");
         }
-        for version in other.iter().copied().chain(["", "9.9.9", "0.166.0-beta.1"]) {
-            if !versions.contains(&version) {
-                assert!(VerifiedHost::new(tool, version).is_err());
-            }
+        for version in older {
+            assert!(VerifiedHost::new(tool, version).is_err(), "{version}");
+        }
+        // Anything that is not `major.minor.patch` is never compared as a version.
+        for version in [
+            "",
+            "unverified",
+            "9",
+            "9.9",
+            "9.9.9.9",
+            "9..9",
+            ".9.9",
+            "9.9.",
+            "9.9.x",
+            "+9.9.9",
+            "-9.9.9",
+            "v9.9.9",
+            " 9.9.9",
+            "9.9.99999999999999999999999",
+        ] {
+            assert!(VerifiedHost::new(tool, version).is_err(), "{version}");
         }
     }
 }

@@ -367,6 +367,41 @@ async fn pr37_owned_choices_validate_the_filter_and_reach_progress_and_explicit_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_create_replaces_only_a_binding_whose_agent_central_deleted() {
+    let (f, _, expected) = fixture().await;
+    registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
+    assert_eq!(profile(&f)["state"]["agent"]["agentId"], 201);
+    // 웹에서 Agent 삭제. 중앙 ID는 재사용되지 않으므로 다른 팀 Agent로 다음 ID를 202로 둔다
+    {
+        let mut agents = f.state.agents.lock().unwrap();
+        agents.remove(&201);
+        agents.insert(900, json!({"agentId":900,"teamId":999}));
+    }
+    let original = fs::read(agent_profile::path(&f.path)).unwrap();
+    // 새 연결을 명시하지 않은 재사용·기존 ID 선택은 그대로 거부하고 로컬 연결을 보존
+    for selection in [None, Some(Selection::Use(201))] {
+        let rejected = registration::ensure(&f.path, &expected, selection)
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.kind, FailureKind::Rejected);
+        assert_eq!(fs::read(agent_profile::path(&f.path)).unwrap(), original);
+    }
+    assert_eq!(counts(&f), (1, 0));
+
+    let replaced = registration::ensure(&f.path, &expected, Some(Selection::Create))
+        .await
+        .unwrap();
+    assert!(replaced.created && !replaced.reused);
+    assert_eq!(replaced.state, R::TokenRequired);
+    assert_eq!(replaced.agent_id, Some(202));
+    assert_eq!(profile(&f)["state"]["kind"], "needs_token");
+    assert_eq!(profile(&f)["state"]["agent"]["agentId"], 202);
+    assert_eq!(counts(&f), (2, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creation_is_explicit_durable_and_never_issues_a_token_or_sends_local_paths() {
     let (f, _, expected) = fixture().await;
     assert_eq!(
@@ -552,6 +587,8 @@ async fn ready_agent_reuse_preserves_token_and_checks_live_central_metadata() {
         agent_profile::CreateOptions {
             name: metadata.agent_name.clone(),
             role_description: metadata.role_description.clone(),
+            part: metadata.part,
+            roles: metadata.roles.clone(),
             tool: agent_profile::Tool::Codex,
             project_name: metadata.project_name.clone(),
             project: expected.project.root.clone(),
@@ -663,6 +700,23 @@ async fn setup_reports_required_input_known_ids_and_token_boundary_without_start
 }
 
 struct InteractiveRecovery;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_ignoring_routing_metadata_leaves_creation_unknown_without_token_or_retry() {
+    let (f, _, mut expected) = fixture().await;
+    expected.project.metadata.part = devlink_broker::agent_metadata::AgentPart::Backend;
+    expected.project.metadata.roles = vec!["API".into()];
+    f.state.create_mode.store(5, Ordering::SeqCst);
+    for _ in 0..2 {
+        let result = registration::ensure(&f.path, &expected, Some(Selection::Create))
+            .await
+            .unwrap();
+        assert_eq!(result.state, R::CreationUnknown);
+        assert_eq!(result.outcome, Mutation::Unknown);
+        assert_eq!(profile(&f)["state"]["kind"], "create_pending");
+    }
+    assert_eq!(counts(&f), (1, 0));
+}
+
 impl AgentInput for InteractiveRecovery {
     fn available(&self) -> bool {
         true
@@ -682,6 +736,81 @@ impl AgentInput for InteractiveRecovery {
     }
 }
 
+struct RoutingInput(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl AgentInput for RoutingInput {
+    fn available(&self) -> bool {
+        true
+    }
+    fn interactive(&self) -> bool {
+        true
+    }
+    async fn request(&mut self, _: &[setup::AgentChoice]) -> Result<Selection, AgentInputError> {
+        Ok(Selection::Create)
+    }
+    async fn routing_metadata(
+        &mut self,
+        part: Option<devlink_broker::agent_metadata::AgentPart>,
+        roles: Option<Vec<String>>,
+    ) -> Result<(devlink_broker::agent_metadata::AgentPart, Vec<String>), AgentInputError> {
+        assert!(part.is_none() && roles.is_none());
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok((
+            devlink_broker::agent_metadata::AgentPart::Backend,
+            vec![" API ".into(), "API".into()],
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_creation_collects_routing_metadata_once_and_reuses_it() {
+    let (f, stages, _) = fixture().await;
+    let prompts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut stages = stages
+        .with_agent_input(RoutingInput(prompts.clone()))
+        .with_agent(Some(Selection::Create));
+    let context = SetupContext {
+        config_path: f.path.clone(),
+    };
+    let StepResult::InputRequired(required) = stages.execute(Step::RegisterAgent, &context).await
+    else {
+        panic!("expected routing metadata input");
+    };
+    assert_eq!(
+        required
+            .required_inputs
+            .iter()
+            .map(|i| i.field)
+            .collect::<Vec<_>>(),
+        vec!["agent.part", "agent.roles"]
+    );
+    assert!(stages.can_resolve_input() && stages.input_is_interactive());
+    assert_eq!(counts(&f), (0, 0));
+    stages.resolve_input(&required).await.unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            stages.execute(Step::RegisterAgent, &context).await,
+            StepResult::Complete { .. }
+        ));
+        assert_eq!(profile(&f)["state"]["agent"]["part"], "BACKEND");
+        assert_eq!(profile(&f)["state"]["agent"]["roles"], json!(["API"]));
+    }
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(counts(&f), (1, 1));
+    let saved = devlink_broker::setup_project::prepare(
+        &f.path,
+        &ProjectOptions {
+            path: Some(f._root.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        saved.metadata.part,
+        devlink_broker::agent_metadata::AgentPart::Backend
+    );
+    assert_eq!(saved.metadata.roles, vec!["API"]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_registration_retries_a_confirmed_name_conflict_with_a_new_name() {
     let (f, stages, expected) = fixture().await;
@@ -692,6 +821,11 @@ async fn interactive_registration_retries_a_confirmed_name_conflict_with_a_new_n
     let mut stages = stages
         .with_agent_input(InteractiveRecovery)
         .with_agent(Some(Selection::Create));
+    let StepResult::InputRequired(metadata) = stages.execute(Step::RegisterAgent, &context).await
+    else {
+        panic!("expected routing metadata input");
+    };
+    stages.resolve_input(&metadata).await.unwrap();
     let StepResult::InputRequired(required) = stages.execute(Step::RegisterAgent, &context).await
     else {
         panic!("expected a prompt to rename the Agent");
@@ -1012,6 +1146,8 @@ async fn review_explicit_same_id_refreshes_central_metadata_and_preserves_ready_
         agent_profile::CreateOptions {
             name: metadata.agent_name.clone(),
             role_description: metadata.role_description.clone(),
+            part: metadata.part,
+            roles: metadata.roles.clone(),
             tool: agent_profile::Tool::Codex,
             project_name: metadata.project_name.clone(),
             project: expected.project.root.clone(),
@@ -1028,6 +1164,8 @@ async fn review_explicit_same_id_refreshes_central_metadata_and_preserves_ready_
         central["name"] = json!("웹에서 변경한 Agent");
         central["projectName"] = json!("새 프로젝트 표시명");
         central["roleDescription"] = json!("갱신된 역할");
+        central["part"] = json!("INFRA");
+        central["roles"] = json!(["배포"]);
     }
     // A read/repeated create cannot silently rewrite the saved metadata.
     for selection in [None, Some(Selection::Create)] {
@@ -1067,6 +1205,8 @@ async fn review_explicit_same_id_refreshes_central_metadata_and_preserves_ready_
     assert_eq!(after["projectRoot"], before["projectRoot"]);
     assert_eq!(after["state"]["agent"]["name"], "웹에서 변경한 Agent");
     assert_eq!(after["state"]["agent"]["projectName"], "새 프로젝트 표시명");
+    assert_eq!(after["state"]["agent"]["part"], "INFRA");
+    assert_eq!(after["state"]["agent"]["roles"], json!(["배포"]));
     assert_eq!(
         stages.project().unwrap().metadata.agent_name,
         "웹에서 변경한 Agent"

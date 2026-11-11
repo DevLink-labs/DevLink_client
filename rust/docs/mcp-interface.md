@@ -2,7 +2,7 @@
 
 2026-10-30 현재 구현 기준. CLI는 독립 Rust 브로커를 제어하고 Host는 stdio MCP 프로세스를 제어한다. MCP는 인증된 loopback HTTP로 브로커를 호출하며 중앙 토큰과 WebSocket은 브로커가 관리한다. MCP 종료는 공유 브로커 종료로 이어지지 않는다.
 
-CLI/설정·자격 파일·세션 4개·업무 HTTP 경로(2026-11-09 기준 11개, `packages/mcp-server/src/broker/contracts.ts`의 `operationRoutes`)·중앙 신원·수신함/ACK provider는 구현되어 있다. MCP 도구의 최종 DTO 수렴(-97)과 실제 Host 전체 왕복(-66)은 별도다. [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 참고한다.
+CLI/설정·자격 파일·세션 4개·업무 HTTP 경로(2026-11-09 기준 12개, `packages/mcp-server/src/broker/contracts.ts`의 `operationRoutes`)·중앙 신원·수신함/ACK provider는 구현되어 있다. MCP 도구의 최종 DTO 수렴(-97)과 실제 Host 전체 왕복(-66)은 별도다. [진행 현황](../PROJECT_STATUS.md)과 [검증 요약](verification.md)을 참고한다.
 
 ## 세션·전송 규칙
 
@@ -82,7 +82,8 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | --- | --- | --- |
 | register_agent | /v1/agents/register | [기존 Agent 확인](business-relay.md) |
 | list_agents | /v1/agents/list | [팀 목록](business-relay.md) |
-| update_agent | /v1/agents/update | [Agent 정보 수정](agent-bootstrap.md#agent-정보-수정-s15p31d108-146) |
+| update_agent | /v1/agents/update | [Agent 정보 수정](agent-bootstrap.md#agent-정보-수정-s15p31d108-146--183) |
+| find_agent | /v1/agents/find | [담당 Agent 추천 중계](agent-recommendation.md) |
 | create_task | /v1/tasks/create | [작업 생성·requestKey](business-relay.md) |
 | update_task_status | /v1/tasks/status | [상태 변경](task-operations.md) |
 | complete_task | /v1/tasks/complete | [완료](task-operations.md) |
@@ -90,6 +91,7 @@ health/shutdown은 요청 본문을 사용하지 않습니다. Health의 상태 
 | get_task_result | /v1/tasks/result | [상세·결과](task-operations.md) |
 | ask_question | /v1/tasks/questions | [질문·답변](task-operations.md#질문답변-s15p31d108-166) |
 | answer_question | /v1/tasks/answers | [질문·답변](task-operations.md#질문답변-s15p31d108-166) |
+| get_team_context | /v1/teams/context | 팀·파트 맥락 요약 조회(읽기 전용). bound 세션의 Agent 파트를 `/api/v1/agents/me`로 확인해 중앙 `GET /api/v1/teams/{teamId}/context?part=&counterpart=`에 전달한다. 요청의 `part`는 생략할 수 있으며 명시할 경우 확인한 파트와 일치해야 한다. 중앙이 파트를 보내지 않거나 `FRONTEND / BACKEND / INFRA / OTHER`가 아니면 중앙 context를 호출하지 않고 `CENTRAL_PROTOCOL_ERROR`를 돌려준다 |
 
 register_agent는 최초 Agent 생성이 아니라 bootstrap 자격의 기존 Agent 확인이다. 목록·생성·상태 변경·완료는 bound 세션을 요구한다. 업무 권한·상태 전이·원자 저장은 중앙이 판단한다.
 

@@ -30,6 +30,22 @@ export class McpSession {
     return callTool(this.session.client, name, args, code);
   }
 
+  /** Calls a tool and returns its structured result whether or not it is an error (for observations). */
+  async attempt(name: string, args: Record<string, unknown> = {}): Promise<{ isError: boolean; value: any }> {
+    const result = await this.session.client.callTool({ name, arguments: args });
+    return { isError: result.isError === true, value: result.structuredContent };
+  }
+
+  /** Calls a tool with arguments its input schema must reject before the broker; returns whether it did. */
+  async rejectsInput(name: string, args: Record<string, unknown>): Promise<boolean> {
+    try {
+      const result = await this.session.client.callTool({ name, arguments: args });
+      return result.isError === true && result.structuredContent === undefined;
+    } catch (error: any) {
+      return error?.code === -32602;
+    }
+  }
+
   async close() {
     if (this.closed) return;
     this.closed = true;

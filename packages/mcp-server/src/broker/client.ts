@@ -52,6 +52,8 @@ export class BrokerClient {
   private observedContext: string | undefined;
   private contextConstraint: Readonly<{ userId: string; teamId: string; agentId: string }> | undefined;
   private contextBlocked = false;
+  /** False after a broker rejected the claim's processId field (older broker, #108). */
+  private sendProcessId = true;
 
   constructor(private readonly options: BrokerClientOptions = {}) {
     validateTimeout(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
@@ -251,10 +253,26 @@ export class BrokerClient {
       const http = await this.transport();
       const requestId = randomUUID();
       const mode = 'recover';
-      const data = await http.request('/v1/sessions', {
+      // #108: with this process ID the broker ends the session as soon as this process exits,
+      // even when a Host kills it without closing stdin. A broker older than that field rejects
+      // the request (VALIDATION_FAILED, nothing created); claim once more without it.
+      const claim = (withProcessId: boolean) => http.request('/v1/sessions', {
         requestId, instanceId: this.instanceId, mode,
         ...((this.agentId ?? this.pendingAgentId) ? { agentId: this.agentId ?? this.pendingAgentId } : {}),
+        ...(withProcessId ? { processId: process.pid } : {}),
       });
+      let data: unknown;
+      try {
+        data = await claim(this.sendProcessId);
+      } catch (error) {
+        if (!this.sendProcessId || !(error instanceof BrokerFault) || error.code !== 'VALIDATION_FAILED') throw error;
+        data = await claim(false);
+        // Stop sending the field only once a claim without it was accepted (an older broker).
+        // If the retry fails too, keep sending it. A transient 408/413/415, which also reads as
+        // VALIDATION_FAILED, followed by an accepted retry would still turn it off; on a local
+        // loopback with a small body that is not expected.
+        this.sendProcessId = false;
+      }
       const session = this.checkedSession(data, requestId);
       if (this.closed) throw new BrokerFault('CLIENT_CLOSED', requestId);
       if (this.terminal) throw new BrokerFault(this.terminal, requestId);

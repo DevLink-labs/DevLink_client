@@ -211,9 +211,32 @@ impl TaskClient {
         query: &[(String, String)],
         body: Option<Value>,
     ) -> Result<(u16, CentralEnvelope), TaskError> {
-        if body.as_ref().is_some_and(|value| {
-            !serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= REQUEST_LIMIT)
-        }) {
+        self.request_with_limit(method, path, query, body, REQUEST_LIMIT)
+            .await
+    }
+
+    pub(crate) async fn request_graph_http(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, CentralEnvelope), TaskError> {
+        self.request_with_limit(method, path, &[], body, 2 * 1024 * 1024)
+            .await
+    }
+
+    async fn request_with_limit(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<Value>,
+        limit: usize,
+    ) -> Result<(u16, CentralEnvelope), TaskError> {
+        if body
+            .as_ref()
+            .is_some_and(|value| !serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= limit))
+        {
             return Err(TaskError::rejected("VALIDATION_FAILED", 400));
         }
         tokio::time::timeout(self.timeout, self.exchange_http(method, path, query, body))
@@ -366,6 +389,81 @@ impl TaskClient {
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
+    /// Read the latest team-part context summary for the actor's own team.
+    pub async fn team_context(
+        &self,
+        actor: &Principal,
+        requested_part: Option<&str>,
+        counterpart: Option<&str>,
+    ) -> Result<Value, TaskError> {
+        tokio::time::timeout(self.timeout, async {
+            let agent = self.confirm_agent(actor).await?;
+            // `PublicAgent` passes any string part through so that other tools never fail on
+            // it. Only this read needs one of the parts the context API knows.
+            let part = agent["part"]
+                .as_str()
+                .filter(|part| crate::team_context_routes::PARTS.contains(part))
+                .ok_or_else(protocol_error)?;
+            if requested_part.is_some_and(|requested| requested != part) {
+                return Err(TaskError::rejected("VALIDATION_FAILED", 400));
+            }
+            let team_id = numeric_id(actor.team_id.as_str())
+                .ok_or_else(|| TaskError::rejected("VALIDATION_FAILED", 400))?;
+            let mut query = vec![("part".to_string(), part.to_string())];
+            if let Some(counterpart) = counterpart {
+                query.push(("counterpart".to_string(), counterpart.to_string()));
+            }
+            let (status, envelope) = self
+                .request_http(
+                    reqwest::Method::GET,
+                    &format!("/api/v1/teams/{team_id}/context"),
+                    &query,
+                    None,
+                )
+                .await?;
+            if status != 200 || !envelope.success {
+                return Err(central_error(status, envelope.code.as_deref()));
+            }
+            envelope.data.ok_or_else(protocol_error)
+        })
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
+    }
+
+    /// S15P31D108-188: read-only central Agent recommendation for the verified team.
+    /// `question` and `repo_key` must already satisfy `agent_recommendations`.
+    pub async fn find_agents(
+        &self,
+        actor: &Principal,
+        question: &str,
+        repo_key: Option<&str>,
+    ) -> Result<Value, TaskError> {
+        tokio::time::timeout(self.timeout, async {
+            // As in list_agents: the credential must still be this actor's Agent
+            // before its team selects the central path.
+            let agent = PublicAgent::decode(self.read("/api/v1/agents/me").await?)?;
+            if agent.owner_user_id.to_string() != actor.user_id.as_str()
+                || agent.team_id.to_string() != actor.team_id.as_str()
+                || actor
+                    .agent_id
+                    .as_ref()
+                    .is_none_or(|id| id.as_str() != agent.agent_id.to_string())
+            {
+                return Err(TaskError::rejected("FORBIDDEN", 403));
+            }
+            let body = crate::agent_recommendations::request_body(question, repo_key);
+            let (status, envelope) = self
+                .request(
+                    &format!("/api/v1/teams/{}/agents/recommendations", agent.team_id),
+                    Some(body),
+                )
+                .await?;
+            crate::agent_recommendations::decode(status, envelope, agent.agent_id)
+        })
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
+    }
+
     async fn read(&self, path: &str) -> Result<Value, TaskError> {
         let (status, envelope) = self.request(path, None).await?;
         if status != 200 || !envelope.success {
@@ -387,6 +485,12 @@ struct PublicAgent {
     owner_user_id: u64,
     name: String,
     role_description: Option<String>,
+    // S15P31D108-183: shown as central sent them. Identity checks never depend on these,
+    // so a missing, null or unexpected value is left out instead of failing the Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    part: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roles: Option<Value>,
     tool_type: String,
     project_name: String,
     status: String,
@@ -395,7 +499,13 @@ struct PublicAgent {
 }
 impl PublicAgent {
     fn decode(data: Value) -> Result<Self, TaskError> {
-        let agent: Self = serde_json::from_value(data).map_err(|_| protocol_error())?;
+        let mut agent: Self = serde_json::from_value(data).map_err(|_| protocol_error())?;
+        agent.part = agent.part.filter(Value::is_string);
+        agent.roles = agent.roles.filter(|roles| {
+            roles
+                .as_array()
+                .is_some_and(|tags| tags.iter().all(Value::is_string))
+        });
         if [agent.agent_id, agent.team_id, agent.owner_user_id]
             .into_iter()
             .any(|id| id == 0 || id > i64::MAX as u64)

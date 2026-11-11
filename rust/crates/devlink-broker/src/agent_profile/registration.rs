@@ -180,6 +180,8 @@ fn matches_metadata(agent: &Agent, expected: &RegistrationContext) -> bool {
     agent.name == expected.project.metadata.agent_name
         && agent.project_name == expected.project.metadata.project_name
         && agent.role_description == expected.project.metadata.role_description
+        && agent.part == expected.project.metadata.part
+        && agent.roles == expected.project.metadata.roles
         && agent.tool_type == tool(expected)
 }
 pub(super) fn validate_agent(agent: &Agent, expected: &RegistrationContext) -> Result<(), Failure> {
@@ -198,6 +200,7 @@ fn validate_owned_agent(agent: &Agent, expected: &RegistrationContext) -> Result
         return Err(failure(FailureKind::Forbidden));
     }
     if agent.name.trim().is_empty()
+        || normalize_roles(&agent.roles).is_err()
         || agent.name.encode_utf16().count() > 100
         || agent.project_name.trim().is_empty()
         || agent.project_name.encode_utf16().count() > 120
@@ -230,6 +233,8 @@ pub(super) fn summary(profile: &Profile, reused: bool) -> Registration {
             agent_name: agent.name.clone(),
             project_name: agent.project_name.clone(),
             role_description: agent.role_description.clone(),
+            part: agent.part,
+            roles: agent.roles.clone(),
         }),
     }
 }
@@ -304,12 +309,17 @@ pub async fn ensure_tracked(
             project_name: Some(expected.project.metadata.project_name.clone()),
             agent_name: Some(expected.project.metadata.agent_name.clone()),
             role_description: expected.project.metadata.role_description.clone(),
+            part: Some(expected.project.metadata.part),
+            roles: Some(expected.project.metadata.roles.clone()),
         })
         .map_err(|_| failure(FailureKind::BindingConflict))?;
     }
     let mut client = UserClient::authenticated_for_setup(path, &expected.origin, expected.user_id)
         .await
         .map_err(central)?;
+    if selection == Some(Selection::Create) {
+        stop_deleted_agent_broker(path, expected, &mut client).await?;
+    }
     let lock = config::state_directory(path).join("control.lock");
     let _control = config::try_lock(&lock)
         .map_err(|_| failure(FailureKind::Storage))?
@@ -323,6 +333,7 @@ pub async fn ensure_tracked(
     }
     check_binding(path, expected)?;
     let existing = load(path).map_err(|_| failure(FailureKind::Storage))?;
+    let mut replacing_deleted = false;
     if let Some(old) = &existing
         && !matches!(old.state, State::Vacant)
     {
@@ -342,24 +353,36 @@ pub async fn ensure_tracked(
         {
             return Err(failure(FailureKind::BindingConflict));
         }
-        if !matches!(selection, Some(Selection::Use(_))) && !matches!(old.state, State::Vacant) {
-            if let Some(agent) = old.agent() {
+        if !matches!(selection, Some(Selection::Use(_)))
+            && !matches!(old.state, State::Vacant)
+            && let Some(agent) = old.agent()
+        {
+            let lookup = client
+                .get::<Agent>(&format!("/api/v1/agents/{}", agent.agent_id))
+                .await;
+            // An explicit create replaces a binding whose Agent central reports deleted.
+            // IDs are never reused, so a 404 cannot point at another live Agent.
+            if selection == Some(Selection::Create) && lookup.as_ref().is_err_and(agent_deleted) {
+                replacing_deleted = true;
+            } else {
                 if !matches_metadata(agent, expected) {
                     return Err(failure(FailureKind::BindingConflict));
                 }
-                let verified: Agent = client
-                    .get(&format!("/api/v1/agents/{}", agent.agent_id))
-                    .await
-                    .map_err(|error| {
-                        let mut failure = central(error);
-                        failure.agent_id = Some(agent.agent_id);
-                        failure
-                    })?;
+                let verified = lookup.map_err(|error| {
+                    let mut failure = central(error);
+                    failure.agent_id = Some(agent.agent_id);
+                    failure
+                })?;
                 validate_agent(&verified, expected)?;
                 if verified.agent_id != agent.agent_id || !matches_metadata(&verified, expected) {
                     return Err(failure(FailureKind::BindingConflict));
                 }
             }
+        }
+        if !replacing_deleted
+            && !matches!(selection, Some(Selection::Use(_)))
+            && !matches!(old.state, State::Vacant)
+        {
             check_binding(path, expected)?;
             // Token validation/issuance is the next adapter's responsibility (-09).
             return Ok(summary(old, true));
@@ -393,6 +416,8 @@ pub async fn ensure_tracked(
                 a.name != agent.name
                     || a.project_name != agent.project_name
                     || a.role_description != agent.role_description
+                    || a.part != agent.part
+                    || a.roles != agent.roles
                     || a.tool_type != agent.tool_type
             }) {
                 let _guard = require_mutation(path, &expected.origin, expected.user_id, Some(id))?;
@@ -443,6 +468,14 @@ pub async fn ensure_tracked(
     let _owner = require_mutation(path, &expected.origin, expected.user_id, None)?;
     let prepared = client.prepare_post().await.map_err(central)?;
     check_binding(path, expected)?;
+    // Like switching IDs, MCP sessions of the deleted Agent must not reach the new one.
+    if replacing_deleted {
+        rotate_mcp_if_present(path).map_err(|_| Failure {
+            kind: FailureKind::Storage,
+            outcome: Mutation::Unknown,
+            agent_id: None,
+        })?;
+    }
     let metadata = &expected.project.metadata;
     let mut profile = Profile {
         schema_version: 1,
@@ -466,7 +499,8 @@ pub async fn ensure_tracked(
         .post_prepared::<Agent>(
             &format!("/api/v1/agents/teams/{}", expected.team_id),
             json!({"name":metadata.agent_name,"projectName":metadata.project_name,
-            "roleDescription":metadata.role_description,"toolType":tool(expected)}),
+            "roleDescription":metadata.role_description,"toolType":tool(expected),
+            "part":metadata.part,"roles":metadata.roles}),
             prepared,
         )
         .await;
@@ -518,6 +552,43 @@ pub async fn ensure_tracked(
         outcome: Mutation::Applied,
         metadata: None,
     })
+}
+
+/// The broker of a deleted Agent can no longer act centrally but still holds the
+/// broker lock. Stop it gracefully before taking the control lock that `stop` needs;
+/// registration re-reads the profile and decides the replacement under its locks.
+async fn stop_deleted_agent_broker(
+    path: &Path,
+    expected: &RegistrationContext,
+    client: &mut UserClient,
+) -> Result<(), Failure> {
+    let Some(old) = load(path).map_err(|_| failure(FailureKind::Storage))? else {
+        return Ok(());
+    };
+    let Some(agent) = old.agent() else {
+        return Ok(());
+    };
+    if old.origin != expected.origin
+        || old.user_id != expected.user_id
+        || old.team_id != expected.team_id
+    {
+        return Ok(());
+    }
+    let lookup = client
+        .get::<Agent>(&format!("/api/v1/agents/{}", agent.agent_id))
+        .await;
+    if lookup.as_ref().is_err_and(agent_deleted) {
+        crate::broker_control::stop(path)
+            .await
+            .map_err(|_| failure(FailureKind::BrokerBusy))?;
+    }
+    Ok(())
+}
+
+fn agent_deleted(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<user_auth::ApiRejection>()
+        .is_some_and(|rejection| rejection.status == 404 && rejection.code == "RESOURCE_NOT_FOUND")
 }
 
 pub(super) fn require_mutation(

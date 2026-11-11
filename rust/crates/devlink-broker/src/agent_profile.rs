@@ -2,6 +2,7 @@
 pub mod registration;
 pub mod tokens;
 use crate::{
+    agent_metadata::{AgentPart, normalize_roles},
     config::{self, Config},
     credentials, private_file, teams,
     user_auth::{self, UserClient},
@@ -41,6 +42,10 @@ pub struct Agent {
     pub owner_user_id: u64,
     pub name: String,
     pub role_description: Option<String>,
+    #[serde(default)]
+    pub part: AgentPart,
+    #[serde(default)]
+    pub roles: Vec<String>,
     pub tool_type: Tool,
     pub project_name: String,
     pub status: String,
@@ -59,6 +64,8 @@ impl Agent {
 pub struct CreateOptions {
     pub name: String,
     pub role_description: Option<String>,
+    pub part: AgentPart,
+    pub roles: Vec<String>,
     pub tool: Tool,
     pub project_name: String,
     pub project: PathBuf,
@@ -247,6 +254,8 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
                 project_name: agent.project_name.clone(),
                 agent_name: agent.name.clone(),
                 role_description: agent.role_description.clone(),
+                part: agent.part,
+                roles: agent.roles.clone(),
             }),
             State::CreatePending {
                 name, project_name, ..
@@ -254,6 +263,8 @@ pub(crate) fn setup_project_binding(config_path: &Path) -> Result<Option<Project
                 project_name: project_name.clone(),
                 agent_name: name.clone(),
                 role_description: None,
+                part: AgentPart::default(),
+                roles: Vec::new(),
             }),
             State::Vacant => None,
         };
@@ -435,7 +446,8 @@ pub async fn list(config_path: &Path) -> Result<Vec<Agent>> {
     Ok(agents)
 }
 
-pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value> {
+pub async fn create(config_path: &Path, mut options: CreateOptions) -> Result<Value> {
+    options.roles = normalize_roles(&options.roles)?;
     ensure!(
         !options.name.trim().is_empty()
             && options.name.encode_utf16().count() <= 100
@@ -470,7 +482,9 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
             agent.name == options.name
                 && agent.tool_type == options.tool
                 && agent.project_name == options.project_name
-                && agent.role_description == options.role_description,
+                && agent.role_description == options.role_description
+                && agent.part == options.part
+                && agent.roles == options.roles,
             "Existing profile metadata differs; no Agent was created"
         );
         owned(&mut client, team.team_id, agent.agent_id).await?;
@@ -500,7 +514,7 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         },
     };
     save(config_path, &profile)?; // Crash/unknown HTTP outcome must never trigger another creation.
-    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name}),prepared).await;
+    let result=client.post_prepared::<Agent>(&format!("/api/v1/agents/teams/{}",team.team_id),json!({"name":options.name,"roleDescription":options.role_description,"toolType":options.tool,"projectName":options.project_name,"part":options.part,"roles":options.roles}),prepared).await;
     let agent = match result {
         Ok(agent) => agent,
         Err(error) => {
@@ -514,6 +528,10 @@ pub async fn create(config_path: &Path, options: CreateOptions) -> Result<Value>
         }
     };
     agent.owned(user, team.team_id)?;
+    ensure!(
+        agent.part == options.part && agent.roles == options.roles,
+        "Agent creation metadata not confirmed; inspect agent list before retrying"
+    );
     profile.state = State::NeedsToken {
         agent: agent.clone(),
     };
@@ -588,11 +606,16 @@ pub async fn token(config_path: &Path) -> Result<Value> {
     issue(config_path, &mut client, &mut profile, agent).await
 }
 
-/// S15P31D108-146: the only Agent fields a bound profile may change. Name, tool,
+/// S15P31D108-146/-183: the only Agent fields a bound profile may change. Name, tool,
 /// owner and team stay fixed, and no Agent or credential is created.
+#[derive(Default)]
 pub struct UpdateOptions {
     pub project_name: Option<String>,
     pub role_description: Option<String>,
+    /// `None` keeps the stored part.
+    pub part: Option<AgentPart>,
+    /// `None` keeps the stored tags; an empty list removes all of them.
+    pub roles: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -620,15 +643,59 @@ fn update_fault(kind: UpdateFaultKind, message: &'static str) -> anyhow::Error {
     UpdateFault { kind, message }.into()
 }
 
+/// Which routing metadata central itself sent. `Agent` reads a missing field as OTHER /
+/// no tags for the profile cache; those defaults are not values central confirmed, and
+/// they are exactly what a reset (`--part OTHER --clear-roles`) asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Reported {
+    part: bool,
+    roles: bool,
+}
+/// A central Agent reply together with what it actually reported.
+struct CentralAgent {
+    agent: Agent,
+    reported: Reported,
+}
+impl<'de> Deserialize<'de> for CentralAgent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        let reported = Reported {
+            part: raw.get("part").is_some_and(Value::is_string),
+            roles: raw.get("roles").is_some_and(Value::is_array),
+        };
+        let agent = Agent::deserialize(raw).map_err(serde::de::Error::custom)?;
+        Ok(Self { agent, reported })
+    }
+}
+
 pub struct UpdateResult {
     pub agent: Agent,
     pub changed: Vec<&'static str>,
     /// False when the central update succeeded but the local display cache was not rewritten.
     pub local_profile_synced: bool,
+    reported: Reported,
 }
 impl UpdateResult {
+    /// The part central reported; `None` when its reply had none (an older central).
+    pub fn part(&self) -> Option<AgentPart> {
+        self.reported.part.then_some(self.agent.part)
+    }
+    /// The role tags central reported; `None` when its reply had none.
+    pub fn roles(&self) -> Option<&[String]> {
+        self.reported.roles.then_some(self.agent.roles.as_slice())
+    }
     pub fn summary(&self) -> Value {
-        json!({"agent":self.agent,"updated":!self.changed.is_empty(),"changedFields":self.changed,
+        let mut agent = json!(self.agent);
+        // Never show the profile defaults as if central had stored them.
+        if let Some(fields) = agent.as_object_mut() {
+            if !self.reported.part {
+                fields.remove("part");
+            }
+            if !self.reported.roles {
+                fields.remove("roles");
+            }
+        }
+        json!({"agent":agent,"updated":!self.changed.is_empty(),"changedFields":self.changed,
             "credentialsRotated":false,"localProfileSynced":self.local_profile_synced})
     }
 }
@@ -640,8 +707,8 @@ fn valid_text(value: &str, limit: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-/// Change the bound Agent's project name or role through the central owner session.
-/// Only fields that differ from the live central value are sent. `expected_agent`
+/// Change the bound Agent's project name, role, part or role tags through the central
+/// owner session. Only fields that differ from the live central value are sent. `expected_agent`
 /// pins the caller's verified Agent (the broker session) to the bound profile.
 pub async fn update(
     config_path: &Path,
@@ -661,6 +728,7 @@ pub(crate) struct PreparedUpdate {
     client: UserClient,
     profile: Profile,
     current: Agent,
+    current_reported: Reported,
     options: UpdateOptions,
     body: serde_json::Map<String, Value>,
     changed: Vec<&'static str>,
@@ -669,11 +737,17 @@ pub(crate) struct PreparedUpdate {
 
 pub(crate) async fn prepare_update(
     config_path: &Path,
-    options: UpdateOptions,
+    mut options: UpdateOptions,
     expected_agent: Option<u64>,
 ) -> Result<PreparedUpdate> {
     use UpdateFaultKind::{Binding, Invalid};
-    if (options.project_name.is_none() && options.role_description.is_none())
+    // Same trimming and de-duplication as creation, so the comparison with the
+    // central value and the confirmation of the reply use what central stores.
+    let roles = options.roles.as_deref().map(normalize_roles).transpose();
+    if (options.project_name.is_none()
+        && options.role_description.is_none()
+        && options.part.is_none()
+        && options.roles.is_none())
         || options
             .project_name
             .as_deref()
@@ -682,12 +756,18 @@ pub(crate) async fn prepare_update(
             .role_description
             .as_deref()
             .is_some_and(|v| !valid_text(v, 255))
+        // A tag that trims to nothing is a central 400, and a control character such
+        // as NUL inside a tag may fail in central storage with an unknown outcome.
+        || roles.as_ref().map_or(true, |roles| {
+            roles.iter().flatten().any(|tag| tag.is_empty() || tag.chars().any(char::is_control))
+        })
     {
         return Err(update_fault(
             Invalid,
-            "Invalid Agent update: pass a non-blank --project-name (up to 120) or --role-description (up to 255)",
+            "Invalid Agent update: pass a non-blank --project-name (up to 120) or --role-description (up to 255), --part, or at most 10 non-blank --roles tags (each up to 64, no control characters)",
         ));
     }
+    options.roles = roles.unwrap_or_default();
     let mut client = UserClient::authenticated(config_path).await?;
     let team = teams::require_selected(config_path, &mut client).await?;
     let user = client.user()?.user_id;
@@ -719,7 +799,12 @@ pub(crate) async fn prepare_update(
             "The session Agent differs from the bound profile; no Agent was updated",
         ));
     }
-    let current = owned(&mut client, team.team_id, id).await?;
+    let CentralAgent {
+        agent: current,
+        reported: current_reported,
+    } = client.get(&format!("/api/v1/agents/{id}")).await?;
+    current.owned(user, team.team_id)?;
+    ensure!(current.agent_id == id, "Central Agent identity mismatch");
     let mut body = serde_json::Map::new();
     let mut changed = Vec::new();
     if let Some(project) = &options.project_name
@@ -734,6 +819,21 @@ pub(crate) async fn prepare_update(
         body.insert("roleDescription".into(), json!(role));
         changed.push("roleDescription");
     }
+    // A value central did not report is unknown, never "already the default": the
+    // field is sent and the reply has to report the requested value back.
+    if let Some(part) = options.part
+        && !(current_reported.part && part == current.part)
+    {
+        body.insert("part".into(), json!(part));
+        changed.push("part");
+    }
+    // Central replaces the whole list; `[]` removes every tag.
+    if let Some(roles) = &options.roles
+        && !(current_reported.roles && *roles == current.roles)
+    {
+        body.insert("roles".into(), json!(roles));
+        changed.push("roles");
+    }
     let csrf = if changed.is_empty() {
         None
     } else {
@@ -744,6 +844,7 @@ pub(crate) async fn prepare_update(
         client,
         profile,
         current,
+        current_reported,
         options,
         body,
         changed,
@@ -756,8 +857,8 @@ impl PreparedUpdate {
     /// preserve a confirmed result even if that session is subsequently replaced.
     pub(crate) async fn commit(mut self) -> Result<UpdateResult> {
         let id = self.current.agent_id;
-        let agent = if let Some(csrf) = self.csrf {
-            let updated: Agent = self.client
+        let (agent, reported) = if let Some(csrf) = self.csrf {
+            let CentralAgent { agent: updated, reported } = self.client
             .patch_prepared(&format!("/api/v1/agents/{id}"), Value::Object(self.body), csrf)
             .await
             .map_err(|error| {
@@ -784,30 +885,50 @@ impl PreparedUpdate {
                     .options
                     .role_description
                     .as_ref()
-                    .is_none_or(|r| updated.role_description.as_ref() == Some(r));
+                    .is_none_or(|r| updated.role_description.as_ref() == Some(r))
+                // A reply without the field confirms nothing, even when the request
+                // equals the profile default.
+                && self
+                    .options
+                    .part
+                    .is_none_or(|p| reported.part && p == updated.part)
+                && self
+                    .options
+                    .roles
+                    .as_ref()
+                    .is_none_or(|r| reported.roles && *r == updated.roles);
             if !confirmed {
                 return Err(update_fault(
                     UpdateFaultKind::Unconfirmed,
                     "Central Agent update response does not match the request; the outcome is unknown. Inspect agent status before retrying",
                 ));
             }
-            updated
+            (updated, reported)
         } else {
-            self.current
+            (self.current, self.current_reported)
         };
-        let local_profile_synced = sync_cached_agent(&self.config_path, &self.profile, &agent);
+        let local_profile_synced =
+            sync_cached_agent(&self.config_path, &self.profile, &agent, reported);
         Ok(UpdateResult {
             agent,
             changed: self.changed,
             local_profile_synced,
+            reported,
         })
     }
 }
 
-/// Only the two editable fields are cached: identity, root, token and volatile
-/// status stay, so an unchanged value never rewrites the profile. A profile changed
-/// by another operation is left alone and reported as unsynced.
-fn sync_cached_agent(config_path: &Path, before: &Profile, agent: &Agent) -> bool {
+/// Only the four editable fields are cached: identity, root, token and volatile
+/// status stay, so an unchanged value never rewrites the profile. Part and role tags
+/// are cached only when central reported them, so a reply without them keeps the
+/// cached values instead of replacing them with defaults. A profile changed by another
+/// operation is left alone and reported as unsynced.
+fn sync_cached_agent(
+    config_path: &Path,
+    before: &Profile,
+    agent: &Agent,
+    reported: Reported,
+) -> bool {
     let Ok(Some(mut current)) = load(config_path) else {
         return false;
     };
@@ -818,11 +939,19 @@ fn sync_cached_agent(config_path: &Path, before: &Profile, agent: &Agent) -> boo
         State::Ready { agent: cached, .. } | State::NeedsToken { agent: cached } => {
             if cached.project_name == agent.project_name
                 && cached.role_description == agent.role_description
+                && (!reported.part || cached.part == agent.part)
+                && (!reported.roles || cached.roles == agent.roles)
             {
                 return true;
             }
             cached.project_name = agent.project_name.clone();
             cached.role_description = agent.role_description.clone();
+            if reported.part {
+                cached.part = agent.part;
+            }
+            if reported.roles {
+                cached.roles = agent.roles.clone();
+            }
         }
         _ => return false,
     }
@@ -996,6 +1125,59 @@ mod owner_tests {
 mod update_cache_tests {
     use super::*;
 
+    const BOTH: Reported = Reported {
+        part: true,
+        roles: true,
+    };
+
+    /// PR #118 review: OTHER and no tags read from a reply that had neither field are
+    /// profile defaults, not central values.
+    #[test]
+    fn a_reply_without_part_or_roles_reports_neither_and_keeps_the_cached_values() {
+        let reply = |extra: Value| {
+            let mut value = json!({"agentId":201,"teamId":71,"ownerUserId":51,"name":"Cache fixture",
+                "roleDescription":null,"toolType":"CODEX","projectName":"Central value",
+                "status":"ONLINE","lastSeenAt":null,"createdAt":"2026-11-08T00:00:00Z"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<CentralAgent>(value).unwrap()
+        };
+        let silent = reply(json!({}));
+        assert_eq!(silent.reported, Reported::default());
+        assert_eq!(silent.agent.part, AgentPart::Other);
+        assert!(silent.agent.roles.is_empty());
+        // The same values count once central says them itself.
+        assert_eq!(reply(json!({"part":"OTHER","roles":[]})).reported, BOTH);
+        assert_eq!(
+            reply(json!({"part":"INFRA"})).reported,
+            Reported {
+                part: true,
+                roles: false
+            }
+        );
+
+        let (_root, config, mut before, _) = fixture();
+        if let State::Ready { agent, .. } = &mut before.state {
+            agent.part = AgentPart::Backend;
+            agent.roles = vec!["login".into()];
+        }
+        save(&config, &before).unwrap();
+        assert!(sync_cached_agent(
+            &config,
+            &before,
+            &silent.agent,
+            silent.reported
+        ));
+        let Some(State::Ready { agent, .. }) = load(&config).unwrap().map(|p| p.state) else {
+            panic!("ready profile expected");
+        };
+        assert_eq!(agent.project_name, "Central value");
+        assert_eq!(agent.part, AgentPart::Backend);
+        assert_eq!(agent.roles, ["login"]);
+    }
+
     fn fixture() -> (tempfile::TempDir, PathBuf, Profile, Agent) {
         let root = tempfile::tempdir().unwrap();
         let config = root.path().join("config.json");
@@ -1005,6 +1187,8 @@ mod update_cache_tests {
             owner_user_id: 51,
             name: "Cache fixture".into(),
             role_description: None,
+            part: AgentPart::default(),
+            roles: Vec::new(),
             tool_type: Tool::Codex,
             project_name: "Before".into(),
             status: "ONLINE".into(),
@@ -1037,7 +1221,7 @@ mod update_cache_tests {
         }
         save(&config, &concurrent).unwrap();
         let bytes = std::fs::read(path(&config)).unwrap();
-        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert!(!sync_cached_agent(&config, &before, &updated, BOTH));
         assert_eq!(std::fs::read(path(&config)).unwrap(), bytes);
     }
 
@@ -1045,13 +1229,13 @@ mod update_cache_tests {
     fn missing_or_corrupt_profile_is_reported_unsynced_without_recreating_it() {
         let (_root, config, before, updated) = fixture();
         std::fs::write(path(&config), b"corrupt-private-profile").unwrap();
-        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert!(!sync_cached_agent(&config, &before, &updated, BOTH));
         assert_eq!(
             std::fs::read(path(&config)).unwrap(),
             b"corrupt-private-profile"
         );
         std::fs::remove_file(path(&config)).unwrap();
-        assert!(!sync_cached_agent(&config, &before, &updated));
+        assert!(!sync_cached_agent(&config, &before, &updated, BOTH));
         assert!(!path(&config).exists());
     }
 }

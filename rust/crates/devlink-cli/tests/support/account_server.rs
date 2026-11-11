@@ -31,6 +31,9 @@ pub const AGENT_SECRET: &str = "synthetic-agent-token-never-print";
 
 #[derive(Clone, Default)]
 pub struct MockState {
+    pub git_hashes: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
+    pub git_identity_mode: Arc<AtomicU8>,
+    pub git_identity_calls: Arc<AtomicUsize>,
     pub expired: Arc<AtomicBool>,
     pub logout_error: Arc<AtomicBool>,
     pub redirect_login: Arc<AtomicBool>,
@@ -68,7 +71,9 @@ pub struct MockState {
     pub pause_token: Arc<AtomicBool>,
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
-    /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404
+    /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404,
+    /// 5 = an older central that ignores part/roles and never returns them (S15P31D108-183),
+    /// 6 = ignores part/roles and leaves them out of the PATCH reply only
     pub update_mode: Arc<AtomicU8>,
     pub pause_update_reply: Arc<AtomicBool>,
     pub update_entered: Arc<tokio::sync::Notify>,
@@ -77,6 +82,72 @@ pub struct MockState {
 
 pub fn success(value: Value) -> Response {
     Json(json!({"success":true,"data":value,"code":null,"message":null})).into_response()
+}
+
+async fn git_status(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    assert!(authorized(&state, &headers, false));
+    let id = user(&state)["userId"].as_u64().unwrap();
+    let registered = state.git_hashes.lock().unwrap().contains_key(&id);
+    success(
+        json!({"registered":registered,"registeredAt":if registered {json!("2026-11-09T00:00:00Z")} else {Value::Null}}),
+    )
+}
+
+async fn git_register(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    assert!(authorized(&state, &headers, true));
+    state.calls.lock().unwrap().push("git_register".into());
+    let email = body["gitEmail"].as_str().unwrap();
+    assert_eq!(body.as_object().unwrap().len(), 1);
+    if state.git_identity_mode.load(Ordering::SeqCst) == 9 {
+        return Json(json!({"success":false,"data":null,"code":"GIT_EMAIL_ALREADY_REGISTERED","message":email})).into_response();
+    }
+    let id = user(&state)["userId"].as_u64().unwrap();
+    let hash = devlink_broker::git_identity::email_hash(email);
+    let mut hashes = state.git_hashes.lock().unwrap();
+    if hashes
+        .iter()
+        .any(|(owner, value)| *owner != id && *value == hash)
+    {
+        return failure(StatusCode::CONFLICT, "GIT_EMAIL_ALREADY_REGISTERED");
+    }
+    hashes.insert(id, hash);
+    success(json!({"registered":true,"registeredAt":"2026-11-09T00:00:00Z"}))
+}
+
+async fn git_delete(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    assert!(authorized(&state, &headers, true));
+    state.calls.lock().unwrap().push("git_delete".into());
+    let id = user(&state)["userId"].as_u64().unwrap();
+    state.git_hashes.lock().unwrap().remove(&id);
+    success(json!({"registered":false,"registeredAt":null}))
+}
+
+async fn git_comparison(State(state): State<MockState>, headers: HeaderMap) -> Response {
+    assert!(!headers.contains_key("cookie"));
+    let auth = headers.get("authorization").unwrap().to_str().unwrap();
+    let token = auth.strip_prefix("Bearer ").unwrap();
+    let id = state.tokens.lock().unwrap().get(token).copied().unwrap();
+    let agent = agent_for(&state, id).unwrap();
+    let owner = agent["ownerUserId"].as_u64().unwrap();
+    state.git_identity_calls.fetch_add(1, Ordering::SeqCst);
+    let mode = state.git_identity_mode.load(Ordering::SeqCst);
+    if mode == 2 {
+        return failure(StatusCode::SERVICE_UNAVAILABLE, "UNTRUSTED");
+    }
+    let hash = state.git_hashes.lock().unwrap().get(&owner).cloned();
+    let mut data = json!({"registered":hash.is_some(),"gitEmailHash":hash,"hashAlgorithm":"SHA-256","normalization":"TRIM_LOWERCASE"});
+    match mode {
+        1 => data["hashAlgorithm"] = json!("UNKNOWN"),
+        3 => data["gitEmailHash"] = json!("invalid"),
+        4 => data["registered"] = json!(false),
+        5 => data["normalization"] = json!("UNKNOWN"),
+        _ => {}
+    }
+    success(data)
 }
 pub fn failure(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"success":false,"data":null,"code":code,"message":format!("{COOKIE} {PASSWORD}")}))).into_response()
@@ -236,7 +307,14 @@ async fn agent_create(
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["name", "projectName", "roleDescription", "toolType"]
+        [
+            "name",
+            "part",
+            "projectName",
+            "roleDescription",
+            "roles",
+            "toolType"
+        ]
     );
     let fixed = [
         agent_for(&state, 301).unwrap(),
@@ -263,6 +341,12 @@ async fn agent_create(
             body["projectName"].clone(),
         );
         agent["roleDescription"] = body["roleDescription"].clone();
+        agent["part"] = body["part"].clone();
+        agent["roles"] = body["roles"].clone();
+        if state.create_mode.load(Ordering::SeqCst) == 5 {
+            agent.as_object_mut().unwrap().remove("part");
+            agent.as_object_mut().unwrap().remove("roles");
+        }
         stored.insert(id, agent.clone());
         agent
     };
@@ -333,10 +417,22 @@ async fn agent_get(
         return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
     }
     agent_for(&state, id)
-        .map(success)
+        .map(|mut agent| {
+            if state.update_mode.load(Ordering::SeqCst) == 5 {
+                without_metadata(&mut agent);
+            }
+            success(agent)
+        })
         .unwrap_or_else(|| failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"))
 }
-/// Mirrors central AgentService.update: owner-only, null keeps, only the profile fields.
+/// An older central has no part/roles fields in `AgentResponse` at all.
+fn without_metadata(agent: &mut Value) {
+    let fields = agent.as_object_mut().unwrap();
+    fields.remove("part");
+    fields.remove("roles");
+}
+/// Mirrors central AgentService.update: owner-only, null keeps, only the profile fields
+/// and the routing metadata (part, roles; an empty roles list removes every tag).
 async fn agent_update(
     Path(id): Path<u64>,
     State(state): State<MockState>,
@@ -351,9 +447,16 @@ async fn agent_update(
         .cloned()
         .collect::<Vec<_>>();
     assert!(
-        keys.iter()
-            .all(|k| k == "projectName" || k == "roleDescription"),
+        keys.iter().all(|k| matches!(
+            k.as_str(),
+            "projectName" | "roleDescription" | "part" | "roles"
+        )),
         "{keys:?}"
+    );
+    // The client leaves an unchanged field out instead of sending null.
+    assert!(
+        body.as_object().unwrap().values().all(|v| !v.is_null()),
+        "{body}"
     );
     state
         .calls
@@ -374,10 +477,17 @@ async fn agent_update(
         if agent["ownerUserId"] != user(&state)["userId"] {
             return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
         }
+        let ignores_metadata = matches!(state.update_mode.load(Ordering::SeqCst), 5 | 6);
         for key in &keys {
+            if ignores_metadata && matches!(key.as_str(), "part" | "roles") {
+                continue;
+            }
             agent[key.as_str()] = body[key.as_str()].clone();
         }
         let mut reply = agent.clone();
+        if ignores_metadata {
+            without_metadata(&mut reply);
+        }
         if state.update_mode.load(Ordering::SeqCst) == 2 {
             reply["projectName"] = json!("changed by provider");
         }
@@ -647,6 +757,11 @@ impl Fixture {
         let state = MockState::default();
         let app = Router::new()
             .route(
+                "/api/v1/auth/users/me/git-identity",
+                get(git_status).put(git_register).delete(git_delete),
+            )
+            .route("/api/v1/agents/me/git-identity", get(git_comparison))
+            .route(
                 "/api/v1/agents/teams/{id}",
                 get(agent_list).post(agent_create),
             )
@@ -708,8 +823,10 @@ pub fn run_at(path: &std::path::Path, args: &[&str], input: Option<&str>) -> Out
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Existing auth/team/project fixtures use a synthetic --version-only Host.
-    let guided_setup =
-        args.contains(&"setup") && !args.windows(2).any(|pair| pair == ["setup", "status"]);
+    let guided_setup = args.contains(&"setup")
+        && !args
+            .windows(2)
+            .any(|pair| pair[0] == "setup" && ["status", "mcp-guide", "tools"].contains(&pair[1]));
     if guided_setup && !args.contains(&"--tool") && !args.contains(&"--tool-path") {
         command
             .args(["--tool", "codex", "--tool-path"])

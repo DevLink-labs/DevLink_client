@@ -19,6 +19,7 @@ export async function fakeBroker({ profiles } = {}) {
     arrivals.push({ method: req.method, path: req.url });
     responses.add(res); res.once('close', () => responses.delete(res));
     try {
+      req.setEncoding('utf8');
       let text = '';
       for await (const chunk of req) text += chunk;
       const body = req.method === 'GET' && !text ? {} : JSON.parse(text); // Bodyless GET diagnostics reach the hook.
@@ -75,6 +76,7 @@ export async function fakeBroker({ profiles } = {}) {
       if (body.operation !== 'register_agent' && !principal.agentId) return fail('AGENT_UNREGISTERED');
       if (businessHook && await businessHook({ path, body, req, res, send, profile })) return;
       if (body.operation === 'register_agent') return send({ data: { agentId: principal.agentId ?? 'registered-agent' } });
+      if (body.operation === 'find_agent') return send({ data: { status: 'INSUFFICIENT_EVIDENCE', evaluatedAt: '2026-11-09T02:00:00Z', insufficientReason: 'NO_ELIGIBLE_AGENTS', gitCoverage: { state: 'NOT_COLLECTED', reason: 'NO_TEAM_REPOSITORIES', workingState: 'NOT_COLLECTED' }, candidates: [] } });
       if (body.operation === 'get_updates') return send({ data: { updates: [], nextCursor: `v1.0.0.${'0'.repeat(32)}`, hasMore: false, cursorReset: false, coverage: 'local' } });
       return send({ data: { taskId: 'task-1', status: 'PENDING', delivery: { status: 'FAILED' }, echo: body.arguments } });
     } catch {

@@ -18,7 +18,7 @@ pub struct Cli {
 
 pub fn parse() -> Cli {
     let arguments: Vec<_> = std::env::args_os().collect();
-    let setup_requested = {
+    let requested_command = {
         let mut arguments = arguments.iter().skip(1);
         loop {
             match arguments.next() {
@@ -27,8 +27,8 @@ pub fn parse() -> Cli {
                     arguments.next();
                 }
                 Some(arg) if arg.to_str().is_some_and(|s| s.starts_with("--config=")) => {}
-                Some(arg) => break arg == "setup",
-                None => break false,
+                Some(arg) => break Some(arg.clone()),
+                None => break None,
             }
         }
     };
@@ -36,9 +36,19 @@ pub fn parse() -> Cli {
         Ok(cli) => cli,
         Err(error) => {
             // Invalid-value errors omit command usage, so identify the requested
-            // command before parsing. Never echo setup values; preserve legacy errors.
-            if setup_requested && error.use_stderr() {
+            // command before parsing. Never echo setup or Git identity values; preserve legacy errors.
+            if requested_command.as_deref() == Some(std::ffi::OsStr::new("setup"))
+                && error.use_stderr()
+            {
                 eprintln!("Invalid setup arguments. Run devlink setup --help for usage.");
+                std::process::exit(2);
+            }
+            if requested_command.as_deref() == Some(std::ffi::OsStr::new("git-identity"))
+                && error.use_stderr()
+            {
+                eprintln!(
+                    "Invalid Git identity arguments. Run devlink git-identity --help for usage."
+                );
                 std::process::exit(2);
             }
             error.exit()
@@ -47,6 +57,11 @@ pub fn parse() -> Cli {
 }
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Manage your Git email using the logged-in user session
+    GitIdentity {
+        #[command(subcommand)]
+        command: GitIdentityCommand,
+    },
     /// Run guided setup or inspect setup readiness
     Setup(Box<SetupArgs>),
     /// Create a configuration file without overwriting existing settings
@@ -57,6 +72,11 @@ pub enum Commands {
     Stop,
     /// Show local broker and central WebSocket state
     Status,
+    /// Print the team repository key for a Git remote
+    DependencyRepoKey {
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Read or update non-secret settings (changes apply after restart)
     Config {
         #[command(subcommand)]
@@ -105,6 +125,19 @@ pub enum Commands {
         #[arg(long)]
         event: String,
     },
+    /// Print the bound Agent's next local task updates as JSON for desktop notifications.
+    /// Reads local stores only: never acknowledges, accepts or marks anything read, and
+    /// keeps no cursor (store nextCursor yourself; Host hook and MCP cursors are untouched).
+    Updates {
+        /// nextCursor from the previous page; omit to start at the oldest retained entry
+        #[arg(long, conflicts_with = "latest")]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=50))]
+        limit: u16,
+        /// Skip retained history and return only the cursor at its end
+        #[arg(long)]
+        latest: bool,
+    },
     /// Install, inspect or remove the user-level Host hooks that run updates-hook
     Hooks {
         #[command(subcommand)]
@@ -113,6 +146,19 @@ pub enum Commands {
     /// Internal command: run the broker loop in foreground (spawned by start)
     #[command(hide = true)]
     Broker,
+}
+
+#[derive(Subcommand)]
+pub enum GitIdentityCommand {
+    /// Register or replace one Git email; hidden prompt or a single stdin line
+    Register {
+        #[arg(long)]
+        email_stdin: bool,
+    },
+    /// Show registration status and time; never reveals the email or hash
+    Status,
+    /// Delete your registration (idempotent)
+    Delete,
 }
 
 #[derive(Subcommand)]
@@ -229,6 +275,10 @@ pub enum AgentCommand {
         project: PathBuf,
         #[arg(long)]
         role_description: Option<String>,
+        #[arg(long, default_value = "OTHER", value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: devlink_broker::agent_metadata::AgentPart,
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Vec<String>,
     },
     /// List the selected team's Agents; only your own ID can be bound
     List,
@@ -241,13 +291,22 @@ pub enum AgentCommand {
     },
     /// Explicitly issue/rotate the current Agent token while its broker is stopped
     Token,
-    /// Change the bound Agent's project name or role; never creates an Agent or token
-    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description"])))]
+    /// Change the bound Agent's project name, role, part or role tags; never creates an Agent or token
+    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description", "part", "roles", "clear_roles"])))]
     Update {
         #[arg(long)]
         project_name: Option<String>,
         #[arg(long)]
         role_description: Option<String>,
+        /// FRONTEND, BACKEND, INFRA or OTHER; omit to keep the current part
+        #[arg(long, value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: Option<devlink_broker::agent_metadata::AgentPart>,
+        /// Replace all role tags (nouns for owned areas, e.g. login,payment); omit to keep them
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Option<Vec<String>>,
+        /// Remove every role tag
+        #[arg(long, conflicts_with = "roles")]
+        clear_roles: bool,
     },
     /// Show public profile metadata and verify a stored central token
     Status,
@@ -306,6 +365,34 @@ fn updates_hook(config_path: Option<PathBuf>, host: &str, event: &str) {
     let _ = print_json(&serde_json::json!({
         "hookSpecificOutput": {"hookEventName": event, "additionalContext": context}
     }));
+}
+
+/// Prints exactly one JSON object: a page, or `{"error":{code,message}}` with exit 2 for
+/// invalid input and 1 otherwise, so a desktop caller never parses free text.
+fn updates(config_path: Option<PathBuf>, cursor: Option<&str>, limit: u16, latest: bool) -> i32 {
+    use devlink_broker::local_updates::{self, Start, UpdatesError};
+    let start = if latest {
+        Start::Latest
+    } else {
+        Start::After(cursor)
+    };
+    let result = config::config_path(config_path)
+        .map_err(|_| UpdatesError::UNAVAILABLE)
+        .and_then(|path| local_updates::page(&path, start, limit.into()));
+    match result {
+        Ok(page) => i32::from(print_json(&page).is_err()),
+        Err(error) => {
+            let _ = print_json(&serde_json::json!({
+                "schemaVersion": local_updates::SCHEMA_VERSION,
+                "error": {"code": error.code, "message": error.message()},
+            }));
+            if error == UpdatesError::INPUT_INVALID {
+                2
+            } else {
+                1
+            }
+        }
+    }
 }
 
 /// Turn a hook provider error into a message that names the problem and the file.
@@ -434,11 +521,53 @@ pub async fn run(cli: Cli) -> Result<()> {
         updates_hook(cli.config.clone(), host, event);
         return Ok(());
     }
+    if let Commands::Updates {
+        cursor,
+        limit,
+        latest,
+    } = &cli.command
+    {
+        match updates(cli.config.clone(), cursor.as_deref(), *limit, *latest) {
+            0 => return Ok(()),
+            code => std::process::exit(code),
+        }
+    }
     let path = config::config_path(cli.config)?;
     match cli.command {
+        Commands::GitIdentity { command } => {
+            use devlink_broker::git_identity;
+            let result = match command {
+                GitIdentityCommand::Register { email_stdin } => {
+                    use std::io::IsTerminal;
+                    anyhow::ensure!(
+                        email_stdin
+                            || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()),
+                        "Use --email-stdin or an interactive terminal for Git email input"
+                    );
+                    let email = secret_input("Git email", 1024, email_stdin).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Cannot read Git email; use --email-stdin or an interactive terminal"
+                        )
+                    })?;
+                    git_identity::register(&path, &email).await?
+                }
+                GitIdentityCommand::Status => git_identity::status(&path).await?,
+                GitIdentityCommand::Delete => git_identity::delete(&path).await?,
+            };
+            print_json(&serde_json::to_value(result)?)?;
+        }
         // Handled before config path resolution so it can never exit non-zero.
         Commands::UpdatesHook { .. } => unreachable!(),
+        // Handled before config path resolution so every outcome is one JSON object.
+        Commands::Updates { .. } => unreachable!(),
         Commands::Setup(args) => setup_terminal::run(&path, *args).await?,
+        Commands::DependencyRepoKey { remote } => {
+            let root = std::env::current_dir().context("Cannot read the working directory")?;
+            println!(
+                "{}",
+                devlink_broker::dependency_repo_key(&root, &remote).await?
+            );
+        }
         Commands::Hooks { command } => hooks_command(&path, command)?,
         Commands::Notifications { limit, clear } => {
             let config = Config::load(&path)?;
@@ -521,6 +650,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     project_name,
                     project,
                     role_description,
+                    part,
+                    roles,
                 } => {
                     agent_profile::create(
                         &path,
@@ -530,6 +661,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                             project_name,
                             project,
                             role_description,
+                            part,
+                            roles,
                         },
                     )
                     .await?
@@ -542,11 +675,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 AgentCommand::Update {
                     project_name,
                     role_description,
+                    part,
+                    roles,
+                    clear_roles,
                 } => agent_profile::update(
                     &path,
                     agent_profile::UpdateOptions {
                         project_name,
                         role_description,
+                        part,
+                        roles: if clear_roles { Some(Vec::new()) } else { roles },
                     },
                     None,
                 )
