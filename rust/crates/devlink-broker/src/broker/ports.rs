@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 /// Windows reads its dynamic range by running `netsh`, which slows down with the rest of a busy
 /// system. One longer wait serves that case better than restarting the command: a restart
 /// repeats the slow start-up that used up the first wait.
-const RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
+const RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 /// The bound this query had when the base startup timeout was sized.
 const EARLIER_RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -321,6 +321,27 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn only_pending_setup_gets_the_extended_startup_budget() {
+            use crate::broker::ports::{
+                EARLIER_RANGE_QUERY_TIMEOUT, RANGE_QUERY_TIMEOUT, startup_allowance,
+            };
+            use crate::config::{Config, atomic_json};
+            use std::time::Duration;
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.json");
+            let mut config = Config::default();
+            atomic_json(&path, &config).unwrap();
+            assert_eq!(startup_allowance(&path), Duration::ZERO);
+            config.local_port_pending = true;
+            atomic_json(&path, &config).unwrap();
+            assert_eq!(
+                startup_allowance(&path) + EARLIER_RANGE_QUERY_TIMEOUT,
+                RANGE_QUERY_TIMEOUT
+            );
+        }
 
         #[test]
         fn parses_configured_range_independent_of_locale() {
