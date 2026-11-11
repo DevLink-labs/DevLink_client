@@ -91,12 +91,17 @@ After the real tool calls, return only a JSON object with these keys and infer t
 For createStatus/deliveryStatus refer to the create_task response, not the task after later explicit transitions. Do not invent calls or results.`;
 }
 
+// The server takes a task version as a decimal string or as a non-negative safe integer
+// (`version` in src/tools/business.ts), and a Host may send either form of the same value.
+// Only that one field is compared by value; every other argument must match exactly.
+const comparable = (args) => (Number.isSafeInteger(args?.version) && args.version >= 0 ? { ...args, version: String(args.version) } : args);
+
 export function verifyCalls(transcript, steps) {
   assert.equal(transcript.calls.length, steps.length, 'Host did not execute exactly the requested calls');
   return transcript.calls.map((call, index) => {
     const step = steps[index];
     assert.equal(call.tool, step.tool, `Unexpected tool at step ${index + 1}`);
-    assert.deepEqual(call.args, step.args, `Wrong arguments at step ${index + 1}`);
+    assert.deepEqual(comparable(call.args), comparable(step.args), `Wrong arguments at step ${index + 1}`);
     if (step.expect === 'input-validation') assert.ok(call.inputError, 'Host did not expose the SDK input-validation error');
     else if (step.expect.startsWith('BROKER_')) {
       assert.equal(call.value?.error?.code, step.expect, `Wrong error at step ${index + 1}`);
@@ -110,6 +115,7 @@ export function verifyCalls(transcript, steps) {
       }
     }
     return { step: index + 1, tool: call.tool, expected: step.expect, representation: call.representation,
+      ...(call.args?.version === undefined ? {} : { versionType: typeof call.args.version }),
       ...(call.value?.error ? { code: call.value.error.code, outcome: call.value.error.outcome } : {}), passed: true };
   });
 }
@@ -167,7 +173,9 @@ export async function verifyHosts(options) {
         assert.equal(ping.calls[0].value.status, 'ok');
         await fixture.broker.drain();
         assert.equal(fixture.broker.arrivals.length, before, 'Catalog/ping activated the broker');
-        if (host === 'claude') assert.deepEqual(ping.catalog.toSorted(), hostTools.toSorted(), 'Claude catalog differs');
+        // The server may expose tools added after this harness was written (`--allowedTools` limits
+        // calls, not the catalog). Every tool the harness allows must be offered.
+        if (host === 'claude') assert.deepEqual(hostTools.filter((tool) => !ping.catalog.includes(tool)), [], 'Claude catalog lacks an allowed DevLink tool');
         result.model = ping.model;
         result.stages.push({ name: 'initialize-catalog-ping', passed: true, calls: 1, brokerCalls: 0, ownedMcpProcessesAfterExit: 0 });
 

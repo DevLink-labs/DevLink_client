@@ -59,10 +59,10 @@ node packages/mcp-server/scripts/verify-hosts.mjs --host both `
 
 | 시나리오 | 검사 내용 |
 | --- | --- |
-| 초기화·목록·ping | 당시 Claude init에서 도구 8개를 확인했다. 현재 중앙 왕복·알림 검증기는 필수 도구 14개의 이름이 목록에 있는지 확인한다. 두 Host에서 ping과 업무 도구 7개를 실제 호출했고, ping의 브로커 요청은 0건이었다. |
+| 초기화·목록·ping | 당시 Claude init에서 도구 8개를 확인했다. 현재 중앙 왕복·알림 검증기는 필수 도구 14개의 이름이 목록에 있는지 확인한다. 이 문서의 `verify-hosts`는 2026-11-11부터 허용 목록(`hostTools`, 현재 10개)이 Claude init 목록에 모두 있는지만 확인한다. 서버가 그 밖의 도구를 더 제공해도 통과하고, 허용 목록 밖 호출은 호출 수·순서 검사가 실패시킨다(GitHub #125). 2026-11-11 실제 실행에서 Claude init 목록은 16개였고 이 검사를 통과했다. 2026-10-28에는 두 Host에서 ping과 업무 도구 7개를 실제 호출했고, ping의 브로커 요청은 0건이었다. |
 | 등록·목록·생성·조회 | Host별 `userId/teamId/agentId/toolType`을 HTTP 테스트 브로커에서 검증, 생성 직후 PENDING과 전달 UNKNOWN 구분 |
 | FAILED 입력 오류 | reason 생략을 의도적으로 호출, SDK 입력 오류가 Host에 노출되고 브로커에 도달하지 않음 |
-| 명시적 상태 전이·완료 | IN_PROGRESS 및 complete_task만 전달, 장애 때문에 FAILED를 자동 전송하거나 create_task를 재전송하지 않음 |
+| 명시적 상태 전이·완료 | IN_PROGRESS 및 complete_task만 전달, 장애 때문에 FAILED를 자동 전송하거나 create_task를 재전송하지 않음. 호출 인자는 지시와 정확히 같아야 하며, `version`만 서버가 허용하는 두 형태(10진 문자열, 0 이상의 정수)를 같은 값으로 비교한다. Host가 보낸 형태는 보고서의 `versionType`에 남긴다(GitHub #132) |
 | 업무 권한 거부 | BROKER_FORBIDDEN/rejected, 다음 정상 조회 성공 |
 | HTTP 지연 | BROKER_TIMEOUT/unknown, 다음 정상 조회 성공, 중앙 상태를 실패로 추정하지 않음 |
 | 브로커 상태 소실 | 연결 종료 뒤 다음 호출에서 recover, 동일 MCP instanceId 유지 |
@@ -81,11 +81,12 @@ node packages/mcp-server/scripts/verify-hosts.mjs --host both `
 
 - Codex의 SDK 입력 오류: 완료 이벤트의 `status: "failed"`, `structured_content: null`, `error: null`과 plain text 본문으로 보고된다. `isError`만 검사하면 입력 오류를 놓친다.
 - Claude의 업무 오류: 모델이 받은 `message.content[].tool_result.content`에는 JSON 오류가 그대로 있지만, 편의 필드 `tool_use_result.content`는 `Error: `를 앞에 붙이고 structuredContent를 생략한다. 상관된 tool_result 본문을 판독하여 BROKER_* 코드와 안전한 메타데이터를 보존한다.
+- `version`의 형태(2026-11-11): 프롬프트는 `"version":"0"`으로 지시하지만 Claude Code 2.1.319는 두 번의 실행 모두 7·8단계에서 숫자 `0`·`1`로 보냈고(1차는 저장한 원본 기록, 2차는 보고서의 `versionType`으로 확인), Codex 0.167.0은 문자열로 보냈다. 서버 입력 스키마는 두 형태를 모두 받는다. 검증기는 이 필드만 값으로 비교한다. Host나 모델에 따라 어느 형태가 나오는지는 두 번의 관찰 이상으로 확인하지 않았다.
 - 성공 결과의 JSON text와 structured 결과가 둘 다 있으면 일치해야 한다. 다른 서버·내장 파일/명령 도구 사용, 추가 재시도, 미완료 호출, 원본 호출 없는 결과는 통과하지 않는다.
 
 POSIX, GUI/IDE Host, 다른 CLI 버전, 실제 Rust 재시작·중앙 ACK·동시 Host 소유권은 별도 검증이 필요하다. 자격 거부 이후에는 CLI가 자격 파일을 갱신하고 MCP 프로세스를 명시적으로 재시작한다.
 
-Windows 최종 실행에서 성공한 조회 뒤 Codex의 세션 DELETE는 미관찰, Claude의 DELETE는 관찰되었고 잔여 MCP 프로세스는 양쪽 모두 0개였다. 앞선 Claude 실행에서는 DELETE가 미관찰되어 종료 시 항상 전달된다고 보장하지 않는다. [Claude 공식 종료 정책](https://code.claude.com/docs/en/mcp#how-claude-code-stops-a-stdio-server)은 stdin을 닫고 300ms 뒤 프로세스 트리를 종료한다고 설명한다. 이 실행에서 어떤 종료 경로가 먼저 발생했는지는 단정하지 않는다. MCP의 best-effort 해제만으로 소유권 정리를 보장할 수 없으므로 브로커가 heartbeat TTL 만료·fresh/recover 정책을 제공해야 한다. SDK의 정상 EOF 해제 검증과 실제 Host의 종료 제약은 별도 결과로 기록한다.
+2026-10-28 Windows 최종 실행에서 성공한 조회 뒤 Codex의 세션 DELETE는 미관찰, Claude의 DELETE는 관찰되었고 잔여 MCP 프로세스는 양쪽 모두 0개였다. 앞선 Claude 실행에서는 DELETE가 미관찰되어 종료 시 항상 전달된다고 보장하지 않는다. [Claude 공식 종료 정책](https://code.claude.com/docs/en/mcp#how-claude-code-stops-a-stdio-server)은 stdin을 닫고 300ms 뒤 프로세스 트리를 종료한다고 설명한다. 이 실행에서 어떤 종료 경로가 먼저 발생했는지는 단정하지 않는다. MCP의 best-effort 해제만으로 소유권 정리를 보장할 수 없으므로 브로커가 heartbeat TTL 만료·fresh/recover 정책을 제공해야 한다. SDK의 정상 EOF 해제 검증과 실제 Host의 종료 제약은 별도 결과로 기록한다.
 
 ## 2026-10-28 실행 결과
 
@@ -102,3 +103,24 @@ TypeScript `check`와 기본 회귀 88개가 통과했다. 지정 버전의 두 
 | 종료 시 세션 DELETE 도착 | 미관찰: lease 만료 필요 | 최종 실행에서 관찰, 이전 실행에서는 미관찰 |
 
 첫 시도들의 오류 포장 판독 실패와 Codex 모델 용량 오류는 통과로 처리하지 않았으며, 수정·재실행 후 결과를 기록했다. CLI의 부가 설명 뒤 최종 JSON 코드 블록이 오는 출력도 처리하지만, 실제 도구 이벤트가 없거나 중첩되면 통과하지 않는다. 보고서는 CLI 원본 wire ID를 관찰하지 않았음을 `hostWireRpcIdObserved: false`로 구분한다.
+
+## 2026-11-11 실행 결과
+
+도구 목록 단언(GitHub #125)을 고친 뒤 `--host both`로, `version` 비교(GitHub #132)를 고친 뒤 `--host claude`로 현재 빌드를 실행했다. Windows 11, Node.js 24.18.0, Codex CLI 0.167.0, Claude Code 2.1.319(init 모델 `claude-opus-5-5`), 서버는 develop `4c1fc0a`의 `dist/index.js`다. 두 실행 사이에 서버 코드는 바뀌지 않았고 검증기만 바뀌었다. 두 보고서의 `serverEntrySha256`은 `54d8c4d2b310782f…`로 같다.
+
+| 실행 | 대상 | 결과 |
+| --- | --- | --- |
+| 1차 `--host both` | #125 수정 포함, #132 수정 전 | Codex 네 단계 통과. Claude Code는 ping 통과 뒤 업무 단계가 `Wrong arguments at step 7`로 실패했고 뒤의 두 단계는 실행되지 않았다 |
+| 2차 `--host claude` | #132 수정 포함 | Claude Code 네 단계 통과, 보고서 `passed: true` |
+
+| 단계 | Codex (1차) | Claude Code (2차) |
+| --- | --- | --- |
+| 초기화·목록·ping, broker 도착 0건 | 통과 | 통과, init 목록 16개 |
+| 업무·입력 오류·권한·timeout·복구·인증 거부 16단계 | 통과, `version` 문자열 | 통과, `version` 숫자 |
+| HTTP 신원 컨텍스트·상관 ID echo | 통과 | 통과 |
+| 자격 교체 후 새 프로세스 | 통과 | 통과 |
+| 브로커 미기동 오류 | 통과 | 통과 |
+| 각 실행 후 잔여 MCP 프로세스 | 0개 | 0개 |
+| 종료 시 세션 DELETE 도착 | 미관찰 | 관찰 |
+
+Codex는 #132 수정 뒤에 다시 실행하지 않았다. 수정은 숫자로 온 `version`만 다르게 취급하므로 문자열을 보낸 Codex의 판정에는 영향이 없다고 보지만, 실행으로 확인한 것은 아니다. 두 Host를 한 번의 `--host both`로 함께 통과시킨 실행도 없다. Rust 브로커와 실제 중앙 서비스에 대한 한계는 위 "검증 범위"와 같다.

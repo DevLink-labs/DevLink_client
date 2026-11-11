@@ -56,6 +56,24 @@ test('model prose, wrong recipients, incomplete calls and foreign tools cannot p
   assert.throws(() => readHostTranscript('claude', jsonl([{ type: 'assistant', message: { content: [{ type: 'tool_use', id: '1', name: 'Read', input: {} }] } }, { type: 'result', is_error: false }])));
 });
 
+test('a task version is compared by value across its string and integer forms, and nothing else is', () => {
+  const versioned = [{ tool: 'update_task_status', args: { taskId: 'task', version: '0', status: 'IN_PROGRESS' }, expect: 'success' }];
+  const sent = (args) => ({ calls: [{ tool: 'update_task_status', args, value: success }] });
+  assert.deepEqual(verifyCalls(sent({ taskId: 'task', version: 0, status: 'IN_PROGRESS' }), versioned).map((check) => check.versionType), ['number']);
+  assert.deepEqual(verifyCalls(sent({ taskId: 'task', version: '0', status: 'IN_PROGRESS' }), versioned).map((check) => check.versionType), ['string']);
+  assert.equal('versionType' in verifyCalls({ calls: [{ tool: 'create_task', args: { recipientAgentId: 'recipient' }, value: success }] }, steps)[0], false);
+  for (const version of [1, '1', '00', '0.0', 0.5, -1, true, null, [0], Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => verifyCalls(sent({ taskId: 'task', version, status: 'IN_PROGRESS' }), versioned), /Wrong arguments at step 1/, String(version));
+  }
+  // Numbers outside what the server accepts stay as they are, even when their text equals the instruction.
+  for (const [instructed, received] of [['-1', -1], ['9007199254740992', Number.MAX_SAFE_INTEGER + 1], ['0.5', 0.5]]) {
+    const step = [{ ...versioned[0], args: { ...versioned[0].args, version: instructed } }];
+    assert.throws(() => verifyCalls(sent({ taskId: 'task', version: received, status: 'IN_PROGRESS' }), step), /Wrong arguments at step 1/, instructed);
+  }
+  assert.throws(() => verifyCalls(sent({ taskId: 'task', status: 'IN_PROGRESS' }), versioned), /Wrong arguments at step 1/);
+  assert.throws(() => verifyCalls(sent({ taskId: 0, version: '0', status: 'IN_PROGRESS' }), [{ ...versioned[0], args: { ...versioned[0].args, taskId: '0' } }]), /Wrong arguments at step 1/);
+});
+
 test('mismatched text/structured results and orphaned Claude results are rejected', () => {
   assert.throws(() => readHostTranscript('codex', jsonl([{ type: 'item.completed', item: { id: '1', type: 'mcp_tool_call', server: 'devlink', tool: 'get_tasks', result: { content: [{ text: '{}' }], structured_content: success } } }, { type: 'turn.completed' }])));
   assert.throws(() => readHostTranscript('claude', jsonl([{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'missing', content: '{}' }] } }, { type: 'result', is_error: false }])));
