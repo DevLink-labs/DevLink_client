@@ -2,7 +2,7 @@
 
 MCP `find_agent({question, repoKey?})` → 로컬 `POST /v1/agents/find` → 중앙 `POST /api/v1/teams/{teamId}/agents/recommendations`.
 
-점수 계산(역할 60·Git 40, 후보 선정)은 중앙이 한다. 브로커는 입력 한도를 미리 확인하고, 중앙 응답을 검증해 로컬 형식으로 바꾼다. 읽기 전용이며 수신자를 고르거나 작업을 만들지 않는다. LLM을 호출하지 않는다.
+점수 계산(역할 60·Git 40, 후보 선정)은 중앙이 한다. 브로커는 입력 한도를 미리 확인하고, 중앙 응답을 검증해 로컬 형식으로 바꾼다. 추천 전에 바인딩된 프로젝트의 작업 파일 목록을 중앙에 반영할 수 있다. 수신자 선택과 작업 생성은 별도 절차를 따른다. 추천 과정에서 LLM을 호출하지 않는다.
 
 중앙 구현 기준: server `docs/agent-recommendation.md`. client가 확인한 커밋은 develop `d945f8b`(2026-11-09)와 E2E 고정 커밋 `aecdcc3`이며, 두 커밋의 요청·응답 DTO는 같다.
 
@@ -54,14 +54,14 @@ MCP `find_agent({question, repoKey?})` → 로컬 `POST /v1/agents/find` → 중
 | 400 VALIDATION_FAILED | 400 VALIDATION_FAILED | rejected |
 | 401 | 503 CENTRAL_UNAUTHENTICATED | rejected |
 | 403 ACCESS_DENIED(팀 불일치·탈퇴) | 403 FORBIDDEN → MCP BROKER_FORBIDDEN | rejected |
-| 503 GIT_ROUTING_UNAVAILABLE | 503 GIT_ROUTING_UNAVAILABLE | rejected. 읽기 전용이라 생성된 것이 없다. MCP nextActions `check_network_then_retry`. 중앙은 추천 계산 중 `DataAccessException`만 이 코드로 바꾼다. 트랜잭션 시작 실패(500)나 앞선 `/agents/me` 실패는 아래 행으로 나온다 |
+| 503 GIT_ROUTING_UNAVAILABLE | 503 GIT_ROUTING_UNAVAILABLE | rejected. 추천 계산 실패가 확인됐다. 추천 요청 전 작업 파일 갱신은 이미 반영됐을 수 있다. MCP nextActions `check_network_then_retry`. 중앙은 추천 계산 중 `DataAccessException`만 이 코드로 바꾼다. 트랜잭션 시작 실패(500)나 앞선 `/agents/me` 실패는 아래 행으로 나온다 |
 | 그 밖의 5xx | 502 CENTRAL_UNAVAILABLE | unknown |
 | 시간 초과 | CENTRAL_TIMEOUT | unknown |
 
 ## 범위 밖과 남은 결정
 
-- **IDX-3-02 작업 파일 재확인 트리거**: 스토리 범위에는 "호출 직전 요청자 브로커의 작업 파일 재확인(실패해도 계속)"이 있다. 그러나 브로커의 작업 파일 수집기(S15P31D108-186)가 아직 없어 트리거를 넣지 않았다. 수집기가 생기면 이 라우트에서 중앙 호출 전에 실행한다.
-- **repoKey 기본값**: 현재 프로젝트 저장소의 원격 URL 해시를 기본값으로 쓸지는 정하지 않았다. 해시 규칙은 Git 동기화(S15P31D108-185, IDX-3-01)가 정한다. 그 전까지 호출자가 넘긴 값만 전달한다. 중앙은 이 값을 아직 점수에 쓰지 않는다.
+- **IDX-3-02 작업 파일 재확인 트리거**: 2026-11-10 S15P31D108-186에서 추가했다. 이 라우트는 세션 확인 뒤 중앙 호출 전에 작업 파일을 한 번 더 보내고, 3초 안에 끝나지 않거나 실패해도 계속한다. [작업 파일 수집](working-files.md)을 참고한다.
+- **repoKey 기본값**: 현재 프로젝트 저장소의 원격 URL 해시를 기본값으로 쓸지는 정하지 않았다. 해시 규칙은 [커밋 이력 동기화](commit-sync.md)(S15P31D108-185)와 [작업 파일 수집](working-files.md)이 쓰는 정규화한 원격 URL의 SHA-256이다. 지금은 호출자가 넘긴 값만 전달한다. 중앙은 이 값을 아직 점수에 쓰지 않는다.
 - **결과 표시(FIND-3-02)·작업 전달 연계(REQ-3-01)**: S15P31D108-189·-190에서 다룬다. 이 스토리의 도구 설명과 Host 지침은 "후보를 보여주고 사용자가 고른 ID로만 create_task"까지만 정한다.
 
 ## 검증

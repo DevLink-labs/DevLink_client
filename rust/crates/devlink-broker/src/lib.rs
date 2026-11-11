@@ -9,6 +9,7 @@ pub mod business_api;
 pub mod central;
 #[cfg(test)]
 mod central_auth_tests;
+pub mod commit_sync;
 pub mod config;
 pub mod connection_api;
 pub mod context_api;
@@ -16,6 +17,7 @@ pub mod credentials;
 mod dependency_graph;
 pub use dependency_graph::dependency_repo_key;
 pub mod git_identity;
+pub mod git_scope;
 pub mod inbox;
 pub mod local;
 pub mod local_updates;
@@ -46,3 +48,4 @@ pub mod updates;
 pub mod user_auth;
 #[cfg(windows)]
 mod win_acl;
+pub mod working_files;
