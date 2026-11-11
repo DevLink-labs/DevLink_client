@@ -9,7 +9,7 @@ use reqwest::{
     Client,
     header::{AUTHORIZATION, HeaderValue, IF_MATCH},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -17,6 +17,9 @@ use std::time::Duration;
 pub const REQUEST_LIMIT: usize = 128 * 1024;
 /// 응답 본문 최대 수신 제한 (256 KB)
 const RESPONSE_LIMIT: usize = 256 * 1024;
+/// 필요한 필드만 남기며 스트리밍으로 읽는 응답(작업 상세)의 최대 수신 크기 (16 MB).
+/// 건너뛴 필드(파일 diff, 이벤트 이력)는 메모리에 남지 않는다.
+const STREAM_LIMIT: usize = 16 * 1024 * 1024;
 
 /// 중앙 서버로 전달되는 작업 생성 커맨드 DTO
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,32 +300,73 @@ impl TaskClient {
             .await
             .map_err(transport_error)?;
         let status = response.status().as_u16();
-        // These denials remain definitive even if the error body is malformed.
-        if status == 401 {
-            return Err(TaskError::rejected("CENTRAL_UNAUTHENTICATED", 503));
-        }
-        if status == 403 {
-            return Err(TaskError::rejected("FORBIDDEN", 403));
-        }
-        if (300..400).contains(&status) {
-            return Err(TaskError::unknown("CENTRAL_PROTOCOL_ERROR"));
+        denial(status)?;
+        Ok((status, limited_envelope(&mut response).await?))
+    }
+
+    /// GET whose 200 answer is parsed into `T` while it streams in. Fields `T` does not
+    /// name are skipped without being kept, so a large answer (file diffs, event history)
+    /// costs no memory; only `STREAM_LIMIT` bounds its size.
+    async fn read_streamed<T: DeserializeOwned + Send + 'static>(
+        &self,
+        path: &str,
+    ) -> Result<T, TaskError> {
+        let mut url = self.origin.clone();
+        url.set_path(path);
+        let mut response = self
+            .client
+            .get(url)
+            .header(AUTHORIZATION, self.authorization.clone())
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let status = response.status().as_u16();
+        denial(status)?;
+        if status != 200 {
+            let envelope = limited_envelope(&mut response).await?;
+            return Err(central_error(status, envelope.code.as_deref()));
         }
         if response
             .content_length()
-            .is_some_and(|length| length > RESPONSE_LIMIT as u64)
+            .is_some_and(|length| length > STREAM_LIMIT as u64)
         {
-            return Err(TaskError::unknown("CENTRAL_PROTOCOL_ERROR"));
+            return Err(protocol_error());
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
-            if bytes.len() + chunk.len() > RESPONSE_LIMIT {
-                return Err(TaskError::unknown("CENTRAL_PROTOCOL_ERROR"));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let parser = tokio::task::spawn_blocking(move || {
+            let reader = std::io::BufReader::new(ChunkReader {
+                receiver,
+                chunk: Vec::new(),
+                offset: 0,
+            });
+            serde_json::from_reader::<_, StreamedEnvelope<T>>(reader)
+        });
+        let mut total = 0usize;
+        let fed = loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    total += chunk.len();
+                    if total > STREAM_LIMIT {
+                        break Err(protocol_error());
+                    }
+                    // The parser stopped early (malformed answer); its error is reported.
+                    if sender.send(chunk.to_vec()).await.is_err() {
+                        break Ok(());
+                    }
+                }
+                Ok(None) => break Ok(()),
+                Err(error) => break Err(transport_error(error)),
             }
-            bytes.extend_from_slice(&chunk);
+        };
+        // End of input: the parser finishes, or fails on a cut answer.
+        drop(sender);
+        let parsed = parser.await.map_err(|_| protocol_error())?;
+        fed?;
+        let envelope = parsed.map_err(|_| protocol_error())?;
+        if !envelope.success {
+            return Err(central_error(status, envelope.code.as_deref()));
         }
-        let envelope: CentralEnvelope = serde_json::from_slice(&bytes)
-            .map_err(|_| TaskError::unknown("CENTRAL_PROTOCOL_ERROR"))?;
-        Ok((status, envelope))
+        envelope.data.ok_or_else(protocol_error)
     }
 
     fn map_created(
@@ -499,13 +543,23 @@ impl TaskClient {
         .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
-    /// Agent task detail (`GET /api/v1/tasks/{taskId}`): the `data` of a 200 answer.
+    /// Agent task detail (`GET /api/v1/tasks/{taskId}`): the fields of `T` from the `data`
+    /// of a 200 answer. The rest (prompt, file diffs, event history) is skipped while it
+    /// streams in, so the answer is not bound by `RESPONSE_LIMIT`.
     /// Central lets only members of the task's team read it; callers check the IDs.
-    pub(crate) async fn task_detail(&self, task_id: u64) -> Result<Value, TaskError> {
+    pub(crate) async fn task_detail<T: DeserializeOwned + Send + 'static>(
+        &self,
+        task_id: u64,
+    ) -> Result<T, TaskError> {
         if numeric_id(&task_id.to_string()).is_none() {
             return Err(TaskError::rejected("VALIDATION_FAILED", 400));
         }
-        self.read(&format!("/api/v1/tasks/{task_id}")).await
+        tokio::time::timeout(
+            self.timeout,
+            self.read_streamed(&format!("/api/v1/tasks/{task_id}")),
+        )
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
     async fn read(&self, path: &str) -> Result<Value, TaskError> {
@@ -581,6 +635,67 @@ fn team_context_view(
 
 fn protocol_error() -> TaskError {
     TaskError::unknown("CENTRAL_PROTOCOL_ERROR")
+}
+
+/// These denials remain definitive even if the error body is malformed.
+fn denial(status: u16) -> Result<(), TaskError> {
+    if status == 401 {
+        return Err(TaskError::rejected("CENTRAL_UNAUTHENTICATED", 503));
+    }
+    if status == 403 {
+        return Err(TaskError::rejected("FORBIDDEN", 403));
+    }
+    if (300..400).contains(&status) {
+        return Err(protocol_error());
+    }
+    Ok(())
+}
+
+/// The whole answer as an envelope, refused above `RESPONSE_LIMIT`.
+async fn limited_envelope(response: &mut reqwest::Response) -> Result<CentralEnvelope, TaskError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > RESPONSE_LIMIT as u64)
+    {
+        return Err(protocol_error());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+        if bytes.len() + chunk.len() > RESPONSE_LIMIT {
+            return Err(protocol_error());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| protocol_error())
+}
+
+/// Envelope of a streamed answer: unknown fields are skipped, `data` keeps only `T`.
+#[derive(Deserialize)]
+struct StreamedEnvelope<T> {
+    success: bool,
+    data: Option<T>,
+    code: Option<String>,
+}
+
+/// Blocking reader over the chunks of a streamed answer; ends when the sender is dropped.
+struct ChunkReader {
+    receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    chunk: Vec<u8>,
+    offset: usize,
+}
+impl std::io::Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.offset == self.chunk.len() {
+            match self.receiver.blocking_recv() {
+                Some(chunk) => (self.chunk, self.offset) = (chunk, 0),
+                None => return Ok(0),
+            }
+        }
+        let count = buf.len().min(self.chunk.len() - self.offset);
+        buf[..count].copy_from_slice(&self.chunk[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
 }
 
 #[derive(Deserialize, Serialize)]

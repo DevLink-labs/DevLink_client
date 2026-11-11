@@ -12,7 +12,9 @@
 //!
 //! Lookups only read central. A failed, unauthorized or missing (404) lookup changes
 //! nothing and waits for the next READY or check. Each pass makes at most one call per
-//! unfinished task and at most `MAX_PER_PASS` calls, one at a time.
+//! unfinished task and at most `MAX_PER_PASS` calls, one at a time. Tasks past the cap
+//! are not decided overdue until they are looked up, and the round a READY starts goes on
+//! in later passes until every task was asked once.
 use crate::{
     central::{CentralState, ConnectionStatus, endpoint_url},
     notifications::{
@@ -24,7 +26,6 @@ use crate::{
 };
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::Value;
 use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 use tokio::sync::{Mutex, Notify};
 
@@ -90,27 +91,38 @@ impl Recovery {
             .await
     }
 
-    /// Look up unfinished tasks of the connected Agent (with `due`, only those the next
-    /// overdue scan decides) and store each final status. Returns the number stored.
-    pub(crate) async fn pass(&self, config_path: &Path, due: Option<(u64, u64)>) -> usize {
+    /// Look up unfinished tasks of the connected Agent in `scope` and store each final
+    /// status.
+    pub(crate) async fn pass(&self, config_path: &Path, scope: Scope) -> Pass {
+        let mut outcome = Pass::default();
         // Held for the whole pass, so passes never overlap.
         let mut attempted = self.attempted.lock().await;
         let Some((agent, team)) = self.connected().await else {
-            return 0;
+            return outcome;
         };
         let config = config_path.to_path_buf();
         let origin = self.origin.clone();
+        let due = match scope {
+            Scope::Due { minutes, now_ms } => Some((minutes, now_ms)),
+            Scope::Round { .. } => None,
+        };
         let Ok(Ok(tasks)) = tokio::task::spawn_blocking(move || {
             sent_tasks::unfinished(&config, &origin, agent, due)
         })
         .await
         else {
-            return 0;
+            return outcome;
         };
         let mut tasks: Vec<_> = tasks
             .into_iter()
             .filter(|task| team.is_none_or(|team| team == task.team_id))
             .collect();
+        if let Scope::Round { since } = scope {
+            let open: std::collections::HashSet<u64> = tasks.iter().map(|t| t.task_id).collect();
+            attempted.retain(|task, _| open.contains(task));
+            // A round asks each task once, however many passes that takes.
+            tasks.retain(|task| attempted.get(&task.task_id).is_none_or(|at| *at < since));
+        }
         // Never looked up first, then the longest ago; newer tasks first among equals.
         tasks.sort_by_key(|task| {
             (
@@ -118,15 +130,12 @@ impl Recovery {
                 std::cmp::Reverse(task.created_at_ms),
             )
         });
-        if due.is_none() {
-            let open: std::collections::HashSet<u64> = tasks.iter().map(|t| t.task_id).collect();
-            attempted.retain(|task, _| open.contains(task));
-        }
-        let mut stored = 0;
-        for task in tasks.into_iter().take(MAX_PER_PASS) {
+        let rest = tasks.split_off(tasks.len().min(MAX_PER_PASS));
+        let mut stopped = false;
+        for task in tasks {
             attempted.insert(task.task_id, Instant::now());
             let lookup = decode(
-                self.client.task_detail(task.task_id).await,
+                self.client.task_detail::<Detail>(task.task_id).await,
                 &self.origin,
                 agent,
                 task,
@@ -136,6 +145,7 @@ impl Recovery {
                     // The answer was read for this Agent; another Agent connected since must
                     // not receive it. A plain disconnect keeps the verified answer.
                     if self.connected().await.is_some_and(|(now, _)| now != agent) {
+                        stopped = true;
                         break;
                     }
                     if self
@@ -144,7 +154,7 @@ impl Recovery {
                         .await
                         .is_ok()
                     {
-                        stored += 1;
+                        outcome.stored += 1;
                     }
                     let (config, origin) = (config_path.to_path_buf(), self.origin.clone());
                     let _ = tokio::task::spawn_blocking(move || {
@@ -153,11 +163,43 @@ impl Recovery {
                     .await;
                 }
                 Lookup::Open | Lookup::Skip => {}
-                Lookup::Stop => break,
+                Lookup::Stop => {
+                    stopped = true;
+                    break;
+                }
             }
         }
-        stored
+        // Tasks past the cap were never asked: the overdue scan waits for their lookup, and
+        // a round continues with them. Tasks a failed central left unasked are decided as
+        // before and wait for the next READY.
+        outcome.more = !stopped && !rest.is_empty();
+        outcome.held = rest
+            .into_iter()
+            .map(|task| (self.origin.clone(), agent, task.task_id))
+            .collect();
+        outcome
     }
+}
+
+/// Which unfinished tasks a pass looks up.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scope {
+    /// Those the overdue scan at `now_ms` decides, right before it does.
+    Due { minutes: u64, now_ms: u64 },
+    /// Every task not looked up since `since` (the READY that started the round).
+    Round { since: Instant },
+}
+
+/// What one pass did.
+#[derive(Debug, Default)]
+pub(crate) struct Pass {
+    /// Final statuses stored.
+    pub stored: usize,
+    /// Tasks in scope left unasked by the per-pass cap, as (origin, agent, taskId): the
+    /// overdue scan must not decide them before they are looked up.
+    pub held: std::collections::HashSet<(String, u64, u64)>,
+    /// A round has tasks left for another pass.
+    pub more: bool,
 }
 
 #[derive(Deserialize)]
@@ -166,7 +208,8 @@ struct AgentRef {
     agent_id: u64,
 }
 
-/// The fields of central `TaskDetailResponse` a final notification needs.
+/// The fields of central `TaskDetailResponse` a final notification needs. The rest
+/// (prompt, file diffs, event history) is skipped while the answer streams in.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Detail {
@@ -183,24 +226,21 @@ struct Detail {
 }
 
 fn decode(
-    answer: Result<Value, crate::task_client::TaskError>,
+    answer: Result<Detail, crate::task_client::TaskError>,
     origin: &str,
     agent: u64,
     task: sent_tasks::Unfinished,
 ) -> Lookup {
-    let data = match answer {
-        Ok(data) => data,
+    let detail = match answer {
+        Ok(detail) => detail,
         // Central said this task is gone or the request was not valid for it.
         Err(error) if matches!(error.code, "RESOURCE_NOT_FOUND" | "VALIDATION_FAILED") => {
             return Lookup::Skip;
         }
-        // A malformed answer is about this reply only.
+        // A malformed answer (or one without the fields of `Detail`) is about this reply only.
         Err(error) if error.code == "CENTRAL_PROTOCOL_ERROR" => return Lookup::Skip,
         // Unavailable, timed out, 401 or 403: the next call would fail the same way.
         Err(_) => return Lookup::Stop,
-    };
-    let Ok(detail) = serde_json::from_value::<Detail>(data) else {
-        return Lookup::Skip;
     };
     if detail.task_id != task.task_id
         || detail.team_id != task.team_id
@@ -260,7 +300,7 @@ mod tests {
         http::StatusCode,
         routing::get,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
@@ -383,6 +423,27 @@ mod tests {
     }
 
     impl Fixture {
+        /// A READY round's pass.
+        async fn round(&self) -> usize {
+            let since = Instant::now();
+            self.recovery
+                .pass(&self.config, Scope::Round { since })
+                .await
+                .stored
+        }
+        /// The pass right before the overdue scan at `now_ms`.
+        async fn due(&self, minutes: u64, now_ms: u64) -> Pass {
+            self.recovery
+                .pass(&self.config, Scope::Due { minutes, now_ms })
+                .await
+        }
+        fn overdue(&self) -> Vec<u64> {
+            sent_tasks::events_config(&self.config, &self.origin, AGENT, TEAM)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.task_id)
+                .collect()
+        }
         fn record(&self, task: u64, created_at_ms: u64) {
             sent_tasks::record(&self.config, &self.origin, AGENT, TEAM, task, created_at_ms)
                 .unwrap();
@@ -422,7 +483,7 @@ mod tests {
         f.record(10, 0);
         f.central.task(10, "COMPLETED", 3);
 
-        assert_eq!(f.recovery.pass(&f.config, None).await, 1);
+        assert_eq!(f.round().await, 1);
         let feed = f.feed();
         assert_eq!(feed.len(), 1);
         assert_eq!(feed[0]["kind"], "TASK_COMPLETED");
@@ -434,7 +495,7 @@ mod tests {
         assert_eq!(list[0].summary.as_deref(), Some("완료했습니다"));
 
         // The next READY has nothing left to look up.
-        assert_eq!(f.recovery.pass(&f.config, None).await, 0);
+        assert_eq!(f.round().await, 0);
         assert_eq!(f.central.calls(), 1);
 
         // Central's retry reaches the reconnected socket late: a duplicate, not a rejection.
@@ -462,11 +523,11 @@ mod tests {
             .record(f.origin.clone(), AGENT, socket_completed(10, 3))
             .await
             .unwrap();
-        assert_eq!(f.recovery.pass(&f.config, None).await, 0);
+        assert_eq!(f.round().await, 0);
         assert_eq!(f.central.calls(), 0);
         // A lookup that raced the socket event is dropped by the store.
         let Lookup::Final(event) = decode(
-            Ok(detail(10, "COMPLETED", 3)),
+            Ok(serde_json::from_value(detail(10, "COMPLETED", 3)).unwrap()),
             &f.origin,
             AGENT,
             sent_tasks::Unfinished {
@@ -496,7 +557,7 @@ mod tests {
         f.central.task(13, "IN_PROGRESS", 1);
         f.central.task(14, "PENDING", 0);
 
-        assert_eq!(f.recovery.pass(&f.config, None).await, 2);
+        assert_eq!(f.round().await, 2);
         let mut events = f.events();
         events.sort_by_key(TaskNotification::task_id);
         let [failed, rejected] = &events[..] else {
@@ -536,7 +597,7 @@ mod tests {
 
         // Open tasks are asked again on the next READY; finished ones are not.
         f.central.task(13, "COMPLETED", 2);
-        assert_eq!(f.recovery.pass(&f.config, None).await, 1);
+        assert_eq!(f.round().await, 1);
         assert_eq!(f.central.calls(), 4 + 2);
     }
 
@@ -577,7 +638,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             json!({"success":false,"code":"INTERNAL_SERVER_ERROR"}),
         );
-        assert_eq!(f.recovery.pass(&f.config, None).await, 0);
+        assert_eq!(f.round().await, 0);
         assert_eq!(f.notifications_file(), None);
         assert!(f.feed().is_empty());
 
@@ -588,7 +649,7 @@ mod tests {
                     .answer(task, code, json!({"success":false,"code":"UNAUTHORIZED"}));
             }
             let before = f.central.calls();
-            assert_eq!(f.recovery.pass(&f.config, None).await, 0);
+            assert_eq!(f.round().await, 0);
             assert_eq!(f.central.calls(), before + 1);
         }
         assert_eq!(f.notifications_file(), None);
@@ -599,10 +660,10 @@ mod tests {
             f.central.task(task, "COMPLETED", 3);
         }
         let before = f.central.calls();
-        assert_eq!(f.recovery.pass(&f.config, None).await, 0);
+        assert_eq!(f.round().await, 0);
         assert_eq!(f.central.calls(), before);
         connect(&f.state, AGENT).await;
-        assert_eq!(f.recovery.pass(&f.config, None).await, 7);
+        assert_eq!(f.round().await, 7);
     }
 
     #[tokio::test]
@@ -617,7 +678,18 @@ mod tests {
             client: TaskClient::new(&unreachable, "synthetic-token").unwrap(),
             ..f.recovery.clone()
         };
-        assert_eq!(recovery.pass(&f.config, None).await, 0);
+        assert_eq!(
+            recovery
+                .pass(
+                    &f.config,
+                    Scope::Round {
+                        since: Instant::now()
+                    }
+                )
+                .await
+                .stored,
+            0
+        );
         assert_eq!(recovery.attempted.lock().await.len(), 1);
         assert_eq!(f.notifications_file(), None);
     }
@@ -637,11 +709,11 @@ mod tests {
         );
         f.central.task(43, "REJECTED", 1);
         // Before the threshold nothing is due, so nothing is asked.
-        assert_eq!(f.recovery.pass(&f.config, Some((30, 29 * MINUTE))).await, 0);
+        assert_eq!(f.due(30, 29 * MINUTE).await.stored, 0);
         assert_eq!(f.central.calls(), 0);
         // 40 is confirmed. The 503 for 42 ends the pass, so 43 is not asked this time.
         let now = 30 * MINUTE;
-        assert_eq!(f.recovery.pass(&f.config, Some((30, now))).await, 1);
+        assert_eq!(f.due(30, now).await.stored, 1);
         assert_eq!(f.central.calls(), 3);
         assert_eq!(sent_tasks::scan(&f.config, 30, now).unwrap(), 3);
         let overdue: Vec<_> = sent_tasks::events_config(&f.config, &f.origin, AGENT, TEAM)
@@ -651,7 +723,7 @@ mod tests {
             .collect();
         assert_eq!(overdue, [41, 42, 43]);
         // The next READY still finds the final status of 43; the advisory stays as it was.
-        assert_eq!(f.recovery.pass(&f.config, None).await, 1);
+        assert_eq!(f.round().await, 1);
         let kinds: Vec<_> = f.feed().iter().map(|u| u["kind"].clone()).collect();
         assert_eq!(
             kinds,
@@ -674,7 +746,7 @@ mod tests {
         f.central.task(40, "COMPLETED", 3);
         f.central.task(41, "IN_PROGRESS", 1);
         let now = 30 * MINUTE;
-        assert_eq!(f.recovery.pass(&f.config, Some((30, now))).await, 1);
+        assert_eq!(f.due(30, now).await.stored, 1);
         assert_eq!(f.central.calls(), 2);
         assert_eq!(sent_tasks::scan(&f.config, 30, now).unwrap(), 1);
         let overdue: Vec<_> = sent_tasks::events_config(&f.config, &f.origin, AGENT, TEAM)
@@ -686,7 +758,7 @@ mod tests {
         let kinds: Vec<_> = f.feed().iter().map(|u| u["kind"].clone()).collect();
         assert_eq!(kinds, [json!("TASK_COMPLETED"), json!("TASK_OVERDUE")]);
         // Decided tasks are not due again.
-        assert_eq!(f.recovery.pass(&f.config, Some((30, 90 * MINUTE))).await, 0);
+        assert_eq!(f.due(30, 90 * MINUTE).await.stored, 0);
         assert_eq!(f.central.calls(), 2);
     }
 
@@ -697,7 +769,7 @@ mod tests {
         f.central.task(50, "COMPLETED", 3);
         f.store.stop_accepting();
         let now = 30 * MINUTE;
-        assert_eq!(f.recovery.pass(&f.config, Some((30, now))).await, 0);
+        assert_eq!(f.due(30, now).await.stored, 0);
         assert_eq!(sent_tasks::scan(&f.config, 30, now).unwrap(), 0);
         assert!(f.events().is_empty());
     }
@@ -710,13 +782,152 @@ mod tests {
             f.record(task, task);
             f.central.task(task, "IN_PROGRESS", 1);
         }
-        f.recovery.pass(&f.config, None).await;
+        f.round().await;
         assert_eq!(f.central.calls(), MAX_PER_PASS);
         // The oldest eight were not reached; they go first now.
         for task in 1..=8 {
             f.central.task(task, "COMPLETED", 2);
         }
-        assert_eq!(f.recovery.pass(&f.config, None).await, 8);
+        assert_eq!(f.round().await, 8);
+    }
+
+    #[tokio::test]
+    async fn tasks_past_the_cap_are_not_decided_overdue_before_their_lookup() {
+        let f = fixture().await;
+        let total = MAX_PER_PASS as u64 + 1;
+        for task in 1..=total {
+            f.record(task, task);
+            f.central.task(task, "COMPLETED", 3);
+        }
+        let now = 31 * MINUTE;
+        let pass = f.due(30, now).await;
+        assert_eq!(pass.stored, MAX_PER_PASS);
+        // The oldest task was not asked: it stays undecided, not overdue.
+        assert_eq!(
+            pass.held,
+            [(f.origin.clone(), AGENT, 1)].into_iter().collect()
+        );
+        assert_eq!(
+            sent_tasks::scan_holding(&f.config, 30, now, &pass.held).unwrap(),
+            0
+        );
+        // The next minute asks it first and finds it completed.
+        let pass = f.due(30, now + MINUTE).await;
+        assert_eq!((pass.stored, pass.held.len()), (1, 0));
+        assert_eq!(
+            sent_tasks::scan_holding(&f.config, 30, now + MINUTE, &pass.held).unwrap(),
+            0
+        );
+        assert!(f.overdue().is_empty());
+        assert_eq!(f.events().len(), total as usize);
+        assert_eq!(f.central.calls(), total as usize);
+    }
+
+    #[tokio::test]
+    async fn a_detail_larger_than_the_response_limit_still_gives_its_final_status() {
+        let f = fixture().await;
+        f.record(80, 0);
+        // File diffs and event history the recovery does not need, well past 256 KiB.
+        let mut large = detail(80, "COMPLETED", 3);
+        large["taskFiles"] = json!([{"relativePath": "a.txt", "changeType": "MODIFIED",
+            "diffText": "+\"줄\"\n".repeat(64 * 1024)}]);
+        large["events"] = json!(
+            (0..2000)
+                .map(|id| json!({"eventId": id, "eventType": "STATUS_CHANGED",
+                    "payload": {"note": "x".repeat(64)}}))
+                .collect::<Vec<_>>()
+        );
+        let body = json!({"success": true, "data": large});
+        assert!(serde_json::to_vec(&body).unwrap().len() > 512 * 1024);
+        f.central.answer(80, StatusCode::OK, body);
+        let now = 30 * MINUTE;
+        assert_eq!(f.due(30, now).await.stored, 1);
+        assert_eq!(sent_tasks::scan(&f.config, 30, now).unwrap(), 0);
+        assert!(f.overdue().is_empty());
+        let list = Notifications::list_config(&f.config, &f.origin, AGENT, 20).unwrap();
+        assert_eq!(list[0].summary.as_deref(), Some("완료했습니다"));
+    }
+
+    #[tokio::test]
+    async fn a_ready_round_continues_past_the_cap_with_the_overdue_check_off() {
+        let f = fixture().await;
+        let ledger = sent_tasks::Ledger::new(&f.config, &f.origin)
+            .unwrap()
+            .without_overdue();
+        let total = MAX_PER_PASS as u64 + 8;
+        for task in 1..=total {
+            ledger.record_now(AGENT, TEAM, task, task).unwrap();
+            f.central.task(task, "COMPLETED", 3);
+        }
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(sent_tasks::run_every(
+            f.config.clone(),
+            0,
+            Some(f.recovery.clone()),
+            cancel.clone(),
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_millis(50),
+        ));
+        // One READY only: the round goes on without a reconnect.
+        f.recovery.wake().notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while f.events().len() < total as usize {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The round ends once every task was asked.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel.cancel();
+        worker.await.unwrap();
+        assert_eq!(f.central.calls(), total as usize);
+    }
+
+    #[tokio::test]
+    async fn a_round_asks_each_task_once_and_then_ends() {
+        let f = fixture().await;
+        let total = MAX_PER_PASS as u64 + 8;
+        for task in 1..=total {
+            f.record(task, task);
+        }
+        // Every lookup is a 404: nothing settles, but the round still ends.
+        let since = Instant::now();
+        let first = f.recovery.pass(&f.config, Scope::Round { since }).await;
+        assert!(first.more);
+        let second = f.recovery.pass(&f.config, Scope::Round { since }).await;
+        assert!(!second.more);
+        let third = f.recovery.pass(&f.config, Scope::Round { since }).await;
+        assert!(!third.more);
+        assert_eq!(f.central.calls(), total as usize);
+    }
+
+    #[tokio::test]
+    async fn frequent_ready_signals_never_postpone_the_overdue_check() {
+        let f = fixture().await;
+        f.record(90, 0);
+        f.central.task(90, "IN_PROGRESS", 1);
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(sent_tasks::run_every(
+            f.config.clone(),
+            30,
+            Some(f.recovery.clone()),
+            cancel.clone(),
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(50),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while f.overdue().is_empty() {
+                // A READY far more often than the check interval.
+                f.recovery.wake().notify_one();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        worker.await.unwrap();
+        assert_eq!(f.overdue(), [90]);
     }
 
     #[tokio::test]
@@ -725,7 +936,7 @@ mod tests {
         sent_tasks::record(&f.config, &f.origin, AGENT + 1, TEAM, 60, 0).unwrap();
         sent_tasks::record(&f.config, &f.origin, AGENT, TEAM + 1, 61, 0).unwrap();
         sent_tasks::record(&f.config, "ws://127.0.0.1:9", AGENT, TEAM, 62, 0).unwrap();
-        assert_eq!(f.recovery.pass(&f.config, None).await, 0);
+        assert_eq!(f.round().await, 0);
         assert_eq!(f.central.calls(), 0);
     }
 

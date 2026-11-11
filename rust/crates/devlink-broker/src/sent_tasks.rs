@@ -13,7 +13,7 @@ use crate::{
     config,
     notifications::{Notifications, is_final},
     private_file,
-    sent_task_recovery::Recovery,
+    sent_task_recovery::{Recovery, Scope},
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,8 @@ const MAX_TASKS: usize = 1024;
 const MAX_EVENTS: usize = 1024;
 /// How often the broker checks recorded tasks against the threshold.
 const SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// Pause between the passes of one recovery round, so the per-pass cap spreads the calls.
+const ROUND_INTERVAL: Duration = Duration::from_secs(10);
 /// The file lock fails fast, so in-process writers queue here first (create handlers and
 /// the scan run concurrently), and a busy file lock is retried briefly.
 static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -271,6 +273,17 @@ fn record_in(config_path: &Path, mut task: SentTask, generation: Option<u64>) ->
 /// status notification was retained, otherwise only mark it settled. Returns the
 /// number of new events. `minutes == 0` disables the check.
 pub fn scan(config_path: &Path, minutes: u64, now_ms: u64) -> Result<usize> {
+    scan_holding(config_path, minutes, now_ms, &Default::default())
+}
+
+/// As `scan`, but tasks in `held` (origin, requester, taskId) stay undecided: their final
+/// status lookup was left for a later pass.
+pub(crate) fn scan_holding(
+    config_path: &Path,
+    minutes: u64,
+    now_ms: u64,
+    held: &std::collections::HashSet<(String, u64, u64)>,
+) -> Result<usize> {
     if minutes == 0 {
         return Ok(0);
     }
@@ -282,7 +295,10 @@ pub fn scan(config_path: &Path, minutes: u64, now_ms: u64) -> Result<usize> {
     let (mut changed, mut added) = (false, 0);
     for index in 0..snapshot.tasks.len() {
         let task = snapshot.tasks[index].clone();
-        if task.settled || now_ms < task.created_at_ms.saturating_add(threshold) {
+        if task.settled
+            || now_ms < task.created_at_ms.saturating_add(threshold)
+            || held.contains(&(task.origin.clone(), task.requester_agent_id, task.task_id))
+        {
             continue;
         }
         let key = (task.origin.clone(), task.requester_agent_id);
@@ -421,19 +437,48 @@ pub(crate) fn settle(config_path: &Path, origin: &str, agent: u64, task_id: u64)
 }
 
 /// Background worker while the broker runs. Every minute, tasks about to be decided are
-/// looked up in central first, then `scan` runs. A central READY wakes a lookup of every
-/// unfinished task. Failures are retried next round; passes never overlap.
+/// looked up in central first, then `scan` runs; tasks the lookup cap left unasked stay
+/// undecided until a later minute. A central READY starts a round that looks up every
+/// unfinished task once, `MAX_PER_PASS` at a time every `ROUND_INTERVAL`. Failures are
+/// retried next round; passes never overlap.
 pub async fn run(
     config_path: PathBuf,
     minutes: u64,
     recovery: Option<Recovery>,
     cancel: CancellationToken,
 ) {
+    run_every(
+        config_path,
+        minutes,
+        recovery,
+        cancel,
+        SCAN_INTERVAL,
+        ROUND_INTERVAL,
+    )
+    .await
+}
+
+pub(crate) async fn run_every(
+    config_path: PathBuf,
+    minutes: u64,
+    recovery: Option<Recovery>,
+    cancel: CancellationToken,
+    scan_interval: Duration,
+    round_interval: Duration,
+) {
     if minutes == 0 && recovery.is_none() {
         return;
     }
     let wake = recovery.as_ref().map(Recovery::wake);
+    // A READY never postpones the minute check, however often it comes.
+    let mut next_scan = tokio::time::Instant::now() + scan_interval;
+    // Start of the READY round still in progress.
+    let mut round: Option<std::time::Instant> = None;
     loop {
+        let deadline = match round {
+            Some(_) => next_scan.min(tokio::time::Instant::now() + round_interval),
+            None => next_scan,
+        };
         let ready = tokio::select! {
             _ = cancel.cancelled() => return,
             _ = async {
@@ -442,22 +487,40 @@ pub async fn run(
                     None => std::future::pending().await,
                 }
             } => true,
-            _ = tokio::time::sleep(SCAN_INTERVAL) => false,
+            _ = tokio::time::sleep_until(deadline) => false,
         };
-        // One time for the lookup and the scan, so no task becomes due in between.
-        let now = now_ms();
-        if let Some(recovery) = &recovery
-            && (ready || minutes > 0)
-        {
-            let due = (!ready).then_some((minutes, now));
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = recovery.pass(&config_path, due) => {}
+        if ready {
+            round = Some(std::time::Instant::now());
+        }
+        if !ready && tokio::time::Instant::now() >= next_scan {
+            next_scan = tokio::time::Instant::now() + scan_interval;
+            if minutes > 0 {
+                // One time for the lookup and the scan, so no task becomes due in between.
+                let now = now_ms();
+                let mut held = Default::default();
+                if let Some(recovery) = &recovery {
+                    let scope = Scope::Due {
+                        minutes,
+                        now_ms: now,
+                    };
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        pass = recovery.pass(&config_path, scope) => held = pass.held,
+                    }
+                }
+                let path = config_path.clone();
+                let _ =
+                    tokio::task::spawn_blocking(move || scan_holding(&path, minutes, now, &held))
+                        .await;
             }
         }
-        if !ready && minutes > 0 {
-            let path = config_path.clone();
-            let _ = tokio::task::spawn_blocking(move || scan(&path, minutes, now)).await;
+        if let (Some(recovery), Some(since)) = (&recovery, round) {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                pass = recovery.pass(&config_path, Scope::Round { since }) => {
+                    round = pass.more.then_some(since);
+                }
+            }
         }
     }
 }
