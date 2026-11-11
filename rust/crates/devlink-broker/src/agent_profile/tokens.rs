@@ -24,6 +24,15 @@ impl std::error::Error for VerificationFailure {}
 
 /// Shared with legacy bootstrap/start. Error types never carry response bodies or credentials.
 pub(super) async fn verify(origin: &str, token: &str) -> Result<Agent, VerificationFailure> {
+    Ok(verify_reported(origin, token).await?.agent)
+}
+
+/// `verify`, keeping whether central reported the part and role tags. Callers that cache the
+/// verified Agent need it; an identity check alone does not.
+pub(super) async fn verify_reported(
+    origin: &str,
+    token: &str,
+) -> Result<CentralAgent, VerificationFailure> {
     use VerificationFailure as V;
     if !valid_token(token) {
         return Err(V::Protocol);
@@ -63,7 +72,7 @@ pub(super) async fn verify(origin: &str, token: &str) -> Result<Agent, Verificat
     #[derive(Deserialize)]
     struct Envelope {
         success: bool,
-        data: Agent,
+        data: CentralAgent,
     }
     let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| V::Protocol)?;
     if !envelope.success {
@@ -190,10 +199,12 @@ pub async fn ensure_tracked(
     }
     let _guard = require_mutation(path, &expected.origin, expected.user_id, Some(id))
         .map_err(|e| known(e, id))?;
-    let owned: Agent = client
-        .get(&format!("/api/v1/agents/{id}"))
+    let owned = client
+        .get::<CentralAgent>(&format!("/api/v1/agents/{id}"))
         .await
-        .map_err(|e| known(central(e), id))?;
+        .map_err(|e| known(central(e), id))?
+        .confirmed()
+        .map_err(|_| fail(FailureKind::Protocol, id))?;
     validate_agent(&owned, expected).map_err(|e| known(e, id))?;
     if owned.agent_id != id {
         return Err(fail(FailureKind::Protocol, id));
@@ -233,8 +244,12 @@ pub async fn ensure_tracked(
     if issued.agent_id != id {
         return Ok(result(&profile, false, false, Mutation::Unknown));
     }
-    let verified = match verify(&profile.origin, &issued.token).await {
-        Ok(agent) if check_identity(&agent, expected, id).is_ok() => agent,
+    let verified = match verify_reported(&profile.origin, &issued.token).await {
+        Ok(CentralAgent { agent, reported })
+            if reported.complete() && check_identity(&agent, expected, id).is_ok() =>
+        {
+            agent
+        }
         _ => return Ok(result(&profile, false, false, Mutation::Unknown)),
     };
     // After issuance, every uncertain publication remains TOKEN_REQUIRED, with

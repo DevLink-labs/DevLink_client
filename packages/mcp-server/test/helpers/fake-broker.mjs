@@ -77,6 +77,7 @@ export async function fakeBroker({ profiles } = {}) {
       if (businessHook && await businessHook({ path, body, req, res, send, profile })) return;
       if (body.operation === 'register_agent') return send({ data: { agentId: principal.agentId ?? 'registered-agent' } });
       if (body.operation === 'find_agent') return send({ data: { status: 'INSUFFICIENT_EVIDENCE', evaluatedAt: '2026-11-09T02:00:00Z', insufficientReason: 'NO_ELIGIBLE_AGENTS', gitCoverage: { state: 'NOT_COLLECTED', reason: 'NO_TEAM_REPOSITORIES', workingState: 'NOT_COLLECTED' }, candidates: [] } });
+      if (body.operation === 'get_team_context') return send({ data: { teamId: '7', part: 'BACKEND', contexts: [] } });
       if (body.operation === 'get_updates') return send({ data: { updates: [], nextCursor: `v1.0.0.${'0'.repeat(32)}`, hasMore: false, cursorReset: false, coverage: 'local' } });
       return send({ data: { taskId: 'task-1', status: 'PENDING', delivery: { status: 'FAILED' }, echo: body.arguments } });
     } catch {

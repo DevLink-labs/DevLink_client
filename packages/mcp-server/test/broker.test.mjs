@@ -26,6 +26,7 @@ test('lazy bootstrap, trusted context, explicit routes and unchanged business da
     if (operation === 'register_agent') assert.equal(result.data.agentId, 'agent-a');
     else if (operation === 'get_updates') assert.equal(result.data.coverage, 'local');
     else if (operation === 'find_agent') assert.equal(result.data.insufficientReason, 'NO_ELIGIBLE_AGENTS');
+    else if (operation === 'get_team_context') assert.deepEqual(result.data.contexts, []);
     else {
       assert.equal(result.data.taskId, 'task-1');
       assert.equal(result.data.status, 'PENDING');
