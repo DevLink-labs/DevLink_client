@@ -450,6 +450,32 @@ pub fn set(path: &Path, key: &str, raw: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn dependency_remote_validates_names_without_replacing_the_saved_config_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        atomic_json(&path, &Config::default()).unwrap();
+        for valid in ["", "origin", "team.remote_2", &"a".repeat(64)] {
+            set(&path, "dependencyRemote", valid).unwrap();
+            assert_eq!(Config::load(&path).unwrap().dependency_remote, valid);
+        }
+        let saved = std::fs::read(&path).unwrap();
+        for invalid in [
+            "-option",
+            "two words",
+            "team/origin",
+            "원격",
+            &"a".repeat(65),
+        ] {
+            let error = set(&path, "dependencyRemote", invalid).unwrap_err();
+            assert!(
+                error.downcast_ref::<ConfigValidationError>().is_some(),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+        }
+    }
+
+    #[test]
     fn task_overdue_minutes_accepts_zero_to_one_week() {
         for (minutes, ok) in [(0, true), (30, true), (10_080, true), (10_081, false)] {
             let config = Config {

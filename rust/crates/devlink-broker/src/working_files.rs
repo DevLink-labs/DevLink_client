@@ -1,9 +1,8 @@
 //! IDX-3-02 working-file collection (S15P31D108-186).
 //!
-//! Every 3 seconds the broker reads the bound project's uncommitted files. A changed list
-//! replaces the bound user's list for that repository on central at once, so the dependency
-//! tree shows work within seconds; an unchanged list is sent again every 30 seconds. An empty
-//! list is still an observation; central expires an observation 90 seconds after it arrives.
+//! Every 30 seconds the broker reads the bound project's uncommitted files and replaces the
+//! bound user's list for that repository on central. An empty list is still an observation;
+//! central expires an observation 90 seconds after it arrives.
 //! `find_agent` asks for one more observation right before its central call and continues with
 //! the last valid one if that fails. Bodies come from `git_scope` (IDX-3-03), so only the
 //! branch, relative paths and change types leave the PC. Uploads are conditional on central's
@@ -15,7 +14,7 @@ use crate::{
     git_scope::WorkingFiles,
     task_client::TaskClient,
 };
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use reqwest::Method;
 use serde_json::Value;
 use std::{
@@ -25,13 +24,11 @@ use std::{
 };
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{Instant, MissedTickBehavior, interval, timeout},
+    time::{MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
 
-/// How often the working tree is read; a changed list is sent at once.
-pub const CHECK_INTERVAL: Duration = Duration::from_secs(3);
-/// An unchanged list is sent again after this long, well inside central's 90-second expiry.
+/// The periodic observation interval, inside central's 90-second expiry.
 pub const INTERVAL: Duration = Duration::from_secs(30);
 /// Budget for the re-check right before `find_agent`; past it central uses the last observation.
 pub const REFRESH_LIMIT: Duration = Duration::from_secs(3);
@@ -41,86 +38,47 @@ pub const DEFAULT_REMOTE: &str = "origin";
 /// Central working-file protocol with revision-conditional uploads.
 const PROTOCOL_VERSION: u64 = 2;
 
-/// The last observation central accepted from this collector.
-struct Sent {
-    body: Value,
-    at: Instant,
-}
-
-/// Result of one revision-conditional upload attempt.
-enum Attempt {
-    /// `true` if a list was sent and acknowledged, `false` if it was suppressed as unchanged.
-    Done(bool),
-    /// Central holds a newer revision than the one this attempt carried.
-    Conflict,
-}
-
 struct Collector {
     git: GitProject,
     binding: InspectionBinding,
     central: CentralState,
     client: TaskClient,
     path: String,
-    resend: Duration,
-    last: Option<Sent>,
     /// The current list was cut to central's limit and that was already reported.
     cut_noted: bool,
 }
 
 impl Collector {
-    /// Reads the working tree and sends it unless it equals the last accepted list sent less
-    /// than `resend` ago. `force` always sends. Returns whether a request was sent.
-    ///
     /// Every upload carries the revision central reported right before the Git read, so a
     /// delayed older request is rejected instead of replacing a newer list (F8). After a
     /// conflict the revision and the working tree are read again once.
-    async fn publish(&mut self, force: bool) -> Result<bool> {
-        if let Attempt::Done(sent) = self.attempt(force).await? {
-            return Ok(sent);
-        }
-        match self.attempt(force).await? {
-            Attempt::Done(sent) => Ok(sent),
-            Attempt::Conflict => bail!("Working-file revision changed again; retrying later"),
-        }
+    async fn publish(&mut self) -> Result<()> {
+        ensure!(
+            self.attempt().await? || self.attempt().await?,
+            "Working-file revision changed again; retrying later"
+        );
+        Ok(())
     }
 
-    async fn attempt(&mut self, force: bool) -> Result<Attempt> {
+    /// Returns false on a revision conflict and true on a protocol 2 acknowledgment.
+    async fn attempt(&mut self) -> Result<bool> {
         ensure!(
             bound_ready(&self.central, &self.binding).await,
             "Central is not ready for the bound Agent"
         );
-        // An unchanged list is suppressed without contacting central.
-        if !force {
-            let body = self.observe().await?;
-            if self
-                .last
-                .as_ref()
-                .is_some_and(|sent| sent.body == body && sent.at.elapsed() < self.resend)
-            {
-                return Ok(Attempt::Done(false));
-            }
-        }
         // Every upload looks the revision up first instead of reusing an acknowledged one. A
         // central without revisions, such as one rolled back to an older release, fails the
         // lookup and so never receives a PUT whose `If-Match` it would ignore. The body is read
         // after the lookup, so any list central accepted after that read invalidates it.
         let revision = self.fetch_revision().await?;
         let body = self.observe().await?;
-        // A failed exchange can still have been applied by central. Until the next
-        // acknowledgment, do not suppress a periodic upload even if it matches the old body.
-        self.last = None;
         let (status, reply) = self
             .client
-            .request_graph_http_if_match(
-                Method::PUT,
-                &self.path,
-                Some(&revision),
-                Some(body.clone()),
-            )
+            .request_graph_http_if_match(Method::PUT, &self.path, Some(&revision), Some(body))
             .await
             .map_err(|_| anyhow!("Working-file upload failed"))?;
         if status == 412 {
-            return Ok(Attempt::Conflict);
+            return Ok(false);
         }
         ensure!(
             (200..300).contains(&status) && reply.success,
@@ -128,11 +86,7 @@ impl Collector {
         );
         // Only a protocol 2 acknowledgment counts as accepted.
         revision_of(reply.data.as_ref())?;
-        self.last = Some(Sent {
-            body,
-            at: Instant::now(),
-        });
-        Ok(Attempt::Done(true))
+        Ok(true)
     }
 
     /// The current working tree as an upload body.
@@ -185,53 +139,6 @@ fn revision_of(data: Option<&Value>) -> Result<String> {
     Ok(revision.hyphenated().to_string())
 }
 
-/// Wait before the next periodic attempt after consecutive failures: the check interval,
-/// doubled per failure up to the resend interval. A success clears it.
-struct Backoff {
-    base: Duration,
-    max: Duration,
-    delay: Duration,
-}
-
-/// What the periodic schedule should do after an attempt.
-#[derive(Debug, PartialEq, Eq)]
-enum Schedule {
-    /// Keep the regular check interval.
-    Keep,
-    /// The previous attempts failed and this one succeeded: return to the regular interval.
-    Recover,
-    /// Wait this long, counted from the end of the failed attempt.
-    Wait(Duration),
-}
-
-impl Backoff {
-    fn new(base: Duration, max: Duration) -> Self {
-        Self {
-            base,
-            max,
-            delay: Duration::ZERO,
-        }
-    }
-
-    fn record(&mut self, succeeded: bool) -> Schedule {
-        if succeeded {
-            let backing_off = !self.delay.is_zero();
-            self.delay = Duration::ZERO;
-            return if backing_off {
-                Schedule::Recover
-            } else {
-                Schedule::Keep
-            };
-        }
-        self.delay = if self.delay.is_zero() {
-            self.base
-        } else {
-            (self.delay * 2).min(self.max)
-        };
-        Schedule::Wait(self.delay)
-    }
-}
-
 /// Handle `find_agent` uses for the re-check. Without a running collector it does nothing.
 #[derive(Clone, Default)]
 pub struct WorkingFileRefresher(Arc<OnceLock<mpsc::Sender<oneshot::Sender<bool>>>>);
@@ -264,10 +171,9 @@ pub(crate) async fn run(
     refresher: WorkingFileRefresher,
     cancel: CancellationToken,
 ) {
-    let timing = (CHECK_INTERVAL, INTERVAL);
     tokio::select! {
         _ = cancel.cancelled() => {},
-        _ = collect(binding, remote, central, client, refresher, timing) => {},
+        _ = collect(binding, remote, central, client, refresher, INTERVAL) => {},
     }
 }
 
@@ -277,7 +183,7 @@ async fn collect(
     central: CentralState,
     client: TaskClient,
     refresher: WorkingFileRefresher,
-    (check, resend): (Duration, Duration),
+    period: Duration,
 ) {
     let Ok(git) = GitProject::open(Path::new(&binding.project_root), &remote).await else {
         eprintln!(
@@ -295,16 +201,13 @@ async fn collect(
         central,
         client,
         path,
-        resend,
-        last: None,
         cut_noted: false,
     };
     let (sender, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
     let _ = refresher.0.set(sender);
-    let mut tick = interval(check);
+    let mut tick = interval(period);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut failed = false;
-    let mut retry = Backoff::new(check, resend);
     loop {
         let reply = tokio::select! {
             _ = tick.tick() => None,
@@ -321,23 +224,18 @@ async fn collect(
             }
             continue;
         }
-        let result = collector.publish(reply.is_some()).await;
+        let result = collector.publish().await;
         if result.is_err() && !failed {
             eprintln!(
                 "Working-file upload failed; central keeps the last observation until it expires."
             );
         }
         failed = result.is_err();
-        // After failures the next periodic check comes exactly when the backoff ends, so a
-        // central that keeps rejecting is not asked every few seconds. The re-check before
-        // find_agent arrives on its own channel and is never delayed.
-        match retry.record(result.is_ok()) {
-            Schedule::Keep => {}
-            Schedule::Recover => tick.reset(),
-            Schedule::Wait(delay) => tick.reset_after(delay),
-        }
         if let Some(reply) = reply {
-            let _ = reply.send(matches!(result, Ok(true)));
+            let _ = reply.send(result.is_ok());
+        } else if failed {
+            // Wait a full period after a failed periodic attempt instead of catching up.
+            tick.reset();
         }
     }
 }
@@ -571,8 +469,6 @@ mod tests {
             central: connected(3).await,
             client: TaskClient::new(url, TOKEN).unwrap(),
             path,
-            resend: INTERVAL,
-            last: None,
             cut_noted: false,
         }
     }
@@ -737,13 +633,12 @@ mod tests {
         .await;
         let mut collector = collector(root, &url).await;
 
-        assert!(collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         let transient = root.join("transient.txt");
         std::fs::write(&transient, "temporary").unwrap();
-        assert!(collector.publish(false).await.is_err());
+        assert!(collector.publish().await.is_err());
         std::fs::remove_file(transient).unwrap();
-        assert!(collector.publish(false).await.unwrap());
-        assert!(!collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         let observations: Vec<Value> = std::iter::from_fn(|| uploads.try_recv().ok())
             .map(|upload| upload.body)
             .collect();
@@ -777,7 +672,7 @@ mod tests {
         let mut collector = collector(repo.path(), &url).await;
         let initial = state.current();
 
-        assert!(collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         let first = uploads.recv().await.unwrap();
         assert_eq!(first.if_match, Some(format!("\"{initial}\"")));
 
@@ -787,7 +682,7 @@ mod tests {
         let looked_up = state.current();
         state.race_next_lookup.store(true, Ordering::SeqCst);
         *state.write_on_conflict.lock().unwrap() = Some(repo.path().join("late.ts"));
-        assert!(collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         let retried = uploads.recv().await.unwrap();
         let log = state.log();
         assert_eq!(log.len(), 6, "{log:?}");
@@ -809,15 +704,15 @@ mod tests {
         let state = Central::new(sender);
         let url = central_with(state.clone()).await;
         let mut collector = collector(repo.path(), &url).await;
-        assert!(collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         uploads.recv().await.unwrap();
 
         // Central is rolled back while the collector keeps running; the tree changes and the
         // periodic upload is due as well.
         state.legacy.store(true, Ordering::SeqCst);
         std::fs::write(repo.path().join("after-rollback.ts"), "r").unwrap();
-        assert!(collector.publish(false).await.is_err());
-        assert!(collector.publish(true).await.is_err());
+        assert!(collector.publish().await.is_err());
+        assert!(collector.publish().await.is_err());
         assert!(
             !state.log().iter().any(|line| line == "PUT legacy"),
             "{:?}",
@@ -827,7 +722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_conflict_fails_the_publish_and_keeps_no_acknowledged_list() {
+    async fn a_second_conflict_fails_the_publish_after_one_retry() {
         // Another writer always wins right after each lookup.
         async fn racing(State(central): State<Arc<Central>>) -> Json<Value> {
             central.log.lock().unwrap().push("GET".into());
@@ -846,14 +741,13 @@ mod tests {
         .await;
         let mut collector = collector(repo.path(), &url).await;
 
-        assert!(collector.publish(true).await.is_err());
+        assert!(collector.publish().await.is_err());
         let log = state.log();
         assert_eq!(log.len(), 4, "{log:?}");
         assert_eq!(log[0], "GET");
         assert!(log[1].ends_with(" 412"));
         assert_eq!(log[2], "GET");
         assert!(log[3].ends_with(" 412"));
-        assert!(collector.last.is_none());
         assert!(uploads.try_recv().is_err());
     }
 
@@ -906,7 +800,7 @@ mod tests {
             central.clone(),
             client.clone(),
             refresher.clone(),
-            (Duration::from_secs(60), INTERVAL),
+            Duration::from_secs(60),
         );
         let task = tokio::spawn({
             let cancel = cancel.clone();
@@ -1002,142 +896,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_failures_back_off_periodic_checks_but_not_the_find_agent_recheck() {
-        let repo = repository();
-        let (sender, mut uploads) = mpsc::unbounded_channel();
-        let state = Central::new(sender);
-        // Every lookup fails, as on a central without the working-file API.
-        state.legacy.store(true, Ordering::SeqCst);
-        let url = central_with(state.clone()).await;
-        let refresher = WorkingFileRefresher::default();
-        let cancel = CancellationToken::new();
-        let (check, resend) = (Duration::from_millis(100), Duration::from_secs(2));
-        let collector = collect(
-            binding(repo.path()),
-            DEFAULT_REMOTE.into(),
-            connected(3).await,
-            TaskClient::new(&url, TOKEN).unwrap(),
-            refresher.clone(),
-            (check, resend),
-        );
-        let task = tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                tokio::select! {
-                    _ = cancel.cancelled() => {},
-                    _ = collector => {},
-                }
-            }
-        });
-
-        // Measure from the first failure, so a slow start does not shorten the window.
-        timeout(Duration::from_secs(10), async {
-            while lookups(&state) == 0 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the collector looks the revision up");
-        let start = lookups(&state);
-        tokio::time::sleep(Duration::from_millis(2_500)).await;
-        // Without the backoff a 100 ms check would look the revision up about 25 more times;
-        // with it the waits are 0.1, 0.2, 0.4, 0.8 and 1.6 s.
-        let failed = lookups(&state);
-        assert!(
-            (start + 1..=start + 6).contains(&failed),
-            "{start} then {failed} lookups"
-        );
-
-        // The re-check before find_agent runs at once despite the backoff.
-        assert!(!refresher.refresh(Duration::from_secs(2)).await);
-        assert!(
-            (failed + 1..=failed + 2).contains(&lookups(&state)),
-            "{:?}",
-            state.log()
-        );
-
-        // Once central answers again, the next due check succeeds and clears the backoff, so
-        // a later change goes out at the next check.
-        state.legacy.store(false, Ordering::SeqCst);
-        timeout(Duration::from_secs(5), uploads.recv())
-            .await
-            .expect("the backoff is at most the resend interval")
-            .unwrap();
-        std::fs::write(repo.path().join("after.ts"), "a").unwrap();
-        let changed = timeout(Duration::from_millis(1_500), uploads.recv())
-            .await
-            .expect("no backoff after a success")
-            .unwrap();
-        assert!(
-            changed.body["files"]
-                .as_array()
-                .unwrap()
-                .contains(&json!({"relativePath": "after.ts", "changeType": "UNTRACKED"}))
-        );
-        cancel.cancel();
-        task.await.unwrap();
-    }
-
-    #[test]
-    fn backoff_doubles_from_the_check_interval_up_to_the_resend_interval() {
-        let second = Duration::from_secs;
-        let mut retry = Backoff::new(second(3), second(30));
-        assert_eq!(retry.record(true), Schedule::Keep);
-        let waits: Vec<_> = (0..6).map(|_| retry.record(false)).collect();
-        assert_eq!(
-            waits,
-            [3, 6, 12, 24, 30, 30].map(|wait| Schedule::Wait(second(wait)))
-        );
-        assert_eq!(retry.record(true), Schedule::Recover);
-        assert_eq!(retry.record(true), Schedule::Keep);
-        assert_eq!(retry.record(false), Schedule::Wait(second(3)));
-    }
-
-    #[tokio::test]
-    async fn the_next_attempt_after_a_failure_comes_when_the_backoff_ends() {
+    async fn a_failed_periodic_attempt_waits_for_the_next_period() {
         let repo = repository();
         let (sender, _uploads) = mpsc::unbounded_channel();
         let state = Central::new(sender);
         state.legacy.store(true, Ordering::SeqCst);
         let url = central_with(state.clone()).await;
-        let cancel = CancellationToken::new();
-        let check = Duration::from_secs(1);
-        let collector = collect(
+        let period = Duration::from_secs(1);
+        let worker = tokio::spawn(collect(
             binding(repo.path()),
             DEFAULT_REMOTE.into(),
             connected(3).await,
             TaskClient::new(&url, TOKEN).unwrap(),
             WorkingFileRefresher::default(),
-            (check, Duration::from_secs(8)),
-        );
-        let task = tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                tokio::select! {
-                    _ = cancel.cancelled() => {},
-                    _ = collector => {},
-                }
-            }
-        });
-        timeout(Duration::from_secs(15), async {
-            while state.lookup_times.lock().unwrap().len() < 3 {
+            period,
+        ));
+        timeout(Duration::from_secs(10), async {
+            while lookups(&state) < 3 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("three lookups");
-        cancel.cancel();
-        task.await.unwrap();
-        let times = state.lookup_times.lock().unwrap().clone();
-        let gaps = [times[1] - times[0], times[2] - times[1]];
-        // The waits are 1 s and 2 s from the end of each failed attempt; the gap adds only the
-        // attempt's own Git read and HTTP time. Waiting for the next whole check interval
-        // instead would make them about 2 s and 3 s.
-        assert!(gaps[0] >= check && gaps[0] < check * 17 / 10, "{gaps:?}");
-        assert!(
-            gaps[1] >= check * 2 && gaps[1] < check * 27 / 10,
-            "{gaps:?}"
-        );
+        .expect("three revision lookups");
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        let times = state.lookup_times.lock().unwrap();
+        assert!(times[1] - times[0] >= period);
+        assert!(times[2] - times[1] >= period);
     }
 
     #[tokio::test]
@@ -1164,7 +949,7 @@ mod tests {
         for app in servers {
             let url = serve(app.with_state(state.clone())).await;
             let mut collector = collector(repo.path(), &url).await;
-            assert!(collector.publish(true).await.is_err());
+            assert!(collector.publish().await.is_err());
         }
         assert!(!state.log().iter().any(|line| line.starts_with("PUT")));
         assert!(uploads.try_recv().is_err());
@@ -1182,7 +967,7 @@ mod tests {
         let url = central(sender).await;
         let mut collector = collector(repo.path(), &url).await;
 
-        assert!(collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         assert!(collector.cut_noted);
         let files = uploads.recv().await.unwrap().body["files"]
             .as_array()
@@ -1200,7 +985,7 @@ mod tests {
 
         // Back under the limit, the whole list is sent again and the notice resets.
         std::fs::remove_dir_all(&modules).unwrap();
-        assert!(collector.publish(false).await.unwrap());
+        collector.publish().await.unwrap();
         assert!(!collector.cut_noted);
         assert_eq!(
             uploads.recv().await.unwrap().body["files"]
@@ -1257,64 +1042,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_a_change_at_the_next_check_and_an_unchanged_list_only_after_the_interval() {
+    async fn each_period_replaces_the_list_even_when_unchanged() {
         let repo = repository();
         let (sender, mut uploads) = mpsc::unbounded_channel();
         let url = central(sender).await;
-        let cancel = CancellationToken::new();
-        // The resend interval leaves room for a slow Git or machine; the change below only has
-        // to arrive before it.
-        let (check, resend) = (Duration::from_millis(100), Duration::from_secs(5));
-        let collector = collect(
+        let worker = tokio::spawn(collect(
             binding(repo.path()),
             DEFAULT_REMOTE.into(),
             connected(3).await,
             TaskClient::new(&url, TOKEN).unwrap(),
             WorkingFileRefresher::default(),
-            (check, resend),
-        );
-        let task = tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                tokio::select! {
-                    _ = cancel.cancelled() => {},
-                    _ = collector => {},
-                }
-            }
-        });
-        let first = tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+            Duration::from_secs(1),
+        ));
+
+        let first = timeout(Duration::from_secs(10), uploads.recv())
             .await
             .unwrap()
             .unwrap();
-        let sent_at = Instant::now();
-        assert_eq!(first.body["files"].as_array().unwrap().len(), 4);
-
-        // Unchanged lists are read every check but not sent again before the interval.
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        assert!(uploads.try_recv().is_err());
-
-        // A change goes out at the next check, long before the interval.
-        std::fs::write(repo.path().join("later.ts"), "l").unwrap();
-        let changed = tokio::time::timeout(Duration::from_secs(3), uploads.recv())
+        let unchanged = timeout(Duration::from_secs(4), uploads.recv())
             .await
-            .expect("a change must not wait for the interval")
+            .expect("the next period must renew the observation")
             .unwrap();
-        assert!(sent_at.elapsed() < resend);
+        assert_eq!(unchanged.body, first.body);
+
+        std::fs::write(repo.path().join("later.ts"), "l").unwrap();
+        let changed = timeout(Duration::from_secs(4), uploads.recv())
+            .await
+            .unwrap()
+            .unwrap();
         let files = changed.body["files"].as_array().unwrap();
         assert_eq!(files.len(), 5);
         assert!(files.contains(&json!({"relativePath": "later.ts", "changeType": "UNTRACKED"})));
 
-        // Still unchanged: the same list is sent again once the interval passes.
-        let changed_at = Instant::now();
-        let again = tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+        std::fs::remove_file(repo.path().join("later.ts")).unwrap();
+        git(repo.path(), &["checkout", "-q", "-b", "another-branch"]);
+        let reverted = timeout(Duration::from_secs(4), uploads.recv())
             .await
             .unwrap()
             .unwrap();
-        assert!(changed_at.elapsed() >= resend - check * 2);
-        assert_eq!(again.body, changed.body);
+        assert_eq!(reverted.body["branch"], "another-branch");
+        assert_eq!(reverted.body["files"], first.body["files"]);
 
-        cancel.cancel();
-        task.await.unwrap();
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
     }
 
     struct DelayedServer {
@@ -1369,7 +1139,7 @@ mod tests {
                     _ = collect(
                         binding, DEFAULT_REMOTE.into(), state,
                         TaskClient::new(&url, TOKEN).unwrap(), refresher,
-                        (Duration::from_secs(60), INTERVAL),
+                        Duration::from_secs(60),
                     ) => {},
                 }
             }

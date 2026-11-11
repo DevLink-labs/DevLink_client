@@ -43,6 +43,21 @@
 
 IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD나 UTF-8로 해석할 수 없는 브랜치는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 작업 파일 경로는 500코드포인트와 UTF-8 1,000바이트 한도를 모두 만족해야 한다. 초과 경로만 제외하고 정상 파일은 유지한다. 한 번에 보내는 파일은 2,000개 이하다. 넘으면 추적 중인 파일의 변경을 먼저 넣고 미추적 파일로 남는 자리를 채운다. 브랜치는 중앙 규칙(문자·숫자·`._/-`, 255코드포인트 이하, `-` 시작·`..` 금지)을 따르며 `WorkingFiles::branch_allowed`로 확인한다. 수집기는 [작업 파일 수집](working-files.md)이다.
 
+## 팀 의존성 그래프
+
+저장소 안에서 아래 명령을 실행한다. `dependency-repo-key`는 현재 저장소의 원격 URL로 키를 계산해 출력한다. 기본 원격은 `origin`이며, 다른 원격을 설정했다면 같은 이름을 `--remote`로 지정한다. 설정은 브로커를 재시작하면 적용된다.
+
+```sh
+devlink dependency-repo-key --remote origin
+devlink config set dependencyRemote origin
+```
+
+`dependencyRemote`가 설정되면 중앙에서 발행자로 지정된 Agent의 브로커가 60초마다 구성과 로컬 원격 추적 브랜치를 확인한다. 의존성 그래프, 커밋 동기화, 작업 파일은 모두 `GitProject::open`에서 같은 원격 정규화와 SHA-256을 쓴다. 중앙은 받은 `repoKey`를 `team_git_repositories.origin_url_sha256` 키로 사용한다. 저장소 등록에도 같은 원격에서 계산한 키를 넣는다.
+
+그래프의 `POST /api/v1/teams/{teamId}/git/file-dependencies:batch` 본문은 `repoKey`, `branchName`, `expectedRevision`, `analysisCommitSha`, `analysisVersion`, `nodes`, `edges`다. 노드에는 ID·종류·라벨·저장소 상대 경로·줄 번호와 해당할 때 HTTP 메서드·경로 템플릿 또는 DB 스키마 이름이 들어간다. 간선은 두 노드 ID와 관계 종류다. 그래프는 커밋된 일반 파일을 로컬에서 분석하며 심볼릭 링크와 서브모듈은 제외한다.
+
+IDX-3-03의 허용 목록은 커밋과 작업 파일 업로드에 적용된다. 별도 의존성 그래프 계약에는 소스에서 추출한 컴포넌트·엔드포인트·DB 테이블 등의 라벨과 연결 관계도 들어간다. 파일 본문·diff·절대 경로·원격 URL·커밋 작성자 이메일은 그래프 본문에 담지 않는다.
+
 ## 검증
 
 `cargo test -p devlink-broker --lib git_scope`
