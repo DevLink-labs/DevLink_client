@@ -347,6 +347,11 @@ async fn agent_create(
             agent.as_object_mut().unwrap().remove("part");
             agent.as_object_mut().unwrap().remove("roles");
         }
+        // The central reports both fields but stored its defaults, not the request.
+        if state.create_mode.load(Ordering::SeqCst) == 6 {
+            agent["part"] = json!("OTHER");
+            agent["roles"] = json!([]);
+        }
         stored.insert(id, agent.clone());
         agent
     };
