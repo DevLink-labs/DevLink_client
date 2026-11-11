@@ -374,12 +374,19 @@ mod tests {
         assert!(!text.contains(repo.path().to_str().unwrap()));
         assert!(!text.contains("github.com"));
 
+        // Git accepts this branch, while central rejects its spacing combining mark.
+        git(repo.path(), &["checkout", "-q", "-b", "feature/का"]);
+        assert!(refresher.refresh(REFRESH_LIMIT).await);
+        let observation = uploads.recv().await.unwrap();
+        assert_eq!(observation.body["branch"], Value::Null);
+        assert_eq!(observation.body["files"], first.body["files"]);
+
         // Clean tree: an empty list is still an observation.
         git(repo.path(), &["add", "-A"]);
         git(repo.path(), &["commit", "-q", "-m", "work"]);
         assert!(refresher.refresh(REFRESH_LIMIT).await);
         let refreshed = uploads.recv().await.unwrap();
-        assert_eq!(refreshed.body, json!({"branch": "main", "files": []}));
+        assert_eq!(refreshed.body, json!({"branch": null, "files": []}));
 
         cancel.cancel();
         task.await.unwrap();

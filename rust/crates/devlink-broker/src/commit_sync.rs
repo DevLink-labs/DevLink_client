@@ -21,10 +21,12 @@ use crate::{
     private_file,
     task_client::TaskClient,
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -38,7 +40,7 @@ pub const HISTORY: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const CHUNK: usize = 1000;
 const STATE_FILE: &str = "commit-sync.json";
 const STATE_LIMIT: usize = 4096;
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -53,6 +55,8 @@ struct Checkpoint {
     commit_sha: String,
     /// `unregistered` or the SET-3-03 fingerprint the range was attributed with.
     identity: String,
+    /// Changes when Git history is deepened, even if HEAD stays the same.
+    shallow_fingerprint: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -122,9 +126,18 @@ impl CommitSync {
         let Some(tip) = self.git.head().await? else {
             return Ok(Outcome::UpToDate);
         };
+        let shallow = self.git.shallow_boundaries().await?;
+        let mut digest = Sha256::new();
+        for sha in &shallow {
+            digest.update(sha.as_bytes());
+            digest.update(b"\n");
+        }
+        let shallow_fingerprint = format!("{:x}", digest.finalize());
         let since = self
             .load()
-            .filter(|saved| saved.identity == identity)
+            .filter(|saved| {
+                saved.identity == identity && saved.shallow_fingerprint == shallow_fingerprint
+            })
             .map(|saved| saved.commit_sha);
         if since.as_deref() == Some(tip.as_str()) {
             return Ok(Outcome::UpToDate);
@@ -133,7 +146,7 @@ impl CommitSync {
             .checked_sub(HISTORY)
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |time| time.as_secs());
-        let ids = match &since {
+        let mut ids = match &since {
             // A checkpoint that history rewriting removed falls back to the whole window.
             Some(old) => match self.git.commit_ids(Some(old), &tip, after).await {
                 Ok(ids) => ids,
@@ -141,9 +154,10 @@ impl CommitSync {
             },
             None => self.git.commit_ids(None, &tip, after).await?,
         };
+        ids.retain(|sha| !shallow.contains(sha));
         let (mut sent, mut skipped) = (0, 0);
         for chunk in ids.chunks(self.chunk) {
-            let Some(chunk_skipped) = self.upload(chunk, &check).await? else {
+            let Some(chunk_skipped) = self.upload(chunk, &check, &shallow).await? else {
                 return Ok(Outcome::NotReady);
             };
             skipped += chunk_skipped;
@@ -151,10 +165,10 @@ impl CommitSync {
             // Every ancestor of the chunk's last commit was listed before it, so the next
             // range can start there even if a later chunk fails.
             if let Some(last) = chunk.last() {
-                self.save(last, &identity)?;
+                self.save(last, &identity, &shallow_fingerprint)?;
             }
         }
-        self.save(&tip, &identity)?;
+        self.save(&tip, &identity, &shallow_fingerprint)?;
         Ok(Outcome::Synced {
             commits: sent - skipped.min(sent),
             skipped,
@@ -162,7 +176,12 @@ impl CommitSync {
     }
 
     /// Sends one chunk; `None` if central disconnected meanwhile, else the skipped count.
-    async fn upload(&self, ids: &[String], check: &IdentityCheck) -> Result<Option<usize>> {
+    async fn upload(
+        &self,
+        ids: &[String],
+        check: &IdentityCheck,
+        shallow: &BTreeSet<String>,
+    ) -> Result<Option<usize>> {
         let mut pending = vec![ids];
         let mut skipped = 0;
         while let Some(ids) = pending.pop() {
@@ -180,6 +199,12 @@ impl CommitSync {
                 }
                 Err(error) => return Err(error),
             };
+            // If a fetch changed the shallow boundary while Git was reading this chunk,
+            // discard its file lists and rebuild the range on the next sync.
+            ensure!(
+                self.git.shallow_boundaries().await? == *shallow,
+                "Git shallow boundaries changed during commit collection"
+            );
             let Some(part_skipped) = self.upload_records(ids.len(), commits, check).await? else {
                 return Ok(None);
             };
@@ -248,7 +273,7 @@ impl CommitSync {
             })
     }
 
-    fn save(&self, commit_sha: &str, identity: &str) -> Result<()> {
+    fn save(&self, commit_sha: &str, identity: &str, shallow_fingerprint: &str) -> Result<()> {
         let checkpoint = Checkpoint {
             schema_version: SCHEMA_VERSION,
             origin: self.binding.origin.clone(),
@@ -257,6 +282,7 @@ impl CommitSync {
             repo_key: self.repo_key.as_str().to_owned(),
             commit_sha: commit_sha.to_owned(),
             identity: identity.to_owned(),
+            shallow_fingerprint: shallow_fingerprint.to_owned(),
         };
         private_file::write(&self.state_path, &checkpoint, STATE_LIMIT)
     }
@@ -496,6 +522,36 @@ mod tests {
     }
 
     impl Fixture {
+        async fn clone_history(&self, filter: &str) -> (tempfile::TempDir, CommitSync) {
+            let clone = tempfile::tempdir().unwrap();
+            let url = url::Url::from_directory_path(self.repo.path()).unwrap();
+            git(
+                clone.path(),
+                ME,
+                &["clone", "-q", "--no-checkout", filter, url.as_str(), "."],
+            );
+            git(
+                clone.path(),
+                ME,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:acme/history.git",
+                ],
+            );
+            let sync = open(
+                clone.path(),
+                &self.profile.path().join("config.json"),
+                &self.url,
+                &self.identity,
+                "http://127.0.0.1/",
+                7,
+            )
+            .await;
+            (clone, sync)
+        }
+
         async fn reopen(&self, origin: &str, team: u64) -> CommitSync {
             let config_path = self.profile.path().join("config.json");
             open(
@@ -527,6 +583,118 @@ mod tests {
                 .map(|commit| commit["commitSha"].as_str().unwrap().to_owned())
                 .collect()
         }
+    }
+
+    #[tokio::test]
+    async fn deepening_a_shallow_clone_revisits_skipped_commits_at_the_same_head() {
+        let f = fixture().await;
+        let root = f.repo.path();
+        let first = commit(root, ME, "old.txt", "old");
+        let boundary = commit(root, ME, "new.txt", "new");
+        let tip = commit(root, ME, "tip.txt", "tip");
+        f.identity.set_for_test(None).await;
+        let (clone, sync) = f.clone_history("--depth=2").await;
+
+        assert_eq!(
+            sync.git.shallow_boundaries().await.unwrap(),
+            [boundary.clone()].into()
+        );
+        sync.sync_once().await.unwrap();
+        assert_eq!(f.shas().as_slice(), std::slice::from_ref(&tip));
+        assert_eq!(sync.sync_once().await.unwrap(), Outcome::UpToDate);
+
+        let mut legacy = serde_json::to_value(sync.load().unwrap()).unwrap();
+        legacy["schemaVersion"] = json!(1);
+        legacy.as_object_mut().unwrap().remove("shallowFingerprint");
+        private_file::write(&sync.state_path, &legacy, STATE_LIMIT).unwrap();
+        sync.sync_once().await.unwrap();
+        assert_eq!(f.shas().as_slice(), std::slice::from_ref(&tip));
+
+        let url = url::Url::from_directory_path(root).unwrap();
+        git(
+            clone.path(),
+            ME,
+            &["fetch", "-q", "--unshallow", url.as_str()],
+        );
+        assert_eq!(
+            sync.git.head().await.unwrap().as_deref(),
+            Some(tip.as_str())
+        );
+        let check = f.identity.check().await.unwrap();
+        assert!(
+            sync.upload(
+                std::slice::from_ref(&tip),
+                &check,
+                &[boundary.clone()].into()
+            )
+            .await
+            .is_err()
+        );
+        assert!(f.sent().is_empty());
+        sync.sync_once().await.unwrap();
+        let commits = f
+            .sent()
+            .into_iter()
+            .flat_map(|body| body["commits"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| commit["commitSha"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [&first, &boundary, &tip]
+        );
+        assert_eq!(
+            commits[1]["files"],
+            json!([{"relativePath": "new.txt", "changeType": "ADDED"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn blobless_clone_uploads_the_same_renames_as_a_full_clone_without_fetching_blobs() {
+        let f = fixture().await;
+        let root = f.repo.path();
+        git(root, ME, &["config", "uploadpack.allowFilter", "true"]);
+        let first = commit(root, ME, "old.txt", &"same line\n".repeat(40));
+        commit(root, ME, "exact-old.txt", "unchanged\n");
+        git(root, ME, &["mv", "old.txt", "new.txt"]);
+        git(root, ME, &["mv", "exact-old.txt", "exact-new.txt"]);
+        let renamed = commit(root, ME, "new.txt", &("same line\n".repeat(40) + "edit\n"));
+        let tip = commit(root, ME, "tip.txt", "tip");
+        f.identity.set_for_test(None).await;
+        f.sync.sync_once().await.unwrap();
+        let full = f.sent();
+        let (clone, sync) = f.clone_history("--filter=blob:none").await;
+        let objects = || {
+            git(
+                clone.path(),
+                ME,
+                &["rev-list", "--objects", "--missing=print", "HEAD"],
+            )
+        };
+        let before = objects();
+        assert!(before.lines().any(|line| line.starts_with('?')));
+        // Use a fresh checkpoint for the new clone of the same repository.
+        std::fs::remove_file(&sync.state_path).unwrap();
+        sync.sync_once().await.unwrap();
+        let partial = f.sent();
+        assert_eq!(partial, full);
+        assert_eq!(objects(), before);
+        let commits = partial[0]["commits"].as_array().unwrap();
+        assert_eq!(commits[0]["commitSha"], first);
+        assert_eq!(commits.last().unwrap()["commitSha"], tip);
+        let renamed = commits
+            .iter()
+            .find(|commit| commit["commitSha"] == renamed)
+            .unwrap();
+        assert_eq!(
+            renamed["files"],
+            json!([
+                {"relativePath": "exact-new.txt", "changeType": "RENAMED"},
+                {"relativePath": "new.txt", "changeType": "ADDED"},
+                {"relativePath": "old.txt", "changeType": "DELETED"}
+            ])
+        );
     }
 
     #[tokio::test]

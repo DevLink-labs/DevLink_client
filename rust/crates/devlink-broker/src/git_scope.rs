@@ -7,10 +7,12 @@
 //! Commit history (IDX-3-01) and working-file (IDX-3-02) uploaders build their bodies from here.
 use crate::git_identity::AuthorAttribution;
 use anyhow::{Result, anyhow, bail, ensure};
+use regex::Regex;
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
     path::{Component, Path},
+    sync::LazyLock,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -340,13 +342,12 @@ impl WorkingFiles {
     /// Central branch rule: letters, digits and `._/-`, at most 255 UTF-16 units, no leading `-`
     /// and no `..`. A collector sends `null` rather than an unaccepted name.
     pub fn branch_allowed(branch: &str) -> bool {
-        !branch.is_empty()
-            && branch.encode_utf16().count() <= MAX_BRANCH_CHARS
+        static BRANCH: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\A[\p{L}\p{N}._/-]+\z").expect("valid branch pattern"));
+        branch.encode_utf16().count() <= MAX_BRANCH_CHARS
             && !branch.starts_with('-')
             && !branch.contains("..")
-            && branch
-                .chars()
-                .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+            && BRANCH.is_match(branch)
     }
 
     pub fn new(
@@ -717,6 +718,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["b".repeat(40), "c".repeat(40)]
         );
+    }
+
+    #[test]
+    fn branch_names_match_the_servers_letter_and_number_categories() {
+        for branch in ["feature/한글", "feature/क", "feature/é", "feature/١"] {
+            assert!(WorkingFiles::branch_allowed(branch), "{branch}");
+        }
+        for branch in ["feature/का", "feature/\u{345}", "feature/e\u{301}", ""] {
+            assert!(!WorkingFiles::branch_allowed(branch), "{branch}");
+        }
     }
 
     #[test]

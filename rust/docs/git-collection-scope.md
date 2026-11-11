@@ -35,7 +35,7 @@
 ```
 
 - `authorUserId`는 미확인이어도 `null`로 항상 보낸다. 중앙은 본인 외 userId를 거부한다.
-- `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`RENAMED`다. `CommitChange::from_status`는 `git log --name-status` 상태 문자를 바꾼다. 복사(`C`)는 `ADDED`, 형식 변경(`T`)은 `MODIFIED`이고 그 밖의 문자는 건너뛴다. 이름 변경은 새 경로를 기록한다.
+- `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`RENAMED`다. `CommitChange::from_status`는 `git log --name-status` 상태 문자를 바꾼다. 복사(`C`)는 `ADDED`, 형식 변경(`T`)은 `MODIFIED`이고 그 밖의 문자는 건너뛴다. 내용이 같은 이름 변경은 새 경로에 `RENAMED`로, 내용까지 바뀐 이름 변경은 삭제·추가로 기록한다.
 - 한 커밋 안의 같은 경로는 마지막 변경 하나만 남긴다. 중앙은 중복 경로를 거부한다.
 - `CommitBatch::split`은 순서를 유지하며 커밋 100개, 본문 128KiB 한도로 나눈다. 한 커밋만으로 128KiB를 넘으면 그 커밋은 배치에 넣지 않고 SHA를 따로 돌려준다.
 

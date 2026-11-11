@@ -342,6 +342,7 @@ dependencies = [
  "futures-util",
  "indexmap",
  "libc",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

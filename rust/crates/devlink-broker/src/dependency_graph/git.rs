@@ -2,6 +2,8 @@ use crate::git_scope::{RelativePath, WorkingChange};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -112,6 +114,30 @@ impl GitProject {
         Ok(Some(sha.to_owned()))
     }
 
+    /// Git treats these commits as roots even though their actual parents are missing.
+    pub(crate) async fn shallow_boundaries(&self) -> Result<BTreeSet<String>> {
+        let path = run(
+            &self.root,
+            &["rev-parse", "--git-path", "shallow"],
+            None,
+            8192,
+        )
+        .await?;
+        let path = std::str::from_utf8(&path)?.trim_end_matches(['\r', '\n']);
+        let contents = match tokio::fs::read_to_string(self.root.join(path)).await {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            Err(error) => return Err(error).context("Cannot read Git shallow boundaries"),
+        };
+        contents
+            .lines()
+            .map(|sha| {
+                ensure!(valid_sha(sha), "Invalid Git shallow boundary");
+                Ok(sha.to_owned())
+            })
+            .collect()
+    }
+
     /// Non-merge commits reachable from `tip` but not from `since`, committed at or after the
     /// Unix time `after`, oldest first. Topological order puts every ancestor of a commit before
     /// it, so the range up to any listed commit can be checkpointed by that commit.
@@ -132,9 +158,8 @@ impl GitProject {
         history_ids(&self.root, &range, after).await
     }
 
-    /// The listed commits in the given order. Root commits always list their files and rename
-    /// detection is fixed (`-M`, 50% similarity, limit 1000) instead of following user
-    /// configuration, so every clone reports the same files for the same SHA.
+    /// The listed commits in the given order. Detect only exact renames so the result
+    /// depends on the trees and not on blob availability in a partial clone.
     pub(crate) async fn commits(&self, ids: &[String]) -> Result<Vec<RawCommit>> {
         ensure!(ids.iter().all(|id| valid_sha(id)), "Invalid Git commit ID");
         if ids.is_empty() {
@@ -154,8 +179,8 @@ impl GitProject {
                 "--no-color",
                 "--no-show-signature",
                 "--ignore-submodules=none",
-                "-M",
-                "-l1000",
+                "-M100%",
+                "--rename-empty",
                 "--name-status",
                 "-z",
                 "--format=%x01%H%x00%cI%x00%ae",
@@ -279,29 +304,35 @@ fn valid_sha(sha: &str) -> bool {
 /// (the email may be empty), then `\n` and NUL-separated status/path entries where renames and
 /// copies carry the old and the new path.
 fn parse_log(output: &[u8]) -> Result<Vec<RawCommit>> {
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = output.strip_suffix(b"\0").context("Unterminated Git log")?;
+    let mut fields = output.split(|b| *b == 0).peekable();
     let mut commits = Vec::new();
-    for entry in output.split(|b| *b == 1).filter(|e| !e.is_empty()) {
-        let mut fields = entry.split(|b| *b == 0);
-        let (Some(sha), Some(time), Some(email)) = (fields.next(), fields.next(), fields.next())
-        else {
-            bail!("Invalid Git log entry");
-        };
+    while let Some(header) = fields.next() {
+        let sha = header
+            .strip_prefix(b"\x01")
+            .context("Invalid Git log header")?;
+        let time = fields.next().context("Missing Git commit time")?;
+        let email = fields.next().context("Missing Git commit author")?;
         let sha = std::str::from_utf8(sha).context("Invalid Git commit ID")?;
         ensure!(valid_sha(sha), "Invalid Git commit ID");
-        let mut rest = fields
-            .map(|field| field.strip_prefix(b"\n").unwrap_or(field))
-            .filter(|field| !field.is_empty());
         let mut files = Vec::new();
-        while let Some(status) = rest.next() {
-            let status = std::str::from_utf8(status).context("Invalid Git status")?;
-            if matches!(status.as_bytes().first(), Some(b'R' | b'C')) {
-                rest.next().context("Rename without source path")?;
+        let mut status = fields
+            .next_if(|field| !field.starts_with(b"\x01"))
+            .map(|field| field.strip_prefix(b"\n").unwrap_or(field));
+        while let Some(raw_status) = status {
+            let change = std::str::from_utf8(raw_status).context("Invalid Git status")?;
+            if matches!(raw_status.first(), Some(b'R' | b'C')) {
+                fields.next().context("Rename without source path")?;
             }
-            let path = rest.next().context("Status without path")?;
+            let path = fields.next().context("Status without path")?;
             // Central cannot take a non-UTF-8 path; skip that file only.
             if let Ok(path) = std::str::from_utf8(path) {
-                files.push((status.to_owned(), path.to_owned()));
+                files.push((change.to_owned(), path.to_owned()));
             }
+            status = fields.next_if(|field| !field.starts_with(b"\x01"));
         }
         commits.push(RawCommit {
             sha: sha.to_owned(),
@@ -596,6 +627,72 @@ mod tests {
             parse_log(format!("\x01{first}\x00t\x00e\x00\nR100\x00only-old\x00").as_bytes())
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn real_git_objects_preserve_control_bytes_in_paths_and_empty_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run(root, &["init", "-q", "--bare"], None, 4096)
+            .await
+            .unwrap();
+        let blob = run(
+            root,
+            &["hash-object", "-w", "--stdin"],
+            Some(b"text".to_vec()),
+            128,
+        )
+        .await
+        .unwrap();
+        let blob = std::str::from_utf8(&blob).unwrap().trim();
+        let entries = ["a\x01b.txt", "\nlead.txt", "normal.txt"]
+            .map(|path| format!("100644 blob {blob}\t{path}\0"))
+            .concat();
+        let tree = run(root, &["mktree", "-z"], Some(entries.into_bytes()), 128)
+            .await
+            .unwrap();
+        let tree = std::str::from_utf8(&tree).unwrap().trim();
+        let mut ids: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let mut args = vec![
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.test",
+                "commit-tree",
+                tree,
+                "-m",
+                "test",
+            ];
+            if let Some(parent) = ids.last() {
+                args.extend(["-p", parent.as_str()]);
+            }
+            let sha = run(root, &args, None, 128).await.unwrap();
+            ids.push(std::str::from_utf8(&sha).unwrap().trim().to_owned());
+        }
+        let git = GitProject {
+            root: root.to_owned(),
+            remote: "origin".into(),
+            key: String::new(),
+        };
+        let commits = git.commits(&ids).await.unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(
+            commits[0].files,
+            [
+                ("A".to_owned(), "\nlead.txt".to_owned()),
+                ("A".to_owned(), "a\x01b.txt".to_owned()),
+                ("A".to_owned(), "normal.txt".to_owned()),
+            ]
+        );
+        assert!(commits[1].files.is_empty());
+        let allowed = commits[0]
+            .files
+            .iter()
+            .filter(|(_, path)| RelativePath::new(path).is_ok())
+            .collect::<Vec<_>>();
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].1, "normal.txt");
     }
 
     #[test]
