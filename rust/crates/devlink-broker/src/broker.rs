@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 mod ports;
 pub use ports::PortFailure;
+pub(crate) use ports::startup_allowance as port_startup_allowance;
 
 /// 로컬 HTTP API 핸들러에서 공유하는 상태
 #[derive(Clone)]

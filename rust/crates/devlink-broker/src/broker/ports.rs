@@ -1,16 +1,41 @@
 use crate::config::Config;
 use anyhow::Result;
-use std::{io, net::Ipv4Addr};
+use std::{io, net::Ipv4Addr, path::Path, time::Duration};
 use tokio::net::TcpListener;
 
+/// Windows reads its dynamic range by running `netsh`, which slows down with the rest of a busy
+/// system. One longer wait serves that case better than restarting the command: a restart
+/// repeats the slow start-up that used up the first wait.
+const RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
+/// The bound this query had when the base startup timeout was sized.
+const EARLIER_RANGE_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Startup time the longer range query can add to a first start on Windows.
+pub(crate) fn startup_allowance(config_path: &Path) -> Duration {
+    if cfg!(windows) && Config::load(config_path).is_ok_and(|config| config.local_port_pending) {
+        RANGE_QUERY_TIMEOUT.saturating_sub(EARLIER_RANGE_QUERY_TIMEOUT)
+    } else {
+        Duration::ZERO
+    }
+}
+
 /// Port failures the foreground broker can report to its detached startup caller.
-#[derive(Debug)]
+///
+/// The caller sees only the exit code, so each cause it should tell apart has its own.
+#[derive(Debug, PartialEq, Eq)]
 pub enum PortFailure {
     Unavailable(u16),
+    /// The dynamic ranges are known, but no port outside them could be bound.
     AssignmentFailed,
+    /// The system's dynamic ranges could not be read in time.
+    RangeQueryTimedOut,
+    /// The system's dynamic ranges could not be read for another reason.
+    RangeQueryFailed,
 }
 
 impl PortFailure {
+    pub(crate) const RANGE_QUERY_FAILED_EXIT: i32 = 96;
+    pub(crate) const RANGE_QUERY_TIMED_OUT_EXIT: i32 = 97;
     pub(crate) const UNAVAILABLE_EXIT: i32 = 98;
     pub(crate) const ASSIGNMENT_FAILED_EXIT: i32 = 99;
 
@@ -18,6 +43,8 @@ impl PortFailure {
         match self {
             Self::Unavailable(_) => Self::UNAVAILABLE_EXIT,
             Self::AssignmentFailed => Self::ASSIGNMENT_FAILED_EXIT,
+            Self::RangeQueryTimedOut => Self::RANGE_QUERY_TIMED_OUT_EXIT,
+            Self::RangeQueryFailed => Self::RANGE_QUERY_FAILED_EXIT,
         }
     }
 }
@@ -32,6 +59,12 @@ impl std::fmt::Display for PortFailure {
             Self::AssignmentFailed => f.write_str(
                 "Cannot assign a broker port outside the system's dynamic TCP port ranges",
             ),
+            Self::RangeQueryTimedOut => {
+                f.write_str("Reading the system's dynamic TCP port ranges timed out")
+            }
+            Self::RangeQueryFailed => {
+                f.write_str("Cannot read the system's dynamic TCP port ranges")
+            }
         }
     }
 }
@@ -135,6 +168,14 @@ mod setup_port {
         ])
     }
 
+    fn range_failure(error: &anyhow::Error) -> PortFailure {
+        if error.is::<tokio::time::error::Elapsed>() {
+            PortFailure::RangeQueryTimedOut
+        } else {
+            PortFailure::RangeQueryFailed
+        }
+    }
+
     pub(super) async fn bind() -> Result<TcpListener> {
         #[cfg(windows)]
         let ranges = super::windows::active_dynamic_range()
@@ -145,7 +186,10 @@ mod setup_port {
         #[cfg(target_os = "macos")]
         let ranges = macos_ranges();
 
-        let ranges = ranges.context(PortFailure::AssignmentFailed)?;
+        let ranges = ranges.map_err(|error| {
+            let failure = range_failure(&error);
+            error.context(failure)
+        })?;
         for port in candidates(&ranges) {
             match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
                 Ok(listener) => return Ok(listener),
@@ -178,6 +222,30 @@ mod setup_port {
             );
         }
 
+        #[tokio::test]
+        async fn a_range_query_that_timed_out_is_told_apart_from_other_failures() {
+            let elapsed =
+                tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+                    .await
+                    .unwrap_err();
+            assert_eq!(
+                range_failure(&anyhow::Error::new(elapsed)),
+                PortFailure::RangeQueryTimedOut
+            );
+            assert_eq!(
+                range_failure(&anyhow::anyhow!("Unexpected dynamic TCP range")),
+                PortFailure::RangeQueryFailed
+            );
+            let codes = [
+                PortFailure::Unavailable(43127),
+                PortFailure::AssignmentFailed,
+                PortFailure::RangeQueryTimedOut,
+                PortFailure::RangeQueryFailed,
+            ]
+            .map(|failure| failure.child_exit_code());
+            assert_eq!(codes, [98, 99, 97, 96]);
+        }
+
         #[cfg(target_os = "linux")]
         #[test]
         fn parses_linux_kernel_port_range() {
@@ -194,7 +262,7 @@ mod windows {
     use anyhow::{Context, Result};
     use std::{
         ffi::OsString, ops::RangeInclusive, os::windows::ffi::OsStringExt, path::PathBuf,
-        process::Stdio, time::Duration,
+        process::Stdio,
     };
     use tokio::{process::Command, time::timeout};
     use windows_sys::Win32::{
@@ -241,7 +309,7 @@ mod windows {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let output = timeout(Duration::from_secs(3), command.output()).await??;
+        let output = timeout(super::RANGE_QUERY_TIMEOUT, command.output()).await??;
         anyhow::ensure!(
             output.status.success(),
             "Cannot query the Windows IPv4 dynamic TCP range"
