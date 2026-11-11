@@ -358,7 +358,7 @@ pub async fn ensure_tracked(
             && let Some(agent) = old.agent()
         {
             let lookup = client
-                .get::<Agent>(&format!("/api/v1/agents/{}", agent.agent_id))
+                .get::<CentralAgent>(&format!("/api/v1/agents/{}", agent.agent_id))
                 .await;
             // An explicit create replaces a binding whose Agent central reports deleted.
             // IDs are never reused, so a 404 cannot point at another live Agent.
@@ -368,11 +368,15 @@ pub async fn ensure_tracked(
                 if !matches_metadata(agent, expected) {
                     return Err(failure(FailureKind::BindingConflict));
                 }
-                let verified = lookup.map_err(|error| {
-                    let mut failure = central(error);
+                let known = |mut failure: Failure| {
                     failure.agent_id = Some(agent.agent_id);
                     failure
-                })?;
+                };
+                // A reply without the part or role tags cannot confirm the saved metadata.
+                let verified = lookup
+                    .map_err(|error| known(central(error)))?
+                    .confirmed()
+                    .map_err(|_| known(failure(FailureKind::Protocol)))?;
                 validate_agent(&verified, expected)?;
                 if verified.agent_id != agent.agent_id || !matches_metadata(&verified, expected) {
                     return Err(failure(FailureKind::BindingConflict));
@@ -399,10 +403,12 @@ pub async fn ensure_tracked(
         });
     }
     if let Some(Selection::Use(id)) = selection {
-        let agent: Agent = client
-            .get(&format!("/api/v1/agents/{id}"))
+        let agent = client
+            .get::<CentralAgent>(&format!("/api/v1/agents/{id}"))
             .await
-            .map_err(central)?;
+            .map_err(central)?
+            .confirmed()
+            .map_err(|_| failure(FailureKind::Protocol))?;
         validate_agent(&agent, expected)?;
         if agent.agent_id != id {
             return Err(failure(FailureKind::Protocol));

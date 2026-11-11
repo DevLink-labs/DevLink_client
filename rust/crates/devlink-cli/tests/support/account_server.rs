@@ -250,8 +250,10 @@ async fn me(State(state): State<MockState>, headers: HeaderMap) -> Response {
     response
 }
 
+/// Central stores every Agent with a part and role tags (NOT NULL, defaults OTHER / []), so
+/// its replies always carry both.
 fn agent_value(id: u64, user: u64, team: u64, name: &str, tool: Value, project: Value) -> Value {
-    json!({"agentId":id,"teamId":team,"ownerUserId":user,"name":name,"roleDescription":null,"toolType":tool,"projectName":project,"status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-10-29T00:00:00"})
+    json!({"agentId":id,"teamId":team,"ownerUserId":user,"name":name,"roleDescription":null,"toolType":tool,"projectName":project,"status":"OFFLINE","lastSeenAt":null,"createdAt":"2026-10-29T00:00:00","part":"OTHER","roles":[]})
 }
 fn agent_for(state: &MockState, id: u64) -> Option<Value> {
     match id {
@@ -410,6 +412,9 @@ async fn agent_list(
         agents.push(agent_for(&state, 303).unwrap());
     }
     agents.sort_by_key(|agent| agent["agentId"].as_u64().unwrap());
+    if mode == 5 {
+        agents.iter_mut().for_each(without_metadata);
+    }
     success(json!(agents))
 }
 async fn agent_get(
@@ -565,7 +570,12 @@ async fn agent_context(State(state): State<MockState>, headers: HeaderMap) -> Re
         id = 301;
     }
     agent_for(&state, id)
-        .map(success)
+        .map(|mut agent| {
+            if state.agent_context_mode.load(Ordering::SeqCst) == 4 {
+                without_metadata(&mut agent);
+            }
+            success(agent)
+        })
         .unwrap_or_else(|| failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"))
 }
 async fn websocket(
