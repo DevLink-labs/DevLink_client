@@ -7,7 +7,7 @@ use crate::{central::endpoint_url, protocol::MAX_CENTRAL_MESSAGE_BYTES, sessions
 use anyhow::{Context, Result, ensure};
 use reqwest::{
     Client,
-    header::{AUTHORIZATION, HeaderValue},
+    header::{AUTHORIZATION, HeaderValue, IF_MATCH},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -211,7 +211,7 @@ impl TaskClient {
         query: &[(String, String)],
         body: Option<Value>,
     ) -> Result<(u16, CentralEnvelope), TaskError> {
-        self.request_with_limit(method, path, query, body, REQUEST_LIMIT)
+        self.request_with_limit(method, path, query, body, None, REQUEST_LIMIT)
             .await
     }
 
@@ -221,7 +221,25 @@ impl TaskClient {
         path: &str,
         body: Option<Value>,
     ) -> Result<(u16, CentralEnvelope), TaskError> {
-        self.request_with_limit(method, path, &[], body, 2 * 1024 * 1024)
+        self.request_graph_http_if_match(method, path, None, body)
+            .await
+    }
+
+    /// Graph request carrying `If-Match: "<revision>"` when `revision` is given.
+    pub(crate) async fn request_graph_http_if_match(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        revision: Option<&str>,
+        body: Option<Value>,
+    ) -> Result<(u16, CentralEnvelope), TaskError> {
+        let if_match = revision
+            .map(|revision| {
+                HeaderValue::from_str(&format!("\"{revision}\""))
+                    .map_err(|_| TaskError::rejected("VALIDATION_FAILED", 400))
+            })
+            .transpose()?;
+        self.request_with_limit(method, path, &[], body, if_match, 2 * 1024 * 1024)
             .await
     }
 
@@ -231,6 +249,7 @@ impl TaskClient {
         path: &str,
         query: &[(String, String)],
         body: Option<Value>,
+        if_match: Option<HeaderValue>,
         limit: usize,
     ) -> Result<(u16, CentralEnvelope), TaskError> {
         if body
@@ -239,9 +258,12 @@ impl TaskClient {
         {
             return Err(TaskError::rejected("VALIDATION_FAILED", 400));
         }
-        tokio::time::timeout(self.timeout, self.exchange_http(method, path, query, body))
-            .await
-            .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
+        tokio::time::timeout(
+            self.timeout,
+            self.exchange_http(method, path, query, body, if_match),
+        )
+        .await
+        .unwrap_or_else(|_| Err(TaskError::unknown("CENTRAL_TIMEOUT")))
     }
 
     async fn exchange_http(
@@ -250,12 +272,18 @@ impl TaskClient {
         path: &str,
         query: &[(String, String)],
         body: Option<Value>,
+        if_match: Option<HeaderValue>,
     ) -> Result<(u16, CentralEnvelope), TaskError> {
         let mut url = self.origin.clone();
         url.set_path(path);
         let builder = self.client.request(method, url).query(query);
         let builder = if let Some(body) = body {
             builder.json(&body)
+        } else {
+            builder
+        };
+        let builder = if let Some(if_match) = if_match {
+            builder.header(IF_MATCH, if_match)
         } else {
             builder
         };
