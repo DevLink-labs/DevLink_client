@@ -169,8 +169,10 @@ impl GitProject {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let input = lines(ids);
-        let mut log = command(
+        if let Some(remote) = self.tree_promisor().await {
+            self.prefetch_trees(&remote, ids).await?;
+        }
+        let output = run(
             &self.root,
             &[
                 "-c",
@@ -190,17 +192,10 @@ impl GitProject {
                 "--format=%x01%H%x00%cI%x00%ae",
                 "--",
             ],
-            true,
-        );
-        // A treeless clone lacks the trees this read compares. Fetch them in a few requests
-        // first; Git can still fill anything left from the promisor remote during the read.
-        // All other Git reads stay local.
-        if let Some(remote) = self.tree_promisor().await {
-            // Best effort: on failure the read below fetches lazily or reports the error.
-            let _ = self.prefetch_trees(&remote, ids).await;
-            allow_promisor_fetch(&mut log);
-        }
-        let output = run_command(log, Some(input), OUTPUT_LIMIT, GIT_TIMEOUT).await?;
+            Some(lines(ids)),
+            OUTPUT_LIMIT,
+        )
+        .await?;
         parse_log(&output)
     }
 
@@ -277,11 +272,16 @@ impl GitProject {
             Some(lines(&trees)),
             OUTPUT_LIMIT,
         )
-        .await?;
-        let missing: Vec<&str> = std::str::from_utf8(&checked)?
-            .lines()
-            .filter_map(|line| line.strip_suffix(" missing"))
-            .collect();
+        .await;
+        let missing: Vec<&str> = match &checked {
+            Ok(output) => std::str::from_utf8(output)?
+                .lines()
+                .filter_map(|line| line.strip_suffix(" missing"))
+                .collect(),
+            // Older Git can abort the local probe when an object would require a fetch.
+            // Send the candidate trees through the same bounded, explicit fetch in that case.
+            Err(_) => trees.iter().map(String::as_str).collect(),
+        };
         for batch in missing.chunks(TREE_FETCH_BATCH) {
             let mut fetch = command(
                 &self.root,
@@ -591,6 +591,13 @@ fn command(root: &Path, args: &[&str], input: bool) -> Command {
         .args(args)
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_NO_LAZY_FETCH", "1")
+        // Git before 2.45 ignores GIT_NO_LAZY_FETCH. An empty allowlist still blocks
+        // transports for local reads, including any fetch Git starts for a missing object.
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "never")
+        .env("SSH_ASKPASS_REQUIRE", "never")
         .stdin(if input { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -643,14 +650,14 @@ async fn history_ids(root: &Path, range: &str, after: u64) -> Result<Vec<String>
     .context("Git operation timed out")?
 }
 
-/// Lets Git fetch from the promisor remote without prompting from the background broker.
+/// Restores the caller's transport policy for the explicit promisor fetch.
 fn allow_promisor_fetch(command: &mut Command) {
-    command
-        .env("GIT_NO_LAZY_FETCH", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "")
-        .env("GCM_INTERACTIVE", "never")
-        .env("SSH_ASKPASS_REQUIRE", "never");
+    if let Some(protocols) = std::env::var_os("GIT_ALLOW_PROTOCOL") {
+        command.env("GIT_ALLOW_PROTOCOL", protocols);
+    } else {
+        command.env_remove("GIT_ALLOW_PROTOCOL");
+    }
+    command.env("GIT_NO_LAZY_FETCH", "0");
 }
 
 /// One ID per line for `--stdin` and `cat-file --batch-check`.

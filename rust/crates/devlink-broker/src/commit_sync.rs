@@ -999,7 +999,6 @@ mod tests {
         let f = fixture().await;
         let root = f.repo.path();
         let first = commit(root, ME, "a.ts", "a");
-        git(root, ME, &["config", "diff.ignoreSubmodules", "all"]);
         git(
             root,
             ME,
@@ -1011,6 +1010,7 @@ mod tests {
             ],
         );
         git(root, ME, &["commit", "-q", "-m", "submodule"]);
+        git(root, ME, &["config", "diff.ignoreSubmodules", "all"]);
         let sha = git(root, ME, &["rev-parse", "HEAD"]);
         f.identity.set_for_test(None).await;
         f.sync.sync_once().await.unwrap();

@@ -48,11 +48,13 @@ test('both Host guides explain every state and the score breakdown the same way'
   }
 });
 
-test('find_agent is read-only, explains each state and relays every example unchanged', async (t) => {
+test('find_agent discloses the working-file refresh and relays each recommendation state', async (t) => {
   const { broker, client } = await connected(t);
   const tool = (await client.listTools()).tools.find(({ name }) => name === 'find_agent');
-  assert.equal(tool.annotations.readOnlyHint, true);
-  assert.equal(tool.annotations.destructiveHint, false);
+  assert.equal(tool.annotations.readOnlyHint, false);
+  assert.equal(tool.annotations.destructiveHint, true);
+  assert.equal(tool.annotations.idempotentHint, false);
+  assert.match(tool.description, /upload .* working-file list to central, replacing the previous observation/);
   for (const phrase of [/NO_ELIGIBLE_AGENTS/, /NO_MATCHING_EVIDENCE/, /NOT_COLLECTED/, /STALE/, /not part of the score/,
     /out of 60/, /out of 40/, /grouped by repoId/, /never send a task to a candidate the user did not choose/,
     /separate axis from INSUFFICIENT_EVIDENCE/, /explain both/, /zero-point reference candidates/, /workingState NOT_COLLECTED/]) {

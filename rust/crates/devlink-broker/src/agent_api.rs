@@ -1,6 +1,6 @@
 //! Agent confirmation/list/recommendation providers. This router never creates Agents or
 //! credentials; `update_agent` changes only the bound Agent's project name, role, part and
-//! role tags (S15P31D108-146/-183), and `find_agent` only reads central recommendations
+//! role tags (S15P31D108-146/-183), and `find_agent` may refresh working files before reading central recommendations
 //! (S15P31D108-188).
 use crate::{
     agent_metadata::AgentPart,
@@ -340,7 +340,7 @@ fn find_keeps_the_central_limit_inside_its_budget() {
 }
 
 /// S15P31D108-188: relay the central recommendation for the bound Agent's team.
-/// Read-only; the result never selects a recipient or creates a task.
+/// Refreshes the bound project's working-file observation before requesting recommendations.
 async fn find(State(api): State<Api>, request: Request) -> Response {
     let deadline = Instant::now() + LOCAL_BUDGET;
     let body: BusinessRequest<FindArguments> =

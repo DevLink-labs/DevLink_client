@@ -2,7 +2,7 @@
 
 MCP `find_agent({question, repoKey?})` → 로컬 `POST /v1/agents/find` → 중앙 `POST /api/v1/teams/{teamId}/agents/recommendations`.
 
-점수 계산(역할 60·Git 40, 후보 선정)은 중앙이 한다. 브로커는 입력 한도를 미리 확인하고, 중앙 응답을 검증해 로컬 형식으로 바꾼다. 읽기 전용이며 수신자를 고르거나 작업을 만들지 않는다. LLM을 호출하지 않는다.
+점수 계산(역할 60·Git 40, 후보 선정)은 중앙이 한다. 브로커는 입력 한도를 미리 확인하고, 중앙 응답을 검증해 로컬 형식으로 바꾼다. 추천 전에 바인딩된 프로젝트의 작업 파일 목록을 중앙에 반영할 수 있다. 수신자 선택과 작업 생성은 별도 절차를 따른다. 추천 과정에서 LLM을 호출하지 않는다.
 
 중앙 구현 기준: server `docs/agent-recommendation.md`. client가 확인한 커밋은 develop `d945f8b`(2026-11-09)와 E2E 고정 커밋 `aecdcc3`이며, 두 커밋의 요청·응답 DTO는 같다.
 
@@ -54,7 +54,7 @@ MCP `find_agent({question, repoKey?})` → 로컬 `POST /v1/agents/find` → 중
 | 400 VALIDATION_FAILED | 400 VALIDATION_FAILED | rejected |
 | 401 | 503 CENTRAL_UNAUTHENTICATED | rejected |
 | 403 ACCESS_DENIED(팀 불일치·탈퇴) | 403 FORBIDDEN → MCP BROKER_FORBIDDEN | rejected |
-| 503 GIT_ROUTING_UNAVAILABLE | 503 GIT_ROUTING_UNAVAILABLE | rejected. 읽기 전용이라 생성된 것이 없다. MCP nextActions `check_network_then_retry`. 중앙은 추천 계산 중 `DataAccessException`만 이 코드로 바꾼다. 트랜잭션 시작 실패(500)나 앞선 `/agents/me` 실패는 아래 행으로 나온다 |
+| 503 GIT_ROUTING_UNAVAILABLE | 503 GIT_ROUTING_UNAVAILABLE | rejected. 추천 계산 실패가 확인됐다. 추천 요청 전 작업 파일 갱신은 이미 반영됐을 수 있다. MCP nextActions `check_network_then_retry`. 중앙은 추천 계산 중 `DataAccessException`만 이 코드로 바꾼다. 트랜잭션 시작 실패(500)나 앞선 `/agents/me` 실패는 아래 행으로 나온다 |
 | 그 밖의 5xx | 502 CENTRAL_UNAVAILABLE | unknown |
 | 시간 초과 | CENTRAL_TIMEOUT | unknown |
 

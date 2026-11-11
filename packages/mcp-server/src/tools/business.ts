@@ -95,13 +95,13 @@ export function businessTools(broker: Pick<BrokerClient, 'execute'>): Registered
         { signal: ctx.signal, mcpRequestId: ctx.mcpRequestId }),
     }),
     defineTool({ name: 'find_agent',
-      description: 'Find which teammate Agents are most likely responsible for the work the user described, using the central team recommendation (role tags and recent Git activity; no LLM). Read-only: it never chooses a recipient, creates a task or changes anything. question is the user\'s description of the work (1 to 1,000 characters). repoKey is an optional hint (64 lowercase hex) and does not narrow the search. '
+      description: 'Find which teammate Agents are most likely responsible for the work the user described, using the central team recommendation (role tags and recent Git activity; no LLM). Before recommending, the broker may upload the bound project\'s working-file list to central, replacing the previous observation for that user and repository. If the refresh fails, central scores using the available observations. question is the user\'s description of the work (1 to 1,000 characters). repoKey is an optional hint (64 lowercase hex) and does not narrow the search. '
         + 'The result lists up to 5 candidates within 5 points of the best positive score (or, with NO_MATCHING_EVIDENCE, up to 5 zero-point reference candidates). For each candidate show the name, agentId, connectionStatus (at evaluation time; not part of the score), score out of 100 with scores.role (out of 60) and scores.git (out of 40 = working 15 + frequency 15 + recency 10), matchedRoles, and relatedFiles grouped by repoId with observedAt. '
         + 'Explain these separately: INSUFFICIENT_EVIDENCE with NO_ELIGIBLE_AGENTS (no other teammate Agent), INSUFFICIENT_EVIDENCE with NO_MATCHING_EVIDENCE (no evidence matched; the 0-point candidates are only for reference), gitCoverage.state NOT_COLLECTED (Git activity was not collected, so only role tags could count), gitCoverage.workingState STALE (working-file observations expired, so they did not count), and workingState NOT_COLLECTED (no working-file observation exists, so working points are 0). gitCoverage is a separate axis from INSUFFICIENT_EVIDENCE; when both apply, explain both. '
         + 'Present the candidates and let the user decide; never send a task to a candidate the user did not choose.',
       inputSchema: z.strictObject({ question: recommendationQuestion, repoKey: z.string().regex(/^[0-9a-f]{64}$/).optional() }),
       outputSchema: recommendationOutput,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       handler: async (args, ctx) => {
         const result = await broker.execute('find_agent', args, { signal: ctx.signal, mcpRequestId: ctx.mcpRequestId });
         const data = recommendationSchema.safeParse(result.data);

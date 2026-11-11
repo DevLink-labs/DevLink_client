@@ -24,6 +24,8 @@ pub const MAX_PATH_UTF16: usize = 500;
 const MAX_WORKING_PATH_CODEPOINTS: usize = 500;
 pub const MAX_WORKING_PATH_BYTES: usize = 1000;
 pub const MAX_WORKING_FILES: usize = 2000;
+// Central WorkingFileBodyAdvice counts the complete JSON body, including escapes.
+const MAX_WORKING_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BRANCH_CHARS: usize = 255;
 
 /// SHA-256 of the normalized remote URL (`dependency_repo_key`). The raw URL never leaves the PC.
@@ -389,7 +391,7 @@ impl WorkingFiles {
             .filter(|(path, _)| Self::path_allowed(path))
             .collect();
         ensure!(files.len() <= MAX_WORKING_FILES, "Too many changed files");
-        Ok(Self {
+        let body = Self {
             branch: branch.map(str::to_owned),
             files: files
                 .into_iter()
@@ -398,7 +400,12 @@ impl WorkingFiles {
                     change_type,
                 })
                 .collect(),
-        })
+        };
+        ensure!(
+            serde_json::to_vec(&body)?.len() <= MAX_WORKING_BODY_BYTES,
+            "Working-file snapshot exceeds the 2 MiB upload limit"
+        );
+        Ok(body)
     }
 }
 
@@ -411,6 +418,28 @@ mod tests {
 
     const SHA1: &str = "0123456789abcdef0123456789abcdef01234567";
     const TIME: &str = "2026-11-10T12:34:56+09:00";
+
+    #[test]
+    fn working_file_snapshot_checks_the_total_json_size_after_escaping_paths() {
+        let directory = "한".repeat(83);
+        let leaf_prefix = format!("{}{}", "한".repeat(78), "\"".repeat(12));
+        let files = (0..1985).map(|index| {
+            let name = format!("{directory}/{directory}/{directory}/{leaf_prefix}{index:04}");
+            assert_eq!(name.len(), MAX_WORKING_PATH_BYTES);
+            (
+                RelativePath::for_working(&name).unwrap(),
+                WorkingChange::Untracked,
+            )
+        });
+        let valid = WorkingFiles::new(Some("main"), files.clone().take(1984)).unwrap();
+        assert_eq!(valid.files.len(), 1984);
+        assert!(serde_json::to_vec(&valid).unwrap().len() <= MAX_WORKING_BODY_BYTES);
+        let oversized = WorkingFiles::new(Some("main"), files).err().unwrap();
+        assert_eq!(
+            oversized.to_string(),
+            "Working-file snapshot exceeds the 2 MiB upload limit"
+        );
+    }
 
     fn keys(value: &Value, found: &mut BTreeSet<String>) {
         match value {
