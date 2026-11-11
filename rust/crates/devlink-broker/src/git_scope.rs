@@ -14,13 +14,14 @@ use std::{
     path::{Component, Path},
     sync::LazyLock,
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 /// Central `POST /teams/{teamId}/git/commits:batch` limits.
 pub const MAX_COMMITS_PER_BATCH: usize = 100;
 pub const MAX_BATCH_BYTES: usize = 128 * 1024;
 /// Central `relativePath` limit, counted in UTF-16 code units like Java `String.length`.
 pub const MAX_PATH_UTF16: usize = 500;
+const MAX_WORKING_PATH_CODEPOINTS: usize = 500;
 pub const MAX_WORKING_PATH_BYTES: usize = 1000;
 pub const MAX_WORKING_FILES: usize = 2000;
 const MAX_BRANCH_CHARS: usize = 255;
@@ -51,7 +52,18 @@ pub struct RelativePath(String);
 
 impl RelativePath {
     pub fn new(path: &str) -> Result<Self> {
-        ensure!(valid_relative_path(path), "Path is not repository-relative");
+        ensure!(
+            valid_relative_path(path) && path.encode_utf16().count() <= MAX_PATH_UTF16,
+            "Invalid commit path"
+        );
+        Ok(Self(path.to_owned()))
+    }
+
+    pub(crate) fn for_working(path: &str) -> Result<Self> {
+        ensure!(
+            valid_relative_path(path) && working_path_length_allowed(path),
+            "Invalid working-file path"
+        );
         Ok(Self(path.to_owned()))
     }
 
@@ -85,12 +97,15 @@ impl RelativePath {
 fn valid_relative_path(path: &str) -> bool {
     let bytes = path.as_bytes();
     !path.trim().is_empty()
-        && path.encode_utf16().count() <= MAX_PATH_UTF16
         && !path.starts_with('/')
         && !path.contains('\\')
         && !path.chars().any(char::is_control)
         && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+fn working_path_length_allowed(path: &str) -> bool {
+    path.len() <= MAX_WORKING_PATH_BYTES && path.chars().count() <= MAX_WORKING_PATH_CODEPOINTS
 }
 
 /// Commit author: the caller's own user ID or unverified. Takes only the SET-3-03 attribution
@@ -166,12 +181,16 @@ impl CommitRecord {
         files: impl IntoIterator<Item = (RelativePath, CommitChange)>,
     ) -> Result<Self> {
         ensure!(valid_commit_sha(commit_sha), "Invalid commit SHA");
-        ensure!(valid_committed_at(committed_at), "Invalid commit time");
+        let committed_at =
+            committed_at_for_central(committed_at).ok_or_else(|| anyhow!("Invalid commit time"))?;
         // Central rejects a repeated path in one commit; the last change wins.
-        let files: BTreeMap<_, _> = files.into_iter().collect();
+        let files: BTreeMap<_, _> = files
+            .into_iter()
+            .filter(|(path, _)| path.as_str().encode_utf16().count() <= MAX_PATH_UTF16)
+            .collect();
         Ok(Self {
             commit_sha: commit_sha.to_owned(),
-            committed_at: committed_at.to_owned(),
+            committed_at,
             author_user_id: author,
             files: files
                 .into_iter()
@@ -196,8 +215,8 @@ fn valid_commit_sha(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Central accepts `yyyy-MM-ddTHH:mm:ss[.f{1,6}](Z|±hh:mm)` that also parses as an offset time.
-fn valid_committed_at(value: &str) -> bool {
+/// Convert valid Git times with offsets beyond Java's ±18:00 limit to the same instant in UTC.
+fn committed_at_for_central(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let digits = |from: usize, to: usize| {
         bytes
@@ -217,13 +236,13 @@ fn valid_committed_at(value: &str) -> bool {
         && at(16, b':')
         && digits(17, 19))
     {
-        return false;
+        return None;
     }
     let mut rest = &value[19..];
     if let Some(fraction) = rest.strip_prefix('.') {
         let count = fraction.bytes().take_while(u8::is_ascii_digit).count();
         if !(1..=6).contains(&count) {
-            return false;
+            return None;
         }
         rest = &fraction[count..];
     }
@@ -233,7 +252,15 @@ fn valid_committed_at(value: &str) -> bool {
         && zone[1..3].iter().all(u8::is_ascii_digit)
         && zone[3] == b':'
         && zone[4..6].iter().all(u8::is_ascii_digit);
-    (rest == "Z" || offset) && OffsetDateTime::parse(value, &Rfc3339).is_ok()
+    if rest != "Z" && !offset {
+        return None;
+    }
+    let timestamp = OffsetDateTime::parse(value, &Rfc3339).ok()?;
+    if timestamp.offset().whole_seconds().abs() <= 18 * 60 * 60 {
+        return Some(value.to_owned());
+    }
+    let utc = timestamp.checked_to_offset(UtcOffset::UTC)?;
+    utc.format(&Rfc3339).ok()
 }
 
 /// One `commits:batch` request body.
@@ -334,17 +361,17 @@ pub struct WorkingFiles {
 }
 
 impl WorkingFiles {
-    /// 작업 파일에만 적용되는 중앙 UTF-8 바이트 한도 검사
+    /// 중앙 작업 파일의 코드포인트·UTF-8 바이트 한도 검사
     pub fn path_allowed(path: &RelativePath) -> bool {
-        path.as_str().len() <= MAX_WORKING_PATH_BYTES
+        working_path_length_allowed(path.as_str())
     }
 
-    /// Central branch rule: letters, digits and `._/-`, at most 255 UTF-16 units, no leading `-`
+    /// Central branch rule: letters, digits and `._/-`, at most 255 code points, no leading `-`
     /// and no `..`. A collector sends `null` rather than an unaccepted name.
     pub fn branch_allowed(branch: &str) -> bool {
         static BRANCH: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\A[\p{L}\p{N}._/-]+\z").expect("valid branch pattern"));
-        branch.encode_utf16().count() <= MAX_BRANCH_CHARS
+        branch.chars().count() <= MAX_BRANCH_CHARS
             && !branch.starts_with('-')
             && !branch.contains("..")
             && BRANCH.is_match(branch)
@@ -728,6 +755,13 @@ mod tests {
         for branch in ["feature/का", "feature/\u{345}", "feature/e\u{301}", ""] {
             assert!(!WorkingFiles::branch_allowed(branch), "{branch}");
         }
+        let astral = [32; 4].map(|count| "𐐀".repeat(count)).join("/");
+        assert!(astral.encode_utf16().count() > MAX_BRANCH_CHARS);
+        assert!(WorkingFiles::branch_allowed(&astral));
+        assert!(WorkingFiles::branch_allowed(&"𐐀".repeat(MAX_BRANCH_CHARS)));
+        assert!(!WorkingFiles::branch_allowed(
+            &"𐐀".repeat(MAX_BRANCH_CHARS + 1)
+        ));
     }
 
     #[test]

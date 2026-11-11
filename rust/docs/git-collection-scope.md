@@ -12,9 +12,9 @@
 타입에는 제외 항목을 담을 필드가 없다. 생성자는 아래 검증을 통과한 값만 받는다.
 
 - `RepoKey`: 정규화한 원격 URL의 SHA-256(소문자 16진수 64자리)만 받는다. 값은 `dependency_repo_key`로 계산한다. URL 원문은 거부한다.
-- `RelativePath`: 중앙 검증과 같다. 빈 값, `/` 시작, `\`, 드라이브 문자(`C:`), 빈·`.`·`..` 경로 조각, 제어 문자를 거부하고, 길이는 UTF-16 500단위(Java `String.length`) 이하다. `from_absolute(root, path)`는 저장소 루트 아래 절대 경로만 상대 경로로 바꾸고, 루트 자신·루트 밖·`..`이 섞인 경로는 거부한다.
+- `RelativePath`: 빈 값, `/` 시작, `\`, 드라이브 문자(`C:`), 빈·`.`·`..` 경로 조각, 제어 문자를 거부한다. 커밋 경로는 UTF-16 500단위(Java `String.length`) 이하다. `from_absolute(root, path)`는 저장소 루트 아래 절대 경로만 상대 경로로 바꾸고, 루트 자신·루트 밖·`..`이 섞인 경로는 거부한다.
 - `Author`: SET-3-03의 `AuthorAttribution` 결과만 받는다. 이메일은 받지 않는다. 본인 userId(양의 Java long)가 아니면 미확인(`null`)이다.
-- 커밋 SHA는 소문자 16진수 40·64자리, 커밋 시각은 `yyyy-MM-ddTHH:mm:ss[.f{1,6}](Z|±hh:mm)`이다. `git log --format=%cI` 출력이 그대로 맞는다.
+- 커밋 SHA는 소문자 16진수 40·64자리, 커밋 시각은 `yyyy-MM-ddTHH:mm:ss[.f{1,6}](Z|±hh:mm)`이다. Git이 기록한 오프셋의 절댓값이 `18:00`을 넘으면 같은 시각을 UTC로 변환해 보낸다.
 
 ## 커밋 배치 (`commits:batch`)
 
@@ -41,7 +41,7 @@
 
 ## 작업 파일
 
-IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 작업 파일의 상대 경로에는 공통 UTF-16 500단위 외에 UTF-8 1,000바이트 한도가 적용된다. `WorkingFiles::path_allowed`로 확인하며 초과 경로만 제외하고 정상 파일은 유지한다. 커밋 파일 경로에는 이 바이트 한도를 적용하지 않는다. 수집 가능한 파일은 2,000개 이하다. 브랜치는 중앙 규칙(문자·숫자·`._/-`, 255자 이하, `-` 시작·`..` 금지)을 따르며 `WorkingFiles::branch_allowed`로 확인한다. 수집기는 [작업 파일 수집](working-files.md)이다.
+IDX-3-02 본문은 `{"branch": "...", "files": [{"relativePath", "changeType"}]}`이다. 분리된 HEAD나 UTF-8로 해석할 수 없는 브랜치는 `branch: null`이고 빈 목록도 관측으로 보낸다. `changeType`은 `ADDED`·`MODIFIED`·`DELETED`·`UNTRACKED`·`UNMERGED`·`TYPE_CHANGED`이며 `WorkingChange::from_porcelain`이 `git status --porcelain=v1` 두 글자를 바꾼다. 작업 파일 경로는 500코드포인트와 UTF-8 1,000바이트 한도를 모두 만족해야 한다. 초과 경로만 제외하고 정상 파일은 유지한다. 수집 가능한 파일은 2,000개 이하다. 브랜치는 중앙 규칙(문자·숫자·`._/-`, 255코드포인트 이하, `-` 시작·`..` 금지)을 따르며 `WorkingFiles::branch_allowed`로 확인한다. 수집기는 [작업 파일 수집](working-files.md)이다.
 
 ## 검증
 

@@ -698,6 +698,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unusual_git_offsets_are_uploaded_as_utc_with_other_commits() {
+        let f = fixture().await;
+        let root = f.repo.path();
+        let normal = commit(root, ME, "normal.txt", "normal");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let unusual = commit_at(root, "unusual.txt", &format!("{now} +2000"));
+        assert!(git(root, ME, &["show", "-s", "--format=%cI", &unusual]).ends_with("+20:00"));
+        f.identity.set_for_test(None).await;
+        assert_eq!(
+            f.sync.sync_once().await.unwrap(),
+            Outcome::Synced {
+                commits: 2,
+                skipped: 0
+            }
+        );
+        let bodies = f.sent();
+        let commits = bodies[0]["commits"].as_array().unwrap();
+        assert_eq!(commits[0]["commitSha"], normal);
+        assert_eq!(commits[1]["commitSha"], unusual);
+        let normalized = commits[1]["committedAt"].as_str().unwrap();
+        assert!(normalized.ends_with('Z'));
+        let parsed =
+            time::OffsetDateTime::parse(normalized, &time::format_description::well_known::Rfc3339)
+                .unwrap();
+        assert_eq!(parsed.unix_timestamp(), now as i64);
+    }
+
+    #[tokio::test]
+    async fn treeless_clone_retries_an_unavailable_remote_and_fetches_trees_in_one_request() {
+        let f = fixture().await;
+        let root = f.repo.path();
+        git(root, ME, &["config", "uploadpack.allowFilter", "true"]);
+        git(
+            root,
+            ME,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        commit(root, ME, "old.txt", "old");
+        for step in 0..4 {
+            commit(root, ME, &format!("dir/step{step}.txt"), "step");
+        }
+        commit(root, ME, "dir/new.txt", "new");
+        f.identity.set_for_test(None).await;
+        f.sync.sync_once().await.unwrap();
+        let full = f.sent();
+        let (clone, sync) = f.clone_history("--filter=tree:0").await;
+        let missing = url::Url::from_directory_path(root.join("missing-remote")).unwrap();
+        git(
+            clone.path(),
+            ME,
+            &["remote", "set-url", "origin", missing.as_str()],
+        );
+        std::fs::remove_file(&sync.state_path).unwrap();
+        assert!(sync.sync_once().await.is_err());
+        assert!(sync.load().is_none());
+        assert!(f.sent().is_empty());
+
+        let source = url::Url::from_directory_path(root).unwrap();
+        git(
+            clone.path(),
+            ME,
+            &["remote", "set-url", "origin", source.as_str()],
+        );
+        // Every fetch from the promisor remote adds one pack. Lazy reads would add one per tree.
+        let packs = || {
+            std::fs::read_dir(clone.path().join(".git/objects/pack"))
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext == "pack")
+                })
+                .count()
+        };
+        let before = packs();
+        sync.sync_once().await.unwrap();
+        assert_eq!(packs(), before + 1);
+        assert_eq!(f.sent(), full);
+        let object = git(root, ME, &["rev-parse", "HEAD:dir/new.txt"]);
+        let missing_objects = git(
+            clone.path(),
+            ME,
+            &["rev-list", "--objects", "--missing=print", "HEAD"],
+        );
+        assert!(
+            missing_objects
+                .lines()
+                .any(|line| line.strip_prefix('?') == Some(object.as_str()))
+        );
+        assert_eq!(sync.sync_once().await.unwrap(), Outcome::UpToDate);
+    }
+
+    #[tokio::test]
     async fn sends_history_once_with_own_or_unverified_authors_then_only_new_commits() {
         let f = fixture().await;
         let root = f.repo.path();

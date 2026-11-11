@@ -72,6 +72,9 @@ impl Collector {
         {
             return Ok(false);
         }
+        // A failed exchange can still have replaced the central observation. Until the next
+        // acknowledgment, do not suppress a periodic upload even if it matches the old body.
+        self.last = None;
         let (status, reply) = self
             .client
             .request_graph_http(Method::PUT, &self.path, Some(body.clone()))
@@ -388,8 +391,78 @@ mod tests {
         let refreshed = uploads.recv().await.unwrap();
         assert_eq!(refreshed.body, json!({"branch": null, "files": []}));
 
+        std::fs::write(repo.path().join(".git/HEAD"), b"ref: refs/heads/bad-\xff\n").unwrap();
+        std::fs::write(repo.path().join("new-note.txt"), "note").unwrap();
+        assert!(refresher.refresh(REFRESH_LIMIT).await);
+        let observation = uploads.recv().await.unwrap();
+        assert_eq!(observation.body["branch"], Value::Null);
+        assert!(
+            observation.body["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["relativePath"] == "new-note.txt")
+        );
+
         cancel.cancel();
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn periodically_resends_a_reverted_list_after_the_new_list_loses_its_ack() {
+        use axum::body::Body;
+        use axum::response::{IntoResponse, Response};
+
+        type Observations = Arc<Mutex<Vec<Value>>>;
+        async fn accept(
+            State(observations): State<Observations>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            let lose_ack = body["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["relativePath"] == "transient.txt");
+            observations.lock().await.push(body);
+            if lose_ack {
+                let lost = std::io::Error::other("response lost after save");
+                Response::new(Body::from_stream(futures_util::stream::once(async {
+                    Err::<String, _>(lost)
+                })))
+            } else {
+                Json(json!({"success": true, "data": null})).into_response()
+            }
+        }
+        let repo = repository();
+        let root = repo.path();
+        let observations: Observations = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/files", put(accept))
+            .with_state(observations.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut collector = Collector {
+            git: GitProject::open(root, DEFAULT_REMOTE).await.unwrap(),
+            binding: binding(root),
+            central: connected(3).await,
+            client: TaskClient::new(&format!("ws://{address}"), TOKEN).unwrap(),
+            path: "/files".into(),
+            resend: INTERVAL,
+            last: None,
+        };
+
+        assert!(collector.publish(false).await.unwrap());
+        let transient = root.join("transient.txt");
+        std::fs::write(&transient, "temporary").unwrap();
+        assert!(collector.publish(false).await.is_err());
+        std::fs::remove_file(transient).unwrap();
+        assert!(collector.publish(false).await.unwrap());
+        assert!(!collector.publish(false).await.unwrap());
+        let observations = observations.lock().await;
+        assert_eq!(observations.len(), 3);
+        assert_ne!(observations[0], observations[1]);
+        assert_eq!(observations[0], observations[2]);
     }
 
     #[tokio::test]

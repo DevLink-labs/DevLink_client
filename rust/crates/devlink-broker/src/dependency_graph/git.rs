@@ -14,6 +14,10 @@ use tokio::{
 };
 
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const GIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Root trees per prefetch request in a treeless clone, and the time one request may take.
+const TREE_FETCH_BATCH: usize = 200;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub(crate) struct OutputLimitExceeded;
@@ -165,8 +169,8 @@ impl GitProject {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let input = ids.iter().flat_map(|id| [id.as_bytes(), b"\n"]).flatten();
-        let output = run(
+        let input = lines(ids);
+        let mut log = command(
             &self.root,
             &[
                 "-c",
@@ -186,11 +190,121 @@ impl GitProject {
                 "--format=%x01%H%x00%cI%x00%ae",
                 "--",
             ],
-            Some(input.copied().collect()),
+            true,
+        );
+        // A treeless clone lacks the trees this read compares. Fetch them in a few requests
+        // first; Git can still fill anything left from the promisor remote during the read.
+        // All other Git reads stay local.
+        if let Some(remote) = self.tree_promisor().await {
+            // Best effort: on failure the read below fetches lazily or reports the error.
+            let _ = self.prefetch_trees(&remote, ids).await;
+            allow_promisor_fetch(&mut log);
+        }
+        let output = run_command(log, Some(input), OUTPUT_LIMIT, GIT_TIMEOUT).await?;
+        parse_log(&output)
+    }
+
+    /// The promisor remote of a clone made with a `tree:` filter.
+    async fn tree_promisor(&self) -> Option<String> {
+        let output = run(
+            &self.root,
+            &[
+                "config",
+                "--get-regexp",
+                r"^remote\..+\.partialclonefilter$",
+                r"^tree:[0-9]+$",
+            ],
+            None,
+            8192,
+        )
+        .await
+        .ok()?;
+        let line = std::str::from_utf8(&output).ok()?.lines().next()?;
+        let (key, _) = line.rsplit_once(' ')?;
+        let remote = key
+            .strip_prefix("remote.")?
+            .strip_suffix(".partialclonefilter")?;
+        (!remote.is_empty() && !remote.starts_with('-')).then(|| remote.to_owned())
+    }
+
+    /// Fetches the missing root trees of the commits and their parents, `TREE_FETCH_BATCH` per
+    /// request. `blob:none` brings each tree with its subtrees, so `git log` then reads locally
+    /// instead of fetching one tree at a time. Finished batches stay even if a later one fails.
+    async fn prefetch_trees(&self, remote: &str, ids: &[String]) -> Result<()> {
+        let listed = run(
+            &self.root,
+            &[
+                "log",
+                "--stdin",
+                "--no-walk=unsorted",
+                "--no-show-signature",
+                "--format=%T %P",
+            ],
+            Some(lines(ids)),
             OUTPUT_LIMIT,
         )
         .await?;
-        parse_log(&output)
+        let mut trees = BTreeSet::new();
+        let mut parents = BTreeSet::new();
+        for line in std::str::from_utf8(&listed)?.lines() {
+            let mut fields = line.split(' ').filter(|field| !field.is_empty());
+            trees.insert(fields.next().context("Missing Git tree ID")?.to_owned());
+            parents.extend(fields.map(str::to_owned));
+        }
+        for id in ids {
+            parents.remove(id);
+        }
+        if !parents.is_empty() {
+            let listed = run(
+                &self.root,
+                &[
+                    "log",
+                    "--stdin",
+                    "--no-walk=unsorted",
+                    "--no-show-signature",
+                    "--format=%T",
+                ],
+                Some(lines(&parents)),
+                OUTPUT_LIMIT,
+            )
+            .await?;
+            trees.extend(std::str::from_utf8(&listed)?.lines().map(str::to_owned));
+        }
+        ensure!(trees.iter().all(|id| valid_sha(id)), "Invalid Git tree ID");
+        let checked = run(
+            &self.root,
+            &["cat-file", "--batch-check"],
+            Some(lines(&trees)),
+            OUTPUT_LIMIT,
+        )
+        .await?;
+        let missing: Vec<&str> = std::str::from_utf8(&checked)?
+            .lines()
+            .filter_map(|line| line.strip_suffix(" missing"))
+            .collect();
+        for batch in missing.chunks(TREE_FETCH_BATCH) {
+            let mut fetch = command(
+                &self.root,
+                &[
+                    "-c",
+                    "fetch.negotiationAlgorithm=noop",
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--recurse-submodules=no",
+                    "--no-auto-maintenance",
+                    "--filter=blob:none",
+                    "--stdin",
+                    "--",
+                    remote,
+                ],
+                true,
+            );
+            allow_promisor_fetch(&mut fetch);
+            run_command(fetch, Some(lines(batch)), 8192, FETCH_TIMEOUT).await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn snapshot(&self, sha: &str) -> Result<Vec<SourceFile>> {
@@ -275,9 +389,15 @@ impl GitProject {
     pub(crate) async fn working(
         &self,
     ) -> Result<(Option<String>, Vec<(RelativePath, WorkingChange)>)> {
-        let branch = run(&self.root, &["branch", "--show-current"], None, 1024).await?;
-        let branch = std::str::from_utf8(&branch)?.trim();
-        let branch = (!branch.is_empty()).then(|| branch.to_owned());
+        let branch = match run(&self.root, &["branch", "--show-current"], None, 1024).await {
+            Ok(raw) => std::str::from_utf8(&raw)
+                .ok()
+                .map(|name| name.trim_end_matches(['\r', '\n']))
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            Err(error) if error.is::<OutputLimitExceeded>() => None,
+            Err(error) => return Err(error),
+        };
         let status = run(
             &self.root,
             &[
@@ -360,12 +480,9 @@ fn parse_status(status: &[u8]) -> Result<Vec<(RelativePath, WorkingChange)>> {
         let Ok(path) = std::str::from_utf8(&record[3..]) else {
             continue;
         };
-        let Ok(path) = RelativePath::new(path) else {
+        let Ok(path) = RelativePath::for_working(path) else {
             continue;
         };
-        if !crate::git_scope::WorkingFiles::path_allowed(&path) {
-            continue;
-        }
         files.insert(path, WorkingChange::from_porcelain([record[0], record[1]]));
         ensure!(
             files.len() <= crate::git_scope::MAX_WORKING_FILES,
@@ -465,7 +582,7 @@ fn command(root: &Path, args: &[&str], input: bool) -> Command {
 }
 
 async fn history_ids(root: &Path, range: &str, after: u64) -> Result<Vec<String>> {
-    timeout(Duration::from_secs(15), async {
+    timeout(GIT_TIMEOUT, async {
         let mut child = command(
             root,
             &[
@@ -506,11 +623,44 @@ async fn history_ids(root: &Path, range: &str, after: u64) -> Result<Vec<String>
     .context("Git operation timed out")?
 }
 
+/// Lets Git fetch from the promisor remote without prompting from the background broker.
+fn allow_promisor_fetch(command: &mut Command) {
+    command
+        .env("GIT_NO_LAZY_FETCH", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "never")
+        .env("SSH_ASKPASS_REQUIRE", "never");
+}
+
+/// One ID per line for `--stdin` and `cat-file --batch-check`.
+fn lines<S: AsRef<str>>(ids: impl IntoIterator<Item = S>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for id in ids {
+        bytes.extend_from_slice(id.as_ref().as_bytes());
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
 async fn run(root: &Path, args: &[&str], input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>> {
-    timeout(Duration::from_secs(15), async {
-        let mut child = command(root, args, input.is_some())
-            .spawn()
-            .context("Cannot start Git")?;
+    run_command(
+        command(root, args, input.is_some()),
+        input,
+        limit,
+        GIT_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_command(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+    limit: usize,
+    wait: Duration,
+) -> Result<Vec<u8>> {
+    timeout(wait, async {
+        let mut child = command.spawn().context("Cannot start Git")?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("Cannot read Git output")?;
         let mut bytes = Vec::new();
@@ -591,6 +741,20 @@ mod tests {
         let boundary = format!("{}/{}", "가".repeat(166), "나".repeat(167));
         let files = parse_status(format!("?? {boundary}\0").as_bytes()).unwrap();
         assert_eq!(files[0].0.as_str(), boundary);
+    }
+
+    #[test]
+    fn status_counts_working_paths_in_code_points_and_bytes() {
+        let astral = [50, 50, 50, 50, 49]
+            .map(|count| "😀".repeat(count))
+            .join("/");
+        let too_many_points = ["x".repeat(250), "y".repeat(250)].join("/");
+        assert_eq!(astral.len(), 1000);
+        assert!(RelativePath::new(&astral).is_err());
+        let status = format!("?? {astral}\0?? {too_many_points}\0");
+        let files = parse_status(status.as_bytes()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0.as_str(), astral);
     }
 
     #[test]
