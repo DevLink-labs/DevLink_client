@@ -1,0 +1,119 @@
+{
+  "$id": "urn:devlink:local-broker:v1:team-context",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "teamId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,18}$"
+    },
+    "part": {
+      "type": "string",
+      "enum": [
+        "FRONTEND",
+        "BACKEND",
+        "INFRA",
+        "OTHER"
+      ]
+    },
+    "contexts": {
+      "maxItems": 4,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "counterpart": {
+            "type": "string",
+            "enum": [
+              "FRONTEND",
+              "BACKEND",
+              "INFRA",
+              "OTHER"
+            ]
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,18})$"
+          },
+          "lastEventId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "promptVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "common": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "changed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          }
+        },
+        "required": [
+          "counterpart",
+          "version",
+          "lastEventId",
+          "updatedAt",
+          "model",
+          "promptVersion",
+          "common",
+          "changed",
+          "issues"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "teamId",
+    "part",
+    "contexts"
+  ],
+  "additionalProperties": false
+}
