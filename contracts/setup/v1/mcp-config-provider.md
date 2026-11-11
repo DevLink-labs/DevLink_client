@@ -127,6 +127,11 @@ builds a small demonstration harness. It accepts the example JSON on stdin and
 reproduction/integration tests, not a replacement for -111's setup flow or a
 persistent reviewed-plan store. The product CLI must retain the same plan instance.
 
+`--supports` takes `{"toolType":"codex","hostVersion":"0.167.0"}` on stdin and
+prints `{"supported":true|false}` with exit 0: whether `VerifiedHost::new` accepts
+that version. It reads no path and writes nothing. A malformed request exits 2
+with `SETUP_INPUT_INVALID`, as in the other modes.
+
 ```json
 {
   "hostVersion": "2.1.317",

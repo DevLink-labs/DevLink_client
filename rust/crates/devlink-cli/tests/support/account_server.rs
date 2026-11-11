@@ -71,7 +71,9 @@ pub struct MockState {
     pub pause_token: Arc<AtomicBool>,
     pub token_entered: Arc<tokio::sync::Notify>,
     pub token_resume: Arc<tokio::sync::Notify>,
-    /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404
+    /// S15P31D108-146 PATCH: 1 = 500, 2 = mismatched reply, 3 = 403, 4 = 404,
+    /// 5 = an older central that ignores part/roles and never returns them (S15P31D108-183),
+    /// 6 = ignores part/roles and leaves them out of the PATCH reply only
     pub update_mode: Arc<AtomicU8>,
     pub pause_update_reply: Arc<AtomicBool>,
     pub update_entered: Arc<tokio::sync::Notify>,
@@ -415,10 +417,22 @@ async fn agent_get(
         return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
     }
     agent_for(&state, id)
-        .map(success)
+        .map(|mut agent| {
+            if state.update_mode.load(Ordering::SeqCst) == 5 {
+                without_metadata(&mut agent);
+            }
+            success(agent)
+        })
         .unwrap_or_else(|| failure(StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"))
 }
-/// Mirrors central AgentService.update: owner-only, null keeps, only the profile fields.
+/// An older central has no part/roles fields in `AgentResponse` at all.
+fn without_metadata(agent: &mut Value) {
+    let fields = agent.as_object_mut().unwrap();
+    fields.remove("part");
+    fields.remove("roles");
+}
+/// Mirrors central AgentService.update: owner-only, null keeps, only the profile fields
+/// and the routing metadata (part, roles; an empty roles list removes every tag).
 async fn agent_update(
     Path(id): Path<u64>,
     State(state): State<MockState>,
@@ -433,9 +447,16 @@ async fn agent_update(
         .cloned()
         .collect::<Vec<_>>();
     assert!(
-        keys.iter()
-            .all(|k| k == "projectName" || k == "roleDescription"),
+        keys.iter().all(|k| matches!(
+            k.as_str(),
+            "projectName" | "roleDescription" | "part" | "roles"
+        )),
         "{keys:?}"
+    );
+    // The client leaves an unchanged field out instead of sending null.
+    assert!(
+        body.as_object().unwrap().values().all(|v| !v.is_null()),
+        "{body}"
     );
     state
         .calls
@@ -456,10 +477,17 @@ async fn agent_update(
         if agent["ownerUserId"] != user(&state)["userId"] {
             return failure(StatusCode::FORBIDDEN, "ACCESS_DENIED");
         }
+        let ignores_metadata = matches!(state.update_mode.load(Ordering::SeqCst), 5 | 6);
         for key in &keys {
+            if ignores_metadata && matches!(key.as_str(), "part" | "roles") {
+                continue;
+            }
             agent[key.as_str()] = body[key.as_str()].clone();
         }
         let mut reply = agent.clone();
+        if ignores_metadata {
+            without_metadata(&mut reply);
+        }
         if state.update_mode.load(Ordering::SeqCst) == 2 {
             reply["projectName"] = json!("changed by provider");
         }

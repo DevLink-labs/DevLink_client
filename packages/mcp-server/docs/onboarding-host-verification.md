@@ -8,8 +8,36 @@ stories complete. Existing first-MVP work/result roundtrip checks remain separat
 ## Preparation
 
 - Node 24+, Python 3.11+ (`tomllib`), a built Rust CLI and `mcp-config` example.
-- Codex 0.166.0 and Claude Code 2.1.317 with usable existing logins. Claude uses
-  exactly `claude-opus-5-5` / `high`; Codex preserves the user's configured model.
+- Codex and Claude Code at a version setup applies automatically (Codex 0.166.0
+  or later, Claude Code 2.1.317 or later; see the
+  [provider contract](../../../contracts/setup/v1/mcp-config-provider.md)), with
+  usable existing logins. The harness reads each Host's `--version` output and
+  passes that version to the Rust provider unchanged, so the provider alone
+  decides whether the configuration is applied. Output that is not
+  `codex-cli X.Y.Z[-pre][+build]` / `X.Y.Z[-pre][+build] (Claude Code)` fails at
+  `preparation/host-version`. A readable version the provider does not apply
+  automatically (an older release, or a pre-release of the minimum) fails at
+  `preparation/host-support/<host>`, using the example's `--supports` mode. Both
+  fail before anything is created on the central server.
+- The report records the raw output as `versions`, the parsed value as
+  `hostVersions` and the provider's answer as `hostSupport`. A failure at
+  `preparation/host-support/<host>` with `hostSupport.<host>` set to `false` is
+  an unsupported version; with it missing, the provider example did not answer,
+  for example a `mcp-config` built before `--supports` existed. Rebuild it.
+- Claude uses exactly `claude-opus-5-5` / `high`; Codex preserves the user's
+  configured model.
+- The Host CLI flags, transcript shapes and Codex login layout this harness
+  relies on were written against Codex 0.166.0 and Claude Code 2.1.310
+  (2026-11-02); the Claude pin moved to 2.1.317 on 2026-11-06. With the current
+  harness, a complete run passed with Codex 0.167.0 and Claude Code 2.1.319 on
+  2026-11-10; it has not been re-run on other versions. A later Host that the
+  provider accepts can still fail the run on those; that is a harness
+  compatibility problem, not a provider decision, and such a failure is not
+  evidence about the generated configuration.
+- The Claude catalog check requires every tool on the harness allow-list to be
+  offered. The server may offer DevLink tools outside that list, so the model
+  can see them; Claude's permission mode denies them, and any such call fails
+  the exact-sequence proof.
 - A dedicated IPv4 loopback central server with disposable DB data. Record its
   exact 40-character source commit. Production URLs are rejected.
 - Use an absolute artifact directory outside tracked source. Captured transcripts

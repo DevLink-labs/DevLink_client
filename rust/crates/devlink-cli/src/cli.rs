@@ -291,13 +291,22 @@ pub enum AgentCommand {
     },
     /// Explicitly issue/rotate the current Agent token while its broker is stopped
     Token,
-    /// Change the bound Agent's project name or role; never creates an Agent or token
-    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description"])))]
+    /// Change the bound Agent's project name, role, part or role tags; never creates an Agent or token
+    #[command(group(clap::ArgGroup::new("fields").required(true).multiple(true).args(["project_name", "role_description", "part", "roles", "clear_roles"])))]
     Update {
         #[arg(long)]
         project_name: Option<String>,
         #[arg(long)]
         role_description: Option<String>,
+        /// FRONTEND, BACKEND, INFRA or OTHER; omit to keep the current part
+        #[arg(long, value_parser = devlink_broker::agent_metadata::AgentPart::parse)]
+        part: Option<devlink_broker::agent_metadata::AgentPart>,
+        /// Replace all role tags (nouns for owned areas, e.g. login,payment); omit to keep them
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        roles: Option<Vec<String>>,
+        /// Remove every role tag
+        #[arg(long, conflicts_with = "roles")]
+        clear_roles: bool,
     },
     /// Show public profile metadata and verify a stored central token
     Status,
@@ -666,11 +675,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 AgentCommand::Update {
                     project_name,
                     role_description,
+                    part,
+                    roles,
+                    clear_roles,
                 } => agent_profile::update(
                     &path,
                     agent_profile::UpdateOptions {
                         project_name,
                         role_description,
+                        part,
+                        roles: if clear_roles { Some(Vec::new()) } else { roles },
                     },
                     None,
                 )

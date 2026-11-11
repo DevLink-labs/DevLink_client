@@ -80,6 +80,19 @@ test('all twelve business tools use the common invocation/result path and truste
   const retry = { ...samples.create_task, requestKey: 'agent-chosen-key' };
   assert.equal((await client.callTool({ name: 'create_task', arguments: retry })).isError, undefined);
   assert.deepEqual(broker.calls.findLast((c) => c.path === operationRoutes.create_task).body.arguments, retry);
+  // S15P31D108-183: part/roles reach the broker as given and [] clears tags. null keeps the stored
+  // value, so it is left out like an omitted field (an older broker rejects fields it does not know).
+  for (const [metadata, forwarded] of [
+    [{ part: 'BACKEND', roles: ['로그인', ' 결제 API ', '😀'.repeat(32)] }],
+    [{ roles: [] }],
+    [{ part: 'OTHER' }],
+    [{ projectName: 'DevLink client', part: null, roles: null }, { projectName: 'DevLink client' }],
+    [{ part: 'INFRA', roles: null }, { part: 'INFRA' }],
+    [{ roles: Array.from({ length: 10 }, (_, index) => `tag-${index}`) }],
+  ]) {
+    assert.equal((await client.callTool({ name: 'update_agent', arguments: metadata })).isError, undefined, JSON.stringify(metadata));
+    assert.deepEqual(broker.calls.findLast((c) => c.path === operationRoutes.update_agent).body.arguments, forwarded ?? metadata);
+  }
 });
 
 test('invalid inputs and actor overrides are rejected before any session or broker request', async (t) => {
@@ -114,6 +127,13 @@ test('invalid inputs and actor overrides are rejected before any session or brok
     ['update_agent', { roleDescription: 'C1  control' }],
     ['update_agent', { projectName: 'DevLink', name: 'renamed' }],
     ['update_agent', { projectName: 'DevLink', agentId: 'other-agent' }],
+    // S15P31D108-183: null alone changes nothing, and tags follow the central limits.
+    ...[{ part: null }, { roles: null }, { part: null, roles: null }, { part: 'DESIGN' }, { part: 'backend' },
+      { roles: 'login' }, { roles: [7] }, { roles: [''] }, { roles: [' \t\u3000'] }, { roles: ['r'.repeat(65)] },
+      { roles: ['😀'.repeat(33)] }, { roles: Array.from({ length: 11 }, (_, index) => `tag-${index}`) },
+      // Central trims U+0001 away to an empty tag (400) and may fail on NUL with an unknown outcome.
+      { roles: ['\u0001'] }, { roles: [' \u0001\t'] }, { roles: ['pay\u0000ment'] }, { roles: ['pay\u007Fment'] },
+      { part: 'BACKEND', teamId: 'other-team' }].map(args => ['update_agent', args]),
     ['find_agent', {}],
     ...['', ' \t\n\u3000', '가'.repeat(1_001), `  ${'😀'.repeat(1_001)}  `].map(question => ['find_agent', { question }]),
     ...['AB'.repeat(32), 'a'.repeat(63), 'g'.repeat(64), null].map(repoKey => ['find_agent', { question: 'q', repoKey }]),

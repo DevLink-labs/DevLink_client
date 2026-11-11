@@ -11,7 +11,11 @@ pwsh e2e/scripts/e2e-local.ps1 -InstallPostgres
 pwsh e2e/scripts/e2e-local.ps1 -Runs 5
 # 이미 설치된 PostgreSQL 16, 빌드 생략, 일부 시나리오
 pwsh e2e/scripts/e2e-local.ps1 -PgBin C:\pg16\bin -SkipBuild -Grep S3
+# 다른 작업 트리가 이미 만든 스택(checkout·빌드·PostgreSQL) 재사용, 워커 수 지정
+pwsh e2e/scripts/e2e-local.ps1 -StackDir D:\devlink-e2e-stack -Workers 1
 ```
+
+스펙 파일은 워커 3개로 병렬 실행한다(`playwright.config.ts`, `-Workers` 또는 `E2E_WORKERS`로 변경). 시나리오마다 central 사용자·팀·액터 디렉터리·프로젝트 폴더가 따로라 계정 잠금과 대상별 MCP 설정 잠금을 공유하지 않는다. 한 파일 안의 테스트는 순서대로 실행한다. `seedTeam`은 두 액터의 데스크톱 setup을 동시에 실행한다. 실제 Host 턴(`E2E_REAL_HOSTS=1`)은 소유권 해제 시간을 재므로 워커 1개로 고정한다. 병렬에서만 실패하는 시나리오가 나오면 `-Workers 1`로 비교한다.
 
 필요 도구: Node 24, JDK 21(`java`가 PATH에 없으면 `-Java`), Rust(`rust-toolchain.toml`), git. 스크립트는 `e2e/.stack/`(git 무시)에 server·frontend checkout, 빌드 산출물, 실행별 디렉터리 `runs/<runId>/`를 둔다.
 
@@ -26,7 +30,7 @@ pwsh e2e/scripts/e2e-local.ps1 -PgBin C:\pg16\bin -SkipBuild -Grep S3
 | `src/client/actor.ts` | 액터별 `--config` 프로필, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `git init`한 프로젝트, 가짜 Host(npm 배치의 `codex.cmd`/`claude.cmd`, 버전 응답만 함, 자동 설정 최소 지원 버전과 같은 Codex 0.166.0·Claude Code 2.1.317을 출력). 자식 환경에서 `DEVLINK_*`·`E2E_*` 제거. |
 | `src/client/mcp.ts` | `packages/mcp-server/scripts/lib/mcp-stdio.mjs`(실제 중앙 검증 스크립트와 공유)로 MCP stdio 연결. |
 | `src/pages/workspace.ts` | 역할·라벨 선택자 화면 객체. 새로고침 버튼을 누르며 `toPass`로 기다린다. |
-| `specs/` | S1~S3 (`@p0`). S15 `find_agent` 실제 중앙 추천 중계와 후보에게 작업 전달·오프라인 후보 관찰(`@p1`, S15P31D108-188·-190). S16 3차 통합: setup part·roles → find_agent → 선택 → create_task → 수락·완료(`@p1`, S15P31D108-191). `E2E_REAL_HOSTS=1`이면 사용자 로그인을 쓰는 실제 Codex·Claude Code 턴도 실행한다(모델 비용 발생, [기록](../packages/mcp-server/docs/mvp3-integration.md)). |
+| `specs/` | S1~S3 (`@p0`). S15 `find_agent` 실제 중앙 추천 중계와 후보에게 작업 전달·오프라인 후보 관찰(`@p1`, S15P31D108-188·-190). S16 3차 통합: setup part·roles → find_agent → 선택 → create_task → 수락·완료(`@p1`, S15P31D108-191). `E2E_REAL_HOSTS=1`이면 사용자 로그인을 쓰는 실제 Codex·Claude Code 턴도 실행한다(모델 비용 발생, [기록](../packages/mcp-server/docs/mvp3-integration.md)). S17 담당 정보 수정: MCP `update_agent`와 `devlink agent update`의 part·roles 변경, 생략·null 유지, `[]` 삭제를 중앙 `/agents/me` 조회로 확인(`@p1`, S15P31D108-183). |
 
 ## 시나리오
 
