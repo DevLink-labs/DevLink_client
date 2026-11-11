@@ -92,6 +92,15 @@
                 "null"
               ]
             },
+            "part": {
+              "type": "string"
+            },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "source": {
               "type": "string",
               "const": "central_agents_me"

@@ -212,11 +212,11 @@ resultText·failureReason에는 토큰·환경변수 값이 섞인 원본 로그
 1. 바꿀 값을 사용자에게 확인한다. 이름·도구·팀은 바꿀 수 없고, 역할 설명을 비우는 것도 지원하지 않는다.
 2. `update_agent`에 `projectName`·`roleDescription`·`part`·`roles` 중 바꿀 값만 넣는다. 결과의 `changedFields`가 실제로 바뀐 필드이며, 빈 배열이면 이미 같은 값이었다.
    - `part`는 FRONTEND·BACKEND·INFRA·OTHER 중 하나다.
-   - `roles`는 태그 목록 전체를 바꾼다. 태그를 하나 더하려면 기존 태그까지 모두 넣는다. 현재 태그는 `list_agents`나 직전 `update_agent` 결과에서 본다. `get_my_context`에는 part·roles가 없다.
+   - `roles`는 태그 목록 전체를 바꾼다. 태그를 하나 더하려면 기존 태그까지 모두 넣는다. 현재 태그는 `get_my_context`의 `agent.roles`, `list_agents`, 직전 `update_agent` 결과에서 본다. `agent.part`·`agent.roles`가 없으면 중앙이 보내지 않은 것이므로 OTHER나 태그 없음으로 읽지 않는다.
    - 태그는 로그인·결제처럼 담당 영역을 나타내는 짧은 명사로 쓰도록 안내한다. `find_agent`가 질문과 이 태그를 대조한다.
    - 태그를 모두 지우는 것은 사용자가 그렇게 요청했을 때만 `roles: []`로 한다. `part`·`roles`를 생략하거나 null로 주면 기존 값이 유지된다.
 3. USER_LOGIN_REQUIRED면 사용자에게 이 PC에서 `devlink auth login`을 실행하도록 안내한다. 모델이 로그인하거나 비밀번호를 받지 않는다.
-4. CENTRAL_PROTOCOL_ERROR 등 결과 불명이면 `get_my_context`(projectName·roleDescription)와 `list_agents`(part·roles)로 현재 값을 확인하고, 다시 바꿀 때는 같은 값으로만 호출한다. 새 Agent를 만들거나 토큰을 다시 발급해 우회하지 않는다.
+4. CENTRAL_PROTOCOL_ERROR 등 결과 불명이면 `get_my_context`(projectName·roleDescription·part·roles)로 현재 값을 확인하고, 다시 바꿀 때는 같은 값으로만 호출한다. 새 Agent를 만들거나 토큰을 다시 발급해 우회하지 않는다.
 
 ## 저장·전달·업무 상태와 결과 불명
 
