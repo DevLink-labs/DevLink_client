@@ -226,3 +226,72 @@ async fn invalid_batch_metadata_and_use_overrides_are_rejected_before_central() 
     assert!(f.state.calls.lock().unwrap().is_empty());
     assert_eq!(f.state.create_calls.load(Ordering::SeqCst), 0);
 }
+
+/// GitHub #127: a central reply without part/roles is refused. The OTHER / no-tags defaults
+/// it would otherwise turn into are never cached in the profile or listed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replies_without_part_and_roles_are_not_cached_or_listed_as_defaults() {
+    const REFUSED: &str = "central did not report the Agent part and role tags";
+    let f = Fixture::new().await;
+    assert!(f.login().status.success());
+    assert!(
+        f.run(&["team", "select", "--id", "71"], None)
+            .status
+            .success()
+    );
+    let root = f._root.path().to_str().unwrap();
+    let created = f.run(
+        &[
+            "agent",
+            "create",
+            "--name",
+            "Metadata agent",
+            "--tool",
+            "codex",
+            "--project-name",
+            "Metadata project",
+            "--project",
+            root,
+            "--part",
+            "BACKEND",
+            "--roles",
+            "login",
+        ],
+        None,
+    );
+    assert!(created.status.success(), "{}", text(&created));
+    let profile_path = devlink_broker::agent_profile::path(&f.path);
+    let cached = fs::read(&profile_path).unwrap();
+    let refused = |args: &[&str]| {
+        let output = f.run(args, None);
+        assert!(!output.status.success(), "{args:?}: {}", text(&output));
+        assert!(
+            text(&output).contains(REFUSED),
+            "{args:?}: {}",
+            text(&output)
+        );
+        assert_no_secrets(&output);
+    };
+
+    // GET /agents/{id} leaves them out. Without the check `agent use` would accept the reply
+    // and `agent token` would cache OTHER / no tags over BACKEND / login.
+    f.state.update_mode.store(5, Ordering::SeqCst);
+    refused(&["agent", "use", "--id", "201", "--project", root]);
+    refused(&["agent", "token"]);
+    assert_eq!(fs::read(&profile_path).unwrap(), cached);
+    f.state.update_mode.store(0, Ordering::SeqCst);
+
+    // The team list leaves them out: no row is shown as OTHER with no tags.
+    f.state.agent_list_mode.store(5, Ordering::SeqCst);
+    refused(&["agent", "list"]);
+    f.state.agent_list_mode.store(0, Ordering::SeqCst);
+
+    // /agents/me leaves them out after a token was issued: the profile stays unverified with
+    // the metadata the owner lookup reported.
+    f.state.agent_context_mode.store(4, Ordering::SeqCst);
+    refused(&["agent", "token"]);
+    let after: Value = serde_json::from_slice(&fs::read(&profile_path).unwrap()).unwrap();
+    assert_eq!(after["state"]["kind"], "needs_token");
+    assert_eq!(after["state"]["agent"]["part"], "BACKEND");
+    assert_eq!(after["state"]["agent"]["roles"], json!(["login"]));
+}
