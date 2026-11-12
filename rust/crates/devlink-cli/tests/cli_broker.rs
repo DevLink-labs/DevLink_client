@@ -108,6 +108,15 @@ async fn cli_creates_tasks_with_agent_bearer_and_reuses_request_key_after_restar
                 let mut method = [0;3];
                 while stream.peek(&mut method).await.unwrap() < 3 { sleep(Duration::from_millis(1)).await; }
                 if serve_context_request(&mut stream, Some(12)).await { return; }
+                // Sent task recovery asks for the task after READY; it is still pending here.
+                let mut line = [0;18];
+                while stream.peek(&mut line).await.unwrap() < line.len() { sleep(Duration::from_millis(1)).await; }
+                if &line == b"GET /api/v1/tasks/" {
+                    let response = serde_json::json!({"success":true,"data":{"taskId":101,"teamId":1,
+                        "requesterAgent":{"agentId":12,"name":"requester"},"status":"PENDING","version":1}}).to_string();
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).as_bytes()).await.unwrap();
+                    return;
+                }
                 if &method == b"GET" {
                     let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
                     socket.send(Message::Text(serde_json::json!({"type":"BROKER_READY","payload":{

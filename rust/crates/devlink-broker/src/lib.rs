@@ -26,6 +26,7 @@ pub mod notifications;
 pub mod owner_process;
 pub mod private_file;
 pub mod protocol;
+pub mod sent_task_recovery;
 pub mod sent_tasks;
 pub mod session_api;
 pub mod sessions;

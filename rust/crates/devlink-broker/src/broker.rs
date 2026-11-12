@@ -123,9 +123,12 @@ pub async fn run(path: &Path) -> Result<()> {
         cancel.clone(),
     ));
     let status = Arc::new(RwLock::new(ConnectionStatus::Connecting));
+    // 중앙 재연결(READY)마다 보낸 작업의 놓친 최종 상태를 다시 조회하도록 깨우는 신호
+    let sent_task_wake = Arc::new(tokio::sync::Notify::new());
     let central_state = CentralState::new(status)
         .with_inbox(inbox)
-        .with_notifications(notifications)
+        .with_notifications(notifications.clone())
+        .with_sent_task_wake(sent_task_wake.clone())
         .with_task_messages(task_messages.clone())
         .with_context_client(crate::agent_context::ContextClient::new(
             &config.server_url,
@@ -216,14 +219,27 @@ pub async fn run(path: &Path) -> Result<()> {
         ))
     });
 
-    // 보낸 작업의 로컬 지연 알림 판정 (taskOverdueMinutes, 0이면 끔)
-    // Off (0) records nothing, so enabling it later does not flag old tasks at once.
-    let sent_tasks = (config.task_overdue_minutes > 0)
-        .then(|| crate::sent_tasks::Ledger::new(path, &config.server_url))
-        .transpose()?;
+    // 보낸 작업 기록: 최종 상태 재조회(시작 후 READY·재연결 READY·지연 판정 직전)와
+    // 로컬 지연 알림 판정(taskOverdueMinutes, 0이면 끔)에 쓴다.
+    // With the check off (0), tasks are recorded already settled for recovery only, so
+    // enabling the check later does not flag old tasks at once.
+    let ledger = crate::sent_tasks::Ledger::new(path, &config.server_url)?;
+    let sent_tasks = Some(if config.task_overdue_minutes > 0 {
+        ledger
+    } else {
+        ledger.without_overdue()
+    });
+    let recovery = crate::sent_task_recovery::Recovery::new(
+        task_client.clone(),
+        central_state.clone(),
+        notifications,
+        &config.server_url,
+        sent_task_wake,
+    )?;
     tokio::spawn(crate::sent_tasks::run(
         path.to_path_buf(),
         config.task_overdue_minutes,
+        Some(recovery),
         cancel.clone(),
     ));
 
