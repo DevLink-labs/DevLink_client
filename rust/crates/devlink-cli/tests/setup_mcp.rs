@@ -1023,6 +1023,7 @@ async fn preflight_rechecks_changes_before_registration(version: &str) {
         .with_mcp(options.clone())
         .with_tool_search(devlink_broker::tool_discovery::ToolSearch {
             directories: vec![hosts],
+            bundled: Vec::new(),
             timeout: std::time::Duration::from_secs(15),
         })
         .with_agent(Some(Selection::Create));

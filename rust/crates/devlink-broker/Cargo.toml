@@ -33,7 +33,7 @@ uuid.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Networking_WinSock", "Win32_System_SystemInformation"] }
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock", "Win32_Storage_Packaging_Appx", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
