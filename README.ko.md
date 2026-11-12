@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://about.devlink.ai.kr/">
-  <img src="docs/images/devlink-logo.png" alt="DevLink 소개 페이지로 이동" width="720">
+  <img src="docs/images/devlink-logo-transparent.png" alt="DevLink 소개 페이지로 이동" width="720">
 </a>
 
 # DevLink
@@ -184,7 +184,7 @@ CLI가 설정과 브로커 실행을 관리하고, MCP 서버가 AI 코딩 도�
 
 버그 제보, 문서 개선과 기능 제안을 환영합니다. [Issues](https://github.com/SSAFY-URAYAHA/DevLink_client/issues)에 재현 방법, 기대한 동작, 실제 동작과 사용 환경을 함께 남겨주세요. 로그를 첨부할 때는 비밀번호와 토큰을 제거해 주세요.
 
-개발 참여와 브랜치·커밋·PR 규칙은 [기여 가이드](CONTRIBUTING.md), 커뮤니티 참여 원칙은 [행동 규칙](CODE_OF_CONDUCT.md)을 참고하세요. 보안 취약점은 [보안 정책](SECURITY.md)에 따라 제보해 주세요.
+개발 참여와 브랜치·커밋·PR 규칙은 [기여 가이드](CONTRIBUTING.md)를 참고하세요. 보안 취약점은 [보안 정책](SECURITY.md)에 따라 제보해 주세요.
 
 ## 라이선스
 
