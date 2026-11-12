@@ -15,14 +15,13 @@ Codex와 Claude Code에서 팀의 Agent를 찾고, 작업을 요청하고, 결�
 ![Node.js](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)
 
-**한국어** · English (준비 중)
+[English](README.md) · **한국어**
 
 [빠른 시작](#빠른-시작) · [사용 예시](#사용-예시) · [동작 구조](#동작-구조) · [문서](#문서) · [버그 제보](https://github.com/SSAFY-URAYAHA/DevLink_client/issues)
 
 </div>
 
 <!-- 실제 연결 → 작업 요청 → 수락 → 결과 확인을 보여주는 짧은 데모 GIF를 여기에 추가합니다. -->
-<!-- 영문판 추가 시 README.md는 영어, README.ko.md는 한국어로 두고 언어 링크를 연결합니다. -->
 
 ## 소개
 
@@ -197,60 +196,13 @@ flowchart LR
 
 ## 개발하기
 
-소스에서 빌드하려면 Git, Rust stable 도구 체인, Node.js 24 이상이 필요합니다. Windows에서는 Visual Studio C++ Build Tools와 Windows SDK도 설치해야 합니다.
-
-```sh
-git clone https://github.com/SSAFY-URAYAHA/DevLink_client.git
-cd DevLink_client
-
-# MCP 서버 의존성 설치와 빌드
-npm --prefix packages/mcp-server ci
-npm --prefix packages/mcp-server run build
-
-# CLI와 브로커 빌드
-cd rust
-cargo build --release --locked --workspace
-```
-
-CLI 실행 파일은 `rust/target/release/`에 생성됩니다. 소스 빌드 환경에서 연결할 때는 [설정 가이드](rust/docs/setup.md)의 `--mcp-entry`로 빌드한 MCP 진입점을 지정할 수 있습니다.
-
-### 저장소 구조
-
-```text
-DevLink_client/
-├── rust/
-│   ├── crates/devlink-cli/      # CLI와 간편 설정
-│   ├── crates/devlink-broker/   # 로컬 브로커와 중앙 서버 연동
-│   └── docs/                   # 설치·설정·운영·개발 문서
-├── packages/mcp-server/        # TypeScript MCP 서버
-├── contracts/                 # 구성 요소 간 API·설정 계약
-├── e2e/                       # 통합 시나리오 검증
-└── .github/                   # CI와 릴리스 워크플로
-```
-
-### 검사와 테스트
-
-저장소 루트에서 MCP 서버를 검사합니다.
-
-```sh
-npm --prefix packages/mcp-server run check
-npm --prefix packages/mcp-server test
-```
-
-`rust/`에서 Rust 코드를 검사합니다.
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace --all-targets
-```
-
-Linux·macOS의 `cargo test`에는 `-- --test-threads=1`을 추가합니다. 운영체제별 검증 방법은 [Rust 개발 문서](rust/README.md), 전체 서비스 통합 시나리오는 [E2E 문서](e2e/README.md)를 참고하세요.
+소스 빌드, 검사·테스트, 저장소 구조와 개발 참여 절차는 [기여 가이드](CONTRIBUTING.md)를 참고하세요.
 
 ## 문서
 
 | 문서 | 내용 |
 | --- | --- |
+| [간편설정 규격](contracts/setup/v1/README.md) | 설정 호출·단계·오류 계약 |
 | [설치·CLI 안내](rust/README.md) | 릴리스 설치, 소스 빌드, 기본 명령 |
 | [간편 설정](rust/docs/setup.md) | 로그인부터 프로젝트 연결, 프로필과 복구 |
 | [MCP 서버 안내](packages/mcp-server/README.md) | MCP 실행 환경과 도구 설정 |
@@ -265,9 +217,7 @@ Linux·macOS의 `cargo test`에는 `-- --test-threads=1`을 추가합니다. 운
 
 버그 제보, 문서 개선과 기능 제안을 환영합니다. [Issues](https://github.com/SSAFY-URAYAHA/DevLink_client/issues)에 재현 방법, 기대한 동작, 실제 동작과 사용 환경을 함께 남겨주세요. 로그를 첨부할 때는 비밀번호와 토큰을 제거해 주세요.
 
-개발 참여 절차와 브랜치·커밋·PR 규칙은 별도의 기여 가이드로 정리해 공개할 예정입니다.
-
-<!-- 기여 가이드 공개 후 CONTRIBUTING.md 링크를 추가합니다. -->
+개발 참여와 브랜치·커밋·PR 규칙은 [기여 가이드](CONTRIBUTING.md), 커뮤니티 참여 원칙은 [행동 규칙](CODE_OF_CONDUCT.md)을 참고하세요. 보안 취약점은 [보안 정책](SECURITY.md)에 따라 제보해 주세요.
 
 ## 라이선스
 

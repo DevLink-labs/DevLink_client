@@ -1,107 +1,225 @@
+<div align="center">
+
+<a href="https://about.devlink.ai.kr/">
+  <img src="docs/images/devlink-logo.png" alt="Visit the DevLink introduction page" width="720">
+</a>
+
 # DevLink
 
-## 간편설정 규격
+**Connect your team's AI coding tools and keep work and context flowing.**
 
-[간편설정 호출·단계·오류 규격 v1](contracts/setup/v1/README.md)은 대화형/비대화형 입력, 진행·결과·오류 응답, 복구·종료 코드와 등록 API·MCP 설정·연결 상태의 연동 경계를 정의합니다. `setup`은 설정 준비·로그인·팀/프로젝트/도구 선택, Agent 생성·재사용과 토큰 준비, 브로커 시작, 프로젝트 계층 MCP 설정 적용(Codex `.codex/config.toml`, Claude Code `.mcp.json`)까지 연결되어 있습니다. 현재 동작과 복구 방법은 [간편설정 구현 문서](rust/docs/setup.md), MCP 연결 확인 순서는 [MCP 온보딩](packages/mcp-server/docs/onboarding.md#connection-sequence-three-steps)을 따릅니다.
+Find teammate Agents, request work, and review results from Codex and Claude Code.
 
-## MCP 서버
+[![CI](https://github.com/SSAFY-URAYAHA/DevLink_client/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/SSAFY-URAYAHA/DevLink_client/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Node.js](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)
 
-S15P31D108-59 실행 기반, -60 브로커 호출·세션 복구, -61 공통 도구 등록과 7개 업무 도구의 실행 방법 및 검증 절차는 [MCP 서버 문서](packages/mcp-server/README.md)를 참고합니다. 로컬 HTTP·도구 
-JSON은 MCP 측 v0.1 초안이며 실제 Rust 브로커와의 상호 검증은 남아 있습니다.
+**English** · [한국어](README.ko.md)
 
-사용자는 [Agent 요청·수락·결과 등록 지침](packages/mcp-server/docs/agent-workflow.md)에서 수신자 지정부터 사용자 수락, Host의 로컬 수정·검증, 완료·실패 조회까지 확인할 수 있습니다.
+[Quick Start](#quick-start) · [Usage](#usage) · [Architecture](#architecture) · [Documentation](#documentation) · [Report a Bug](https://github.com/SSAFY-URAYAHA/DevLink_client/issues)
 
-실제 중앙 server와의 현재 연동 경로·자격·DTO와 아직 제공되지 않는 API는 [중앙 연동 현재 상태](contracts/central/current-state.md)에 정리했습니다. 기준 server SHA와 확인 방법을 함께 적었고, 실행으로 확인하지 않은 항목은 "코드 기준"으로 표시합니다. 2026-10-29의 [중앙 연동 결정표](contracts/central/README.md)는 당시 설계 결정을 보존한 역사 기록입니다.
+</div>
 
-## Git Flow
+<!-- Add a short demo showing connection, task creation, acceptance, and results here. -->
 
-[Notion Git Flow 전략](https://www.notion.so/fdd35a4f3ca6837fb6ef8101afa7fb68)을 기준으로 브랜치를 관리합니다.
-Notion 문서에 혼용된 `main`과 `master`는 이 저장소의 운영 브랜치인 `master`로 통일합니다.
+## About
 
-### 브랜치 역할
+DevLink passes work requests and development context between the AI coding tools used by your team.
 
-| 브랜치      | 역할                       |
-| ----------- | -------------------------- |
-| `master`    | 배포 가능한 운영 버전      |
-| `develop`   | 다음 배포를 위한 개발 통합 |
-| `feature/*` | 기능 개발                  |
-| `release/*` | 배포 준비 및 최종 수정     |
-| `hotfix/*`  | 운영 환경 긴급 수정        |
+A frontend developer using Codex and a backend developer using Claude Code can request work from each other's Agents and review progress and results in their own development environments. Requests carry their purpose, relevant files, and acceptance criteria. Questions and answers stay attached to the task.
 
-- `master`, `develop`에는 직접 푸시하지 않고 Pull Request(PR)를 통해 반영합니다.
-- `feature/*`는 `develop`에서 분기하고, 하나의 기능이 완성되면 `develop`으로 PR을 생성합니다.
-- `release/*`는 `develop`에 배포할 기능이 모이면 생성합니다. 배포 준비 중 발생한 버그는 해당 브랜치에서 수정하고 `develop`에도 반영합니다. 배포 가능한 상태가 되면 `master`와 `develop` 양쪽으로 PR을 생성합니다.
-- `hotfix/*`는 `master`에서 분기해 긴급 버그를 수정합니다. 수정이 완료되면 `master`와 `develop` 양쪽으로 PR을 생성합니다.
+This repository provides the **CLI, local broker, and MCP server** that run on a developer's computer. The [central server](https://github.com/SSAFY-URAYAHA/DevLink_server) manages teams and tasks, while the [frontend and desktop app](https://github.com/SSAFY-URAYAHA/DevLink_frontend) provide the team and task interface. They are maintained in separate repositories.
 
-### 브랜치 명명 규칙
+## Features
 
-```text
-{type}/{scope}/{description}
-```
+- **Codex and Claude Code integration** — Access DevLink from your existing AI coding tool through the Model Context Protocol (MCP).
+- **Guided setup** — Use `devlink setup` for login, team, project and tool selection, Agent registration, broker startup, and project MCP configuration.
+- **Team Agent discovery** — Browse Agents and find possible owners using role tags and Git activity. The user chooses the recipient.
+- **Task requests and shared results** — Send work with its purpose and acceptance criteria. Track acceptance, rejection, progress, completion, and failure.
+- **Task discussions and team context** — Read task questions and answers, shared facts, changes, and unresolved issues between team parts.
+- **Updates and reconnection** — Check incoming tasks, outgoing task status changes, and questions and answers. The local broker manages the central connection and reconnection.
 
-- `type`: `feature`, `release`, `hotfix`.
-- `scope`: 아래 작업 영역 표를 사용합니다.
-- 배포 브랜치는 `release/{version}` 형식을 사용합니다.
+## Usage
 
-| Scope     | 대상                       |
-| --------- | -------------------------- |
-| `front`   | Frontend                   |
-| `back`    | Backend                    |
-| `ai`      | AI / ML                    |
-| `data`    | 데이터 수집 / 전처리 / ETL |
-| `bigdata` | 대용량 데이터 처리         |
-| `spark`   | Spark / 분산 처리          |
-| `kafka`   | Kafka / 분산 처리          |
-| `infra`   | Docker / 서버 / 배포 환경  |
-| `common`  | 공통 작업                  |
+These example prompts show two connected teammates working in their own AI coding tools. Use Agent names and task IDs returned by your actual team queries.
+
+**1. Find your team's Agents.**
 
 ```text
-feature/front/login
-feature/back/auth-api
-feature/ai/recommendation
-release/1.0.0
-hotfix/back/auth-error
+Show our team's Agents and their roles.
 ```
 
-### 커밋 규칙
+**2. Choose a recipient and request work.**
 
 ```text
-type(scope): message
+Ask the backend Agent we found to check the login API response format.
+The frontend needs the user ID and display name.
+The result should include an actual response example and the API route.
 ```
 
-커밋의 `scope`는 브랜치 명명 규칙의 작업 영역과 동일하게 사용합니다.
-
-| Type       | 설명                              |
-| ---------- | --------------------------------- |
-| `feat`     | 기능 추가                         |
-| `fix`      | 버그 수정                         |
-| `refactor` | 코드 구조 개선                    |
-| `perf`     | 성능 개선                         |
-| `docs`     | 문서 수정                         |
-| `test`     | 테스트 추가 / 수정                |
-| `style`    | 동작에 영향을 주지 않는 코드 수정 |
-| `chore`    | 설정 / 패키지 / 빌드 / 기타 작업  |
-| `data`     | 데이터셋 / 전처리 변경            |
-
-### Pull Request 규칙
-
-PR은 하나의 기능 또는 작업 단위로 생성하고, 제목은 커밋과 동일한 `type(scope): message` 형식을 사용합니다.
+**3. The recipient reviews and accepts the task.**
 
 ```text
-feature/front/login → develop
-feature/ai/recommendation → develop
-
-release/1.0.0 → master
-release/1.0.0 → develop
-
-hotfix/back/auth-error → master
-hotfix/back/auth-error → develop
+Show my received tasks.
 ```
 
-PR 제목 예시:
+After reviewing the request:
 
 ```text
-feat(front): 로그인 페이지 구현
-feat(ai): 추천 모델 구현
-perf(bigdata): 데이터 처리 성능 개선
+Accept the login API task we just reviewed and investigate within its scope.
+Record the response example and what you actually checked in the result.
 ```
+
+**4. The sender reviews the result.**
+
+```text
+Show the status and result of the login API task I sent.
+```
+
+The recipient's Codex or Claude Code performs local code analysis, edits, and tests. DevLink carries requests, context, status, and results. The recipient proceeds when their user instructs them to accept the work.
+
+See the [Agent collaboration guide](packages/mcp-server/docs/agent-workflow.md) for the full workflow.
+
+## Quick Start
+
+### 1. Prerequisites
+
+- **Node.js 24 or later**
+- An installed **Codex or Claude Code**
+- A **user account and team membership** on the DevLink central server you will connect to
+- A **local project directory** to open in your AI coding tool
+
+See the [setup guide](rust/docs/setup.md) for tool versions supported by automatic MCP configuration and for manual configuration.
+
+### 2. Install the client
+
+Download the bundle for your operating system from [GitHub Releases](https://github.com/SSAFY-URAYAHA/DevLink_client/releases), extract it, and add the extracted directory to your `PATH`.
+
+| Platform | Bundle target |
+| --- | --- |
+| Windows x64 | `x86_64-pc-windows-msvc.zip` |
+| Linux x64 | `x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `aarch64-apple-darwin.tar.gz` |
+
+Keep the `devlink` executable and its `mcp-server/` directory together. Install Node.js separately. See the [installation guide](rust/README.md#릴리스로-설치) for platform commands and Linux glibc requirements.
+
+Open a new terminal and verify the installation:
+
+```sh
+devlink --version
+node --version
+```
+
+### 3. Connect your project
+
+From your project directory, create the Agent you will use. Run the command for your chosen tool:
+
+```sh
+cd <project-directory>
+
+# Codex
+devlink setup --tool codex --create-agent
+
+# Claude Code
+devlink setup --tool claude-code --create-agent
+```
+
+Follow the prompts to log in and select your team and Agent details. Review and apply the project MCP configuration changes. To use an existing Agent, replace `--create-agent` with `--agent-id <AGENT_ID>`.
+
+The default server is `wss://api.devlink.ai.kr`. To connect to another central server or use multiple tools or Agents, prepare separate profiles as described in the [setup guide](rust/docs/setup.md). Each profile is associated with one Agent.
+
+### 4. Check the connection
+
+Check the setup state in your terminal:
+
+```sh
+devlink setup status
+```
+
+Reopen Codex or Claude Code in the project so it loads the DevLink MCP configuration. If Codex asks whether to trust the project, approve it to allow the project configuration to load.
+
+Ask your AI coding tool:
+
+```text
+Check DevLink's connection status and my Agent information.
+If the connection is healthy, bind this MCP session to the current Agent
+and show the team's Agents.
+```
+
+The tool checks and binds in this order: `get_connection_status({})` → `get_my_context({})` → `register_agent({})`. Check that the central connection is `Connected`, identity is `verified`, and `hostSession` becomes `bound` after binding. `register_agent` binds the session to the Agent prepared earlier.
+
+For troubleshooting, see [MCP onboarding and connection diagnostics](packages/mcp-server/docs/onboarding.md#connection-sequence-three-steps).
+
+### 5. Enable update hooks — optional
+
+To check new tasks and status changes at session startup and when submitting prompts, install the hook for your tool:
+
+```sh
+# Run the command for your chosen tool.
+devlink hooks install --host codex --yes
+devlink hooks install --host claude-code --yes
+```
+
+Hooks are added to user-level settings. Codex requires a one-time trust approval through `/hooks`. See the [update hook guide](rust/docs/update-hook.md) for details.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Codex / Claude Code] <-->|MCP · stdio| B[MCP server]
+    B <-->|Local HTTP| C[Local broker]
+    C <-->|HTTPS / WebSocket| D[DevLink central server]
+    D <--> E[Teammate's DevLink client]
+```
+
+| Component | Responsibility |
+| --- | --- |
+| CLI | Login, team and Agent selection, project configuration, and broker lifecycle |
+| Local broker | Central connection, local sessions, task inbox, and updates |
+| MCP server | Agent, task, and context tools for AI coding tools |
+| Central server | Users, teams, Agents, tasks, and collaboration history |
+
+## MCP Tools
+
+| Purpose | Main tools |
+| --- | --- |
+| Connection and identity | `get_connection_status`, `get_my_context`, `register_agent` |
+| Agent discovery and profile updates | `list_agents`, `find_agent`, `update_agent` |
+| Work requests | `create_task` |
+| Task acceptance, rejection, progress, and failure | `update_task_status` |
+| Completion results | `complete_task` |
+| Task lists, details, and results | `get_tasks`, `get_task_result` |
+| Task questions and answers | `ask_question`, `answer_question` |
+| Team context and updates | `get_team_context`, `get_updates` |
+
+See the [MCP tool reference](packages/mcp-server/docs/tool-contracts-v0.1.md) for input formats and examples.
+
+## Development
+
+See the [contributing guide](CONTRIBUTING.md) for source builds, checks and tests, repository layout, and development workflow. The guide and most detailed technical documents are currently written in Korean.
+
+## Documentation
+
+| Guide | Covers |
+| --- | --- |
+| [Setup specification](contracts/setup/v1/README.md) | Setup inputs, stages, and error contracts |
+| [Installation and CLI](rust/README.md) | Release installation, source builds, and basic commands |
+| [Guided setup](rust/docs/setup.md) | Login, project connection, profiles, and recovery |
+| [MCP server](packages/mcp-server/README.md) | MCP runtime and tool configuration |
+| [MCP onboarding](packages/mcp-server/docs/onboarding.md) | Connection sequence and diagnostics |
+| [Agent collaboration](packages/mcp-server/docs/agent-workflow.md) | Requests, acceptance, questions, and results |
+| [Codex instructions](packages/mcp-server/docs/hosts/codex.md) | Collaboration instructions for Codex |
+| [Claude Code instructions](packages/mcp-server/docs/hosts/claude-code.md) | Collaboration instructions for Claude Code |
+| [Central integration status](contracts/central/current-state.md) | Current API and authentication contracts and verification scope |
+| [Verification records](rust/docs/verification.md) | Results and limits for verified environments |
+
+## Contributing
+
+Bug reports, documentation improvements, and feature proposals are welcome. Open an [Issue](https://github.com/SSAFY-URAYAHA/DevLink_client/issues) with your environment, reproduction steps, expected behavior, and actual behavior. Remove passwords and tokens from logs.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and PR conventions, [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards, and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## License
+
+DevLink is distributed under the [MIT License](LICENSE).
