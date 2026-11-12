@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { execFileAsync } from "../stack/util.ts";
@@ -22,13 +22,38 @@ const hosts: Record<Tool, { shim: string; pkg: string; entry: string; version: s
 };
 
 /**
- * Environment for every child: no DEVLINK_* (developer broker/token), no harness E2E_* values and
- * no Node preload options inherited from the runner.
+ * Environment for every child: no DEVLINK_* (developer broker/token), no harness E2E_* values, no
+ * DECISION_MODEL_* (central-only settings, one of them an API key) and no Node preload options
+ * inherited from the runner.
  */
 export function childEnvironment(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const base = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined
-    && !/^(DEVLINK_|E2E_|NODE_OPTIONS$|NODE_PATH$)/i.test(key)));
+    && !/^(DEVLINK_|E2E_|DECISION_MODEL_|NODE_OPTIONS$|NODE_PATH$)/i.test(key)));
   return { ...base, ...extra };
+}
+
+let gitDirectoryLookup: Promise<string> | undefined;
+
+/**
+ * Directory of the Git executable the runner itself uses. The broker's working-file collector and
+ * commit sync run `git`; without it on the actor's isolated PATH they never start and a Git-backed
+ * recommendation cannot be exercised (client #155). Several copies can be on PATH (Git Bash puts
+ * mingw64\bin first); prefer Git's `cmd` directory, which holds only the launchers. The entry goes
+ * last on the actor PATH, so anything else in that directory cannot shadow System32 or the fake Host.
+ */
+function gitDirectory(): Promise<string> {
+  gitDirectoryLookup ??= (async () => {
+    // Scan the runner's PATH directly: `where.exe` prints in the OEM code page and would mangle a
+    // non-ASCII install path. The harness is Windows-only (SystemRoot, .cmd Host shims).
+    const executable = process.platform === "win32" ? "git.exe" : "git";
+    const found: string[] = [];
+    for (const entry of (process.env.PATH ?? process.env.Path ?? "").split(delimiter).filter(Boolean)) {
+      if (!found.includes(entry) && (await stat(join(entry, executable)).catch(() => undefined))?.isFile()) found.push(entry);
+    }
+    if (!found.length) throw new Error("git is not on the runner's PATH; E2E actors need it for Git collection");
+    return found.find((entry) => basename(entry).toLowerCase() === "cmd") ?? found[0];
+  })();
+  return gitDirectoryLookup;
 }
 
 /**
@@ -70,8 +95,9 @@ export class Actor {
     const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
     const env = childEnvironment({
       // The MCP server checks the broker file ACL through powershell.exe, so keep Windows PowerShell.
+      // Git is last: the broker runs it for working-file and commit collection.
       PATH: [bin, dirname(process.execPath), join(systemRoot, "System32"), systemRoot, join(systemRoot, "System32", "Wbem"),
-        join(systemRoot, "System32", "WindowsPowerShell", "v1.0")].join(delimiter),
+        join(systemRoot, "System32", "WindowsPowerShell", "v1.0"), await gitDirectory()].join(delimiter),
       CODEX_HOME: join(root, "codex-home"),
       CLAUDE_CONFIG_DIR: join(root, "claude-config"),
       NO_COLOR: "1",
