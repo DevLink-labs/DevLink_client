@@ -7,7 +7,11 @@ export const contextSchema = z.strictObject({
   identity: z.enum(['verified', 'unavailable']),
   principal: z.strictObject({ userId: decimalId, teamId: decimalId, agentId: decimalId, toolType: toolTypeSchema.nullable() }).nullable(),
   agent: z.strictObject({ name: z.string().nullable(), roleDescription: z.string().nullable(),
-    toolType: toolTypeSchema.nullable(), projectName: z.string().nullable(), source: z.literal('central_agents_me') }).nullable(),
+    toolType: toolTypeSchema.nullable(), projectName: z.string().nullable(),
+    // Present only when central reported them; absent never means OTHER or no tags.
+    // Any string passes so an unknown part cannot fail the context read.
+    part: z.string().optional(), roles: z.array(z.string()).optional(),
+    source: z.literal('central_agents_me') }).nullable(),
   project: z.strictObject({ path: z.string().nullable(), source: z.enum(['bound_profile', 'unavailable']) }),
   hostSession: z.enum(['bound', 'unbound', 'conflict', 'not_checked']),
 }).superRefine((v, ctx) => {

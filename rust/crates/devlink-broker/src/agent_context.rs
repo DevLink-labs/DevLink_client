@@ -24,6 +24,30 @@ pub struct AgentContext {
     pub role_description: Option<String>,
     pub tool_type: Option<crate::agent_profile::Tool>,
     pub project_name: Option<String>,
+    // S15P31D108-240: shown as central sent them (same rule as the Agent list, -183). Identity
+    // checks never depend on these, so any JSON value is accepted here and an unexpected
+    // one is left out by `shown_part`/`shown_roles` instead of failing the context read.
+    #[serde(default)]
+    pub part: Option<serde_json::Value>,
+    #[serde(default)]
+    pub roles: Option<serde_json::Value>,
+}
+
+impl AgentContext {
+    /// The part central reported. `None` when it sent none or something that is not a string.
+    pub fn shown_part(&self) -> Option<&str> {
+        self.part.as_ref()?.as_str()
+    }
+    /// The role tags central reported. `None` when it sent none or not a list of strings;
+    /// an empty list means central reported no tags.
+    pub fn shown_roles(&self) -> Option<Vec<&str>> {
+        self.roles
+            .as_ref()?
+            .as_array()?
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect()
+    }
 }
 
 impl ContextClient {

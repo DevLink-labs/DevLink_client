@@ -162,15 +162,23 @@ impl ContextReader {
         {
             return Err(IdentityError::Unavailable.into());
         }
-        let tool = context.tool_type.map(|tool| match tool {
+        let tool = context.tool_type.as_ref().map(|tool| match tool {
             agent_profile::Tool::Codex => "codex",
             agent_profile::Tool::ClaudeCode => "claude_code",
         });
+        let mut agent = json!({"name":context.name,"roleDescription":context.role_description,
+            "toolType":tool,"projectName":context.project_name,"source":"central_agents_me"});
+        // Only what central reported: a reply without part/roles must not read as OTHER / no tags.
+        if let Some(part) = context.shown_part() {
+            agent["part"] = json!(part);
+        }
+        if let Some(roles) = context.shown_roles() {
+            agent["roles"] = json!(roles);
+        }
         Ok(json!({"identity":"verified",
             "principal":{"userId":context.owner_user_id.to_string(),"teamId":context.team_id.to_string(),
                 "agentId":context.agent_id.to_string(),"toolType":tool},
-            "agent":{"name":context.name,"roleDescription":context.role_description,
-                "toolType":tool,"projectName":context.project_name,"source":"central_agents_me"},
+            "agent":agent,
             "project":{"path":self.binding.as_ref().map(|b| &b.project_root),
                 "source":if self.binding.is_some(){"bound_profile"}else{"unavailable"}},
             "hostSession":session}))
@@ -479,6 +487,44 @@ pub(crate) mod tests {
             assert_eq!(result["hostSession"], "unbound");
             assert_eq!(result["project"]["source"], "unavailable");
             assert_eq!(reader.central.presence().await, None);
+            // Central sent no part/roles: they are left out, not read as OTHER / no tags.
+            let agent = result["agent"].as_object().unwrap();
+            assert!(!agent.contains_key("part") && !agent.contains_key("roles"));
+        }
+        task.abort();
+    }
+    #[tokio::test]
+    async fn shows_part_and_roles_only_as_central_reported_them() {
+        let (_dir, reader, reply, task) = fixture().await;
+        {
+            let mut reply = reply.write().await;
+            reply["data"]["part"] = json!("BACKEND");
+            reply["data"]["roles"] = json!(["로그인", "결제 API"]);
+        }
+        let result = reader.read(&host()).await.unwrap();
+        assert_eq!(result["agent"]["part"], "BACKEND");
+        assert_eq!(result["agent"]["roles"], json!(["로그인", "결제 API"]));
+
+        // No tags is a reported value and stays an empty list.
+        reply.write().await["data"]["roles"] = json!([]);
+        let result = reader.read(&host()).await.unwrap();
+        assert_eq!(result["agent"]["roles"], json!([]));
+
+        // null or an unexpected shape is left out and never fails the identity read.
+        for (part, roles) in [
+            (Value::Null, Value::Null),
+            (json!(7), json!("로그인")),
+            (json!({"name":"BACKEND"}), json!(["로그인", 3])),
+        ] {
+            {
+                let mut reply = reply.write().await;
+                reply["data"]["part"] = part;
+                reply["data"]["roles"] = roles;
+            }
+            let result = reader.read(&host()).await.unwrap();
+            assert_eq!(result["identity"], "verified");
+            let agent = result["agent"].as_object().unwrap();
+            assert!(!agent.contains_key("part") && !agent.contains_key("roles"));
         }
         task.abort();
     }

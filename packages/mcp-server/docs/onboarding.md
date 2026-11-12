@@ -59,7 +59,9 @@ this MCP process's existing session; neither supplies a business principal.
 The verified principal comes from live central `/api/v1/agents/me`, fenced against
 the current WebSocket generation/identity. IDs are positive canonical decimal strings
 up to Java Long. Missing metadata is null, never caller/config defaults. Agent metadata
-is labelled `central_agents_me`. Local project paths are labelled `bound_profile`
+is labelled `central_agents_me`. `agent.part` and `agent.roles` are present only when
+central reported a string part or a list of string tags; a missing field is unknown,
+not `OTHER` or no tags, and `roles: []` means central reported no tags. Local project paths are labelled `bound_profile`
 only after the stored profile, selected team, current origin, existing canonical
 project directory and live principal agree; otherwise no path is inferred from cwd.
 An environment-token broker without a bound profile reports project `unavailable`.
@@ -67,7 +69,7 @@ An environment-token broker without a bound profile reports project `unavailable
 Example after CLI preparation, before explicit registration:
 
 ```json
-{"requestId":"context-1","data":{"identity":"verified","principal":{"userId":"3","teamId":"1","agentId":"12","toolType":"codex"},"agent":{"name":"worker","roleDescription":null,"toolType":"codex","projectName":"example","source":"central_agents_me"},"project":{"path":null,"source":"unavailable"},"hostSession":"unbound"}}
+{"requestId":"context-1","data":{"identity":"verified","principal":{"userId":"3","teamId":"1","agentId":"12","toolType":"codex"},"agent":{"name":"worker","roleDescription":null,"toolType":"codex","projectName":"example","part":"BACKEND","roles":["로그인"],"source":"central_agents_me"},"project":{"path":null,"source":"unavailable"},"hostSession":"unbound"}}
 ```
 
 Disconnected reads contain `identity: unavailable`, null principal/Agent/project path
