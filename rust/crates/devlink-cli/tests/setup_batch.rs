@@ -419,3 +419,106 @@ async fn verify_unattended_login_and_reuse(runtime: Option<(PathBuf, PathBuf)>) 
         2
     );
 }
+
+/// The desktop app drives setup with batch input, which rechecks a saved Host without
+/// rediscovery. A desktop-app update that moves its bundled Host must not strand that
+/// selection. The Claude desktop layout is faked through LOCALAPPDATA; the Codex app's
+/// package registration cannot be, and shares the same recheck path.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_saved_desktop_app_host_follows_an_app_update_in_unattended_setup() {
+    struct StopBroker<'a>(&'a Fixture);
+    impl Drop for StopBroker<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.run(&["stop"], None);
+        }
+    }
+    let home = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+    if [".local/bin/claude.exe", ".cargo/bin/claude.exe"]
+        .iter()
+        .any(|p| home.join(p).is_file())
+    {
+        eprintln!("skipped: a native Claude Code install outranks the synthetic app bundle");
+        return;
+    }
+
+    let app = Fixture::new().await;
+    let _stop = StopBroker(&app);
+    let project = app._root.path();
+    devlink_broker::credentials::set_private_permissions(project).unwrap();
+    assert!(app.login().status.success());
+    let bin = project.join("test-bin");
+    let (node, entry) = tool_fixture::mcp_runtime(&bin);
+    let local = project.join("local-app-data");
+    let tools = local.join(r"Claude-Data\claude_test\claude-code");
+    tool_fixture::host(
+        &tools.join(r"2.1.317\b1"),
+        "claude",
+        "2.1.317 (Claude Code)",
+    );
+    let input = project.join("batch.json");
+    let config = devlink_broker::config::Config::load(&app.path).unwrap();
+    let mut plan = json!({
+        "schemaVersion":1, "serverUrl":config.server_url,
+        "user":{"mode":"session"}, "team":{"id":"71"},
+        "project":{"path":project,"name":"Bundle project"},
+        "tool":{"type":"claude-code"}, "agent":{"action":"create","name":"Bundle agent"},
+        "mcp":{"mode":"manual"}, "timeoutMs":300000
+    });
+    let run = |plan: &Value| {
+        fs::write(&input, serde_json::to_vec(plan).unwrap()).unwrap();
+        let mut cmd = batch(&app.path, &input, "json");
+        cmd.arg("--node-path")
+            .arg(&node)
+            .arg("--mcp-entry")
+            .arg(&entry)
+            // Only the synthetic runtime is on PATH; the Host comes from the app bundle.
+            .env("PATH", &bin)
+            .env("LOCALAPPDATA", &local)
+            .env("APPDATA", project.join("roaming"));
+        cmd.output().unwrap()
+    };
+    let selection_file = devlink_broker::setup_tools::path(&app.path);
+    let saved_command = || {
+        let stored: Value = serde_json::from_slice(&fs::read(&selection_file).unwrap()).unwrap();
+        stored["selected"]["executable"]["command"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let first = run(&plan);
+    assert_eq!(first.status.code(), Some(3), "{}", text(&first));
+    let error: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "SETUP_MANUAL_ACTION_REQUIRED");
+    assert!(saved_command().contains(r"claude-code\2.1.317\b1\claude.exe"));
+
+    // The app updated itself and removed the previous version folder.
+    tool_fixture::host(
+        &tools.join(r"2.1.321\b2"),
+        "claude",
+        "2.1.321 (Claude Code)",
+    );
+    fs::remove_dir_all(tools.join("2.1.317")).unwrap();
+    plan["project"] = json!({"path":project});
+    plan["agent"] = json!({"action":"use","id":"201","issueToken":false});
+    let resumed = run(&plan);
+    assert_eq!(resumed.status.code(), Some(3), "{}", text(&resumed));
+    let error: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "SETUP_MANUAL_ACTION_REQUIRED");
+    assert!(saved_command().contains(r"claude-code\2.1.321\b2\claude.exe"));
+    assert_eq!(app.state.create_calls.load(Ordering::SeqCst), 1);
+
+    // With the app uninstalled the saved Host is still reported, not replaced.
+    let before = fs::read(&selection_file).unwrap();
+    fs::remove_dir_all(&tools).unwrap();
+    let gone = run(&plan);
+    assert_eq!(gone.status.code(), Some(5), "{}", text(&gone));
+    let error: Value = serde_json::from_slice(&gone.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "SETUP_TOOL_UNAVAILABLE");
+    assert_eq!(
+        error["error"]["recovery"]["action"],
+        "restore_or_reselect_saved_host"
+    );
+    assert_eq!(fs::read(&selection_file).unwrap(), before);
+}
