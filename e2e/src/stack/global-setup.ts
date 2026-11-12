@@ -67,7 +67,8 @@ export default async function globalSetup(_config: FullConfig) {
   const serverCommit = headOf(serverDir);
   const frontendCommit = headOf(frontendDir);
   const latest = process.env.E2E_STACK_MODE === "latest";
-  // Throws before anything starts when the opt-in flag is set without central's two settings.
+  // Throws before anything starts when the opt-in flag is set without the settings central needs
+  // (enabled, plus a key unless it targets a keyless self-hosted endpoint).
   const decisionModel = decisionModelEnvironment();
   if (!latest && (serverCommit !== lock.server.commit || frontendCommit !== lock.frontend.commit)) {
     throw new Error(`Checkouts differ from e2e/stack.lock.json (server ${serverCommit}, frontend ${frontendCommit}). Set E2E_STACK_MODE=latest to run unpinned.`);

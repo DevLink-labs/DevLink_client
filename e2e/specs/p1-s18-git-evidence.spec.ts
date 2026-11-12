@@ -14,9 +14,10 @@ import { expect, test } from "../src/fixtures.ts";
 // Optional: E2E_DECISION_MODEL=1 records how central's role decision model (S15P31D108-241) answers
 // the same questions. It needs a central built from a commit that has the feature (E2E_STACK_MODE=latest
 // with such a checkout) and DECISION_MODEL_ENABLED=true plus DECISION_MODEL_API_KEY in the runner's
-// environment; the harness passes DECISION_MODEL_* to central only with this flag and fails the run
-// if the key appears in a kept file. Every find_agent with an unmatched tag is then one paid model
-// call. The default run uses no model.
+// environment (or DECISION_MODEL_URL with DECISION_MODEL_REQUIRE_API_KEY=false for a keyless
+// self-hosted endpoint); the harness passes DECISION_MODEL_* to central only with this flag and fails the run
+// if the key appears in a kept file. Every find_agent with an unmatched tag is then one model call
+// (paid on OpenRouter). The default run uses no model.
 const run = promisify(execFile);
 const decisionModel = process.env.E2E_DECISION_MODEL === "1";
 const duty = { a: { part: "FRONTEND" as const, roles: ["화면", "UI"] }, b: { part: "BACKEND" as const, roles: ["결제", "로그인"] } };

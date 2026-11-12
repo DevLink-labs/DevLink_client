@@ -5,15 +5,22 @@ import type { Postgres } from "./postgres.ts";
 import { freePort, isRunning, spawnFailure, spawnLogged, stopChild, waitFor } from "./util.ts";
 
 /**
- * Central's optional role decision model (S15P31D108-241). Its settings reach central only when the
- * run opts in with E2E_DECISION_MODEL=1, so a key left in the runner's shell never turns a default
- * run into paid model calls or changes what the role-matching scenarios assert.
+ * Central's optional role decision model (S15P31D108-241, -244). Its settings reach central only when
+ * the run opts in with E2E_DECISION_MODEL=1, so a key left in the runner's shell never turns a default
+ * run into paid model calls or changes what the role-matching scenarios assert. A key is required
+ * unless the run targets a keyless self-hosted endpoint (DECISION_MODEL_REQUIRE_API_KEY=false), the
+ * same rule central applies.
  */
 export function decisionModelEnvironment(): { enabled: boolean; env: NodeJS.ProcessEnv; apiKey?: string } {
   if (process.env.E2E_DECISION_MODEL !== "1") return { enabled: false, env: {} };
-  const apiKey = process.env.DECISION_MODEL_API_KEY?.trim();
-  if (process.env.DECISION_MODEL_ENABLED !== "true" || !apiKey) {
-    throw new Error("E2E_DECISION_MODEL=1 needs DECISION_MODEL_ENABLED=true and DECISION_MODEL_API_KEY for central");
+  const apiKey = process.env.DECISION_MODEL_API_KEY?.trim() || undefined;
+  const keyless = process.env.DECISION_MODEL_REQUIRE_API_KEY === "false";
+  // Keyless only makes sense for a self-hosted endpoint: without a URL central would call the
+  // default provider with no key, every answer would fail, and the run would record nothing useful.
+  const selfHosted = keyless && !!process.env.DECISION_MODEL_URL?.trim();
+  if (process.env.DECISION_MODEL_ENABLED !== "true" || (!apiKey && !selfHosted)) {
+    throw new Error("E2E_DECISION_MODEL=1 needs DECISION_MODEL_ENABLED=true and DECISION_MODEL_API_KEY for central "
+      + "(or DECISION_MODEL_URL with DECISION_MODEL_REQUIRE_API_KEY=false for a keyless self-hosted endpoint)");
   }
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^DECISION_MODEL_/i.test(key)));
   return { enabled: true, env, apiKey };
