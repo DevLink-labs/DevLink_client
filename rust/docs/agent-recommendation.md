@@ -2,7 +2,9 @@
 
 MCP `find_agent({question, repoKey?})` → 로컬 `POST /v1/agents/find` → 중앙 `POST /api/v1/teams/{teamId}/agents/recommendations`.
 
-점수 계산(역할 60·Git 40, 후보 선정)은 중앙이 한다. 브로커는 입력 한도를 미리 확인하고, 중앙 응답을 검증해 로컬 형식으로 바꾼다. 추천 전에 바인딩된 프로젝트의 작업 파일 목록을 중앙에 반영할 수 있다. 수신자 선택과 작업 생성은 별도 절차를 따른다. 추천 과정에서 LLM을 호출하지 않는다.
+점수 계산(역할 60·Git 40, 후보 선정)은 중앙이 한다. 브로커는 입력 한도를 미리 확인하고, 중앙 응답을 검증해 로컬 형식으로 바꾼다. 추천 전에 바인딩된 프로젝트의 작업 파일 목록을 중앙에 반영할 수 있다. 수신자 선택과 작업 생성은 별도 절차를 따른다. 브로커와 MCP 서버는 추천 과정에서 LLM을 호출하지 않는다.
+
+중앙은 기본적으로 역할 태그를 토큰 일치로만 판정한다. 아래 내용은 [DevLink_server#98](https://github.com/SSAFY-URAYAHA/DevLink_server/pull/98)(S15P31D108-241) 기준이며 2026-11-12 작성 시점에 병합되지 않았다. 아래 "중앙 구현 기준"의 `d945f8b`와 `aecdcc3`에는 이 기능이 없다. 서버 운영자가 결정 모델(`gemini-decision-1`)을 켠 배포에서는 토큰으로 일치하지 않은 명시 태그(`roles`)를 모델에 물어 Agent당 한 태그까지 일치를 더한다(server `docs/agent-recommendation.md`의 "역할 태그 결정 모델 보강"). 이때 질문 본문과 팀원의 명시 역할 태그가 중앙에서 Google API로 전송된다. 역할 설명(`roleDescription`)은 전송되지 않는다. 응답 형식, 점수 상한, 상태 규칙은 같아서 브로커와 MCP는 바뀌지 않으며, 응답만으로는 어떤 태그가 모델로 일치했는지 구분할 수 없다. 모델 호출이 실패하면 중앙은 토큰 일치만으로 계산한다.
 
 중앙 구현 기준: server `docs/agent-recommendation.md`. client가 확인한 커밋은 develop `d945f8b`(2026-11-09)와 E2E 고정 커밋 `aecdcc3`이며, 두 커밋의 요청·응답 DTO는 같다.
 
