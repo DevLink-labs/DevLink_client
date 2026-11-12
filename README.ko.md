@@ -1,7 +1,10 @@
 <div align="center">
 
 <a href="https://about.devlink.ai.kr/">
-  <img src="docs/images/devlink-logo-transparent.png" alt="DevLink 소개 페이지로 이동" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/devlink-logo-dark.png">
+    <img src="docs/images/devlink-logo-transparent.png" alt="DevLink 소개 페이지로 이동" width="720">
+  </picture>
 </a>
 
 # DevLink

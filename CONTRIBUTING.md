@@ -19,7 +19,19 @@ DevLink의 버그 수정, 문서·번역, 테스트 개선과 기능 제안을 �
 | `release/{version}` | `develop` | `master`, `develop` |
 | `hotfix/{scope}/{description}` | `master` | `master`, `develop` |
 
-`scope`는 작업 영역에 맞게 `front`, `back`, `ai`, `data`, `bigdata`, `spark`, `kafka`, `infra`, `common` 중에서 선택합니다.
+`scope`는 작업 영역에 맞게 선택합니다.
+
+| Scope | 대상 |
+| --- | --- |
+| `front` | Frontend |
+| `back` | Backend |
+| `ai` | AI / ML |
+| `data` | 데이터 수집 / 전처리 / ETL |
+| `bigdata` | 대용량 데이터 처리 |
+| `spark` | Spark / 분산 처리 |
+| `kafka` | Kafka / 분산 처리 |
+| `infra` | Docker / 서버 / 배포 환경 |
+| `common` | 공통 작업 |
 
 ```text
 feature/front/login
@@ -32,7 +44,19 @@ hotfix/back/auth-error
 
 `type(scope): message` 형식을 사용합니다. `scope`는 브랜치의 작업 영역과 동일하게 지정합니다.
 
-`type`은 변경 목적에 따라 `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `style`, `chore`, `data`를 사용합니다.
+`type`은 변경 목적에 따라 선택합니다.
+
+| Type | 설명 |
+| --- | --- |
+| `feat` | 기능 추가 |
+| `fix` | 버그 수정 |
+| `refactor` | 코드 구조 개선 |
+| `perf` | 성능 개선 |
+| `docs` | 문서 수정 |
+| `test` | 테스트 추가 / 수정 |
+| `style` | 동작에 영향을 주지 않는 코드 수정 |
+| `chore` | 설정 / 패키지 / 빌드 / 기타 작업 |
+| `data` | 데이터셋 / 전처리 변경 |
 
 ```text
 feat(front): 로그인 화면 추가
