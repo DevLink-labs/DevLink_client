@@ -25,61 +25,17 @@ Codex와 Claude Code에서 팀의 Agent를 찾고, 작업을 요청하고, 결�
 
 ## 소개
 
-DevLink는 팀원들이 사용하는 AI 코딩 도구 사이에서 작업 요청과 개발 맥락을 전달하는 협업 도구입니다.
+DevLink는 팀원들의 AI 코딩 도구 사이에서 작업 요청과 개발 맥락을 전달하는 협업 도구입니다. Codex와 Claude Code에서 상대 Agent에게 작업을 요청하고 진행 상황과 결과를 확인할 수 있습니다.
 
-프론트엔드 개발자는 Codex를, 백엔드 개발자는 Claude Code를 사용하더라도 각자의 개발 환경에서 상대 Agent에게 작업을 요청하고 진행 상황과 결과를 확인할 수 있습니다. 요청의 목적·관련 파일·완료 기준을 함께 전달하고, 같은 작업 안에서 질문과 답변을 이어갈 수 있습니다.
-
-이 저장소는 개발자 PC에서 실행하는 **CLI, 로컬 브로커, MCP 서버**를 제공합니다. 팀과 작업을 관리하는 [중앙 서버](https://github.com/SSAFY-URAYAHA/DevLink_server), 화면에서 팀과 작업을 확인하는 [프론트엔드·데스크톱 앱](https://github.com/SSAFY-URAYAHA/DevLink_frontend)은 별도 저장소에서 관리합니다.
+이 저장소는 개발자 PC에서 실행하는 **CLI, 로컬 브로커, MCP 서버**를 제공합니다. 중앙 서버와 연결해 사용하며, 전체 서비스 소개와 데모는 [소개 페이지](https://about.devlink.ai.kr/)에서 확인할 수 있습니다.
 
 ## 주요 기능
 
-- **Codex · Claude Code 연결** — MCP(Model Context Protocol)를 통해 기존 AI 코딩 도구에서 DevLink 기능을 사용합니다.
-- **간편 설정** — `devlink setup`으로 로그인, 팀·프로젝트·도구 선택, Agent 등록, 브로커 시작과 프로젝트 MCP 설정을 진행합니다.
-- **팀 Agent 조회와 담당자 탐색** — 팀의 Agent를 확인하고 역할 태그와 Git 활동을 바탕으로 담당자 후보를 찾습니다. 요청할 대상은 사용자가 선택합니다.
-- **작업 요청과 결과 공유** — 목적과 완료 기준을 담아 작업을 요청하고, 수락·거절·진행·완료·실패 상태와 결과를 확인합니다.
-- **작업별 질문과 팀 맥락 조회** — 작업에 연결된 질문·답변과 팀 파트 간 공유 사항·변경 사항·미해결 쟁점을 확인합니다.
-- **업데이트 확인과 재연결** — 받은 작업, 보낸 작업의 상태 변화와 질문·답변 알림을 조회합니다. 로컬 브로커는 중앙 연결 상태와 재접속을 관리합니다.
-
-## 사용 예시
-
-다음은 연결을 마친 두 팀원이 각자의 AI 코딩 도구에서 사용할 수 있는 대화 예시입니다. Agent 이름과 작업 ID는 실제 조회 결과를 사용합니다.
-
-**1. 팀의 Agent를 확인합니다.**
-
-```text
-우리 팀의 Agent 목록과 담당 역할을 보여줘.
-```
-
-**2. 대상을 지정해 작업을 요청합니다.**
-
-```text
-목록에서 확인한 백엔드 Agent에게 로그인 API 응답 형식 확인을 요청해줘.
-현재 프론트엔드는 사용자 ID와 표시 이름이 필요해.
-완료 기준은 실제 응답 예시와 관련 API 경로를 알려주는 거야.
-```
-
-**3. 수신자는 요청을 확인하고 작업을 수락합니다.**
-
-```text
-내가 받은 작업을 보여줘.
-```
-
-요청 내용을 확인한 뒤:
-
-```text
-방금 확인한 로그인 API 작업을 수락하고, 요청 범위대로 확인해줘.
-결과에는 응답 예시와 실제로 확인한 내용을 기록해줘.
-```
-
-**4. 발신자는 결과를 확인합니다.**
-
-```text
-내가 보낸 로그인 API 작업의 상태와 결과를 보여줘.
-```
-
-로컬 코드 분석·수정·테스트는 수신자가 사용하는 Codex 또는 Claude Code가 수행합니다. DevLink는 요청과 맥락, 상태, 결과를 전달하며, 수신자는 사용자의 수락 지시에 따라 작업을 진행합니다.
-
-자세한 절차는 [Agent 협업 가이드](packages/mcp-server/docs/agent-workflow.md)를 참고하세요.
+- **기존 AI 도구 연결** — MCP를 통해 Codex와 Claude Code에서 팀의 Agent와 협업합니다.
+- **간편 설정** — `devlink setup`으로 로그인부터 프로젝트·Agent 연결과 MCP 설정까지 진행합니다.
+- **팀 Agent 탐색** — 팀의 Agent와 담당 역할을 확인하고, 역할 태그와 Git 활동을 바탕으로 담당자 후보를 찾습니다. 수신자는 사용자가 선택합니다.
+- **작업 요청과 결과 확인** — 목적·관련 파일·완료 기준을 전달하고, 요청의 수락·진행 상태와 완료 결과를 확인합니다.
+- **협업 맥락과 업데이트 조회** — 작업별 질문·답변, 팀의 공유 사항과 미해결 쟁점, 새 작업과 상태 변화를 확인합니다.
 
 ## 빠른 시작
 
@@ -146,21 +102,50 @@ DevLink의 연결 상태와 내 Agent 정보를 확인해줘.
 연결에 문제가 없으면 현재 Agent로 MCP 세션을 연결하고 팀 Agent 목록을 보여줘.
 ```
 
-도구는 `get_connection_status({})` → `get_my_context({})` → `register_agent({})` 순서로 확인·연결합니다. 중앙 연결이 `Connected`, 신원이 `verified`이고 세션 연결 후 `hostSession`이 `bound`인지 확인하세요. `register_agent`는 앞서 준비한 Agent에 세션을 연결하는 도구입니다.
+중앙 서버 연결과 세션 연결이 정상인지, 표시된 Agent와 팀이 설정한 정보와 일치하는지 확인하세요.
 
 문제가 있으면 [MCP 온보딩·연결 진단](packages/mcp-server/docs/onboarding.md#connection-sequence-three-steps)을 참고하세요.
 
-### 5. 새 작업 알림 연결하기 — 선택
+## 사용 예시
 
-세션 시작과 프롬프트 입력 시 새 작업과 상태 변화를 확인하려면 사용하는 도구의 훅을 설치합니다.
+다음은 연결을 마친 두 팀원이 각자의 AI 코딩 도구에서 사용할 수 있는 대화 예시입니다. Agent 이름과 작업 ID는 실제 조회 결과를 사용합니다.
 
-```sh
-# 사용하는 도구에 맞는 명령 하나를 실행합니다.
-devlink hooks install --host codex --yes
-devlink hooks install --host claude-code --yes
+**1. 팀의 Agent를 확인합니다.**
+
+```text
+우리 팀의 Agent 목록과 담당 역할을 보여줘.
 ```
 
-훅은 사용자 계층 설정에 추가됩니다. Codex는 처음 한 번 `/hooks`에서 신뢰 승인이 필요합니다. 자세한 동작은 [업데이트 훅 가이드](rust/docs/update-hook.md)를 참고하세요.
+**2. 대상을 지정해 작업을 요청합니다.**
+
+```text
+목록에서 확인한 백엔드 Agent에게 로그인 API 응답 형식 확인을 요청해줘.
+현재 프론트엔드는 사용자 ID와 표시 이름이 필요해.
+완료 기준은 실제 응답 예시와 관련 API 경로를 알려주는 거야.
+```
+
+**3. 수신자는 요청을 확인하고 작업을 수락합니다.**
+
+```text
+내가 받은 작업을 보여줘.
+```
+
+요청 내용을 확인한 뒤:
+
+```text
+방금 확인한 로그인 API 작업을 수락하고, 요청 범위대로 확인해줘.
+결과에는 응답 예시와 실제로 확인한 내용을 기록해줘.
+```
+
+**4. 발신자는 결과를 확인합니다.**
+
+```text
+내가 보낸 로그인 API 작업의 상태와 결과를 보여줘.
+```
+
+로컬 코드 분석·수정·테스트는 수신자가 사용하는 Codex 또는 Claude Code가 수행합니다. DevLink는 요청과 맥락, 상태, 결과를 전달하며, 수신자는 사용자의 수락 지시에 따라 작업을 진행합니다.
+
+자세한 절차는 [Agent 협업 가이드](packages/mcp-server/docs/agent-workflow.md)를 참고하세요.
 
 ## 동작 구조
 
@@ -169,49 +154,31 @@ flowchart LR
     A[Codex / Claude Code] <-->|MCP · stdio| B[MCP 서버]
     B <-->|로컬 HTTP| C[로컬 브로커]
     C <-->|HTTPS / WebSocket| D[DevLink 중앙 서버]
-    D <--> E[팀원의 DevLink 클라이언트]
 ```
 
-| 구성 요소 | 역할 |
+CLI가 설정과 브로커 실행을 관리하고, MCP 서버가 AI 코딩 도구의 요청을 로컬 브로커에 전달합니다. 브로커는 중앙 서버와 연결해 작업과 상태를 주고받습니다.
+
+### 관련 저장소
+
+| 저장소 | 역할 |
 | --- | --- |
-| CLI | 로그인, 팀·Agent 선택, 프로젝트 설정, 브로커 시작·중지·상태 확인 |
-| 로컬 브로커 | 중앙 서버 연결, 로컬 세션, 작업 수신함과 업데이트 관리 |
-| MCP 서버 | AI 코딩 도구가 호출하는 Agent·작업·맥락 도구 제공 |
-| 중앙 서버 | 사용자·팀·Agent·작업과 협업 이력 관리 |
-
-## MCP 도구
-
-| 목적 | 주요 도구 |
-| --- | --- |
-| 연결 상태와 내 정보 확인 | `get_connection_status`, `get_my_context`, `register_agent` |
-| 팀 Agent 조회·탐색·정보 변경 | `list_agents`, `find_agent`, `update_agent` |
-| 작업 요청 | `create_task` |
-| 작업 수락·거절·진행·실패 처리 | `update_task_status` |
-| 완료 결과 등록 | `complete_task` |
-| 작업 목록·상세·결과 조회 | `get_tasks`, `get_task_result` |
-| 작업별 질문·답변 | `ask_question`, `answer_question` |
-| 팀 맥락과 새 업데이트 조회 | `get_team_context`, `get_updates` |
-
-입력 형식과 예제는 [MCP 도구 문서](packages/mcp-server/docs/tool-contracts-v0.1.md)를 참고하세요.
-
-## 개발하기
-
-소스 빌드, 검사·테스트, 저장소 구조와 개발 참여 절차는 [기여 가이드](CONTRIBUTING.md)를 참고하세요.
+| **DevLink_client — 현재 저장소** | CLI, 로컬 브로커, MCP 서버 |
+| [DevLink_server](https://github.com/SSAFY-URAYAHA/DevLink_server) | 사용자·팀·Agent·작업 관리와 API |
+| [DevLink_frontend](https://github.com/SSAFY-URAYAHA/DevLink_frontend) | 팀·작업 대시보드와 데스크톱 앱 |
 
 ## 문서
 
 | 문서 | 내용 |
 | --- | --- |
-| [간편설정 규격](contracts/setup/v1/README.md) | 설정 호출·단계·오류 계약 |
-| [설치·CLI 안내](rust/README.md) | 릴리스 설치, 소스 빌드, 기본 명령 |
-| [간편 설정](rust/docs/setup.md) | 로그인부터 프로젝트 연결, 프로필과 복구 |
-| [MCP 서버 안내](packages/mcp-server/README.md) | MCP 실행 환경과 도구 설정 |
-| [MCP 온보딩](packages/mcp-server/docs/onboarding.md) | 연결 순서와 상태 진단 |
-| [Agent 협업 가이드](packages/mcp-server/docs/agent-workflow.md) | 요청·수락·질문·결과 공유 절차 |
-| [Codex 사용 지침](packages/mcp-server/docs/hosts/codex.md) | Codex에서 사용할 협업 지침 |
-| [Claude Code 사용 지침](packages/mcp-server/docs/hosts/claude-code.md) | Claude Code에서 사용할 협업 지침 |
-| [중앙 서버 연동 현황](contracts/central/current-state.md) | 현재 API·인증 계약과 확인 범위 |
-| [검증 기록](rust/docs/verification.md) | 실행 환경별 검증 결과와 한계 |
+| [설치·CLI 안내](rust/README.md) | 운영체제별 설치와 기본 명령 |
+| [프로젝트 설정](rust/docs/setup.md) | 로그인, Agent·프로젝트 연결, 프로필과 복구 |
+| [MCP 연결 진단](packages/mcp-server/docs/onboarding.md) | 연결 확인 순서와 문제 해결 |
+| [Agent 협업 가이드](packages/mcp-server/docs/agent-workflow.md) | 요청·수락·질문·결과 공유 |
+| [MCP 도구 상세](packages/mcp-server/docs/tool-contracts-v0.1.md) | 전체 업무 도구 목록, 입력 형식과 예제 |
+| [업데이트 훅](rust/docs/update-hook.md) | 세션 시작·프롬프트 입력 시 새 작업과 상태 확인 |
+| [개발 문서](rust/docs/README.md) | 브로커 구조와 서버 연동 등 기술 문서 |
+
+소스 빌드, 검사·테스트와 개발 참여 절차는 [기여 가이드](CONTRIBUTING.md)를 참고하세요.
 
 ## 기여하기
 
