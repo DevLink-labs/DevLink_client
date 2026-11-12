@@ -439,8 +439,8 @@ pub(crate) fn settle(config_path: &Path, origin: &str, agent: u64, task_id: u64)
 /// Background worker while the broker runs. Every minute, tasks about to be decided are
 /// looked up in central first, then `scan` runs; tasks the lookup cap left unasked stay
 /// undecided until a later minute. A central READY starts a round that looks up every
-/// unfinished task once, `MAX_PER_PASS` at a time every `ROUND_INTERVAL`. Failures are
-/// retried next round; passes never overlap.
+/// unfinished task, `MAX_PER_PASS` at a time every `ROUND_INTERVAL`. Temporary REST
+/// failures are retried in the same round. Passes never overlap.
 pub async fn run(
     config_path: PathBuf,
     minutes: u64,
@@ -472,13 +472,12 @@ pub(crate) async fn run_every(
     let wake = recovery.as_ref().map(Recovery::wake);
     // A READY never postpones the minute check, however often it comes.
     let mut next_scan = tokio::time::Instant::now() + scan_interval;
-    // Start of the READY round still in progress.
-    let mut round: Option<std::time::Instant> = None;
+    // Keep the READY time and the next pass deadline across scan ticks.
+    let mut round: Option<(std::time::Instant, tokio::time::Instant)> = None;
     loop {
-        let deadline = match round {
-            Some(_) => next_scan.min(tokio::time::Instant::now() + round_interval),
-            None => next_scan,
-        };
+        let deadline = round
+            .as_ref()
+            .map_or(next_scan, |(_, next_pass)| next_scan.min(*next_pass));
         let ready = tokio::select! {
             _ = cancel.cancelled() => return,
             _ = async {
@@ -490,9 +489,9 @@ pub(crate) async fn run_every(
             _ = tokio::time::sleep_until(deadline) => false,
         };
         if ready {
-            round = Some(std::time::Instant::now());
+            round = Some((std::time::Instant::now(), tokio::time::Instant::now()));
         }
-        if !ready && tokio::time::Instant::now() >= next_scan {
+        if tokio::time::Instant::now() >= next_scan {
             next_scan = tokio::time::Instant::now() + scan_interval;
             if minutes > 0 {
                 // One time for the lookup and the scan, so no task becomes due in between.
@@ -514,13 +513,16 @@ pub(crate) async fn run_every(
                         .await;
             }
         }
-        if let (Some(recovery), Some(since)) = (&recovery, round) {
-            tokio::select! {
+        if let (Some(recovery), Some((since, next_pass))) = (&recovery, round)
+            && tokio::time::Instant::now() >= next_pass
+        {
+            let pass = tokio::select! {
                 _ = cancel.cancelled() => return,
-                pass = recovery.pass(&config_path, Scope::Round { since }) => {
-                    round = pass.more.then_some(since);
-                }
-            }
+                pass = recovery.pass(&config_path, Scope::Round { since }) => pass,
+            };
+            round = pass
+                .more
+                .then(|| (since, tokio::time::Instant::now() + round_interval));
         }
     }
 }

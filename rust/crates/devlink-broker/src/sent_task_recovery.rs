@@ -10,11 +10,10 @@
 //! eventId derived from the task, so the update feed, `get_updates` and the Host hook show
 //! it once and a late socket event for the task is dropped as a duplicate.
 //!
-//! Lookups only read central. A failed, unauthorized or missing (404) lookup changes
-//! nothing and waits for the next READY or check. Each pass makes at most one call per
-//! unfinished task and at most `MAX_PER_PASS` calls, one at a time. Tasks past the cap
-//! are not decided overdue until they are looked up, and the round a READY starts goes on
-//! in later passes until every task was asked once.
+//! Each pass makes at most `MAX_PER_PASS` calls, one at a time. Tasks past the cap are
+//! not decided overdue until they are looked up. A READY round continues in later passes
+//! until it has checked every task. A temporary REST failure stops the current pass and
+//! leaves the failed and unqueried tasks for a later pass on the same connection.
 use crate::{
     central::{CentralState, ConnectionStatus, endpoint_url},
     notifications::{
@@ -26,7 +25,12 @@ use crate::{
 };
 use anyhow::Result;
 use serde::Deserialize;
-use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
 use tokio::sync::{Mutex, Notify};
 
 /// Calls in one pass. Tasks not reached go first in the next pass.
@@ -41,8 +45,16 @@ enum Lookup {
     Open,
     /// This task only (deleted, malformed or foreign answer): try it again later.
     Skip,
-    /// Central unavailable or the credential refused: end the pass.
+    /// Temporary REST failure: stop this pass and continue the READY round later.
+    Retry,
+    /// Credential refused or another non-retryable failure: end the round.
     Stop,
+}
+
+struct Attempt {
+    at: Instant,
+    /// Last lookup resolved for the round, including a task-specific skip.
+    checked_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -53,7 +65,7 @@ pub struct Recovery {
     origin: String,
     wake: Arc<Notify>,
     /// Last lookup per task in this process, so a capped pass reaches every task in turn.
-    attempted: Arc<Mutex<HashMap<u64, Instant>>>,
+    attempted: Arc<Mutex<HashMap<u64, Attempt>>>,
 }
 
 impl Recovery {
@@ -118,22 +130,31 @@ impl Recovery {
             .filter(|task| team.is_none_or(|team| team == task.team_id))
             .collect();
         if let Scope::Round { since } = scope {
-            let open: std::collections::HashSet<u64> = tasks.iter().map(|t| t.task_id).collect();
+            let open: HashSet<u64> = tasks.iter().map(|t| t.task_id).collect();
             attempted.retain(|task, _| open.contains(task));
-            // A round asks each task once, however many passes that takes.
-            tasks.retain(|task| attempted.get(&task.task_id).is_none_or(|at| *at < since));
+            tasks.retain(|task| {
+                attempted
+                    .get(&task.task_id)
+                    .and_then(|attempt| attempt.checked_at)
+                    .is_none_or(|at| at < since)
+            });
         }
         // Never looked up first, then the longest ago; newer tasks first among equals.
         tasks.sort_by_key(|task| {
             (
-                attempted.get(&task.task_id).copied(),
+                attempted.get(&task.task_id).map(|attempt| attempt.at),
                 std::cmp::Reverse(task.created_at_ms),
             )
         });
         let rest = tasks.split_off(tasks.len().min(MAX_PER_PASS));
-        let mut stopped = false;
+        outcome.more = !rest.is_empty();
         for task in tasks {
-            attempted.insert(task.task_id, Instant::now());
+            let at = Instant::now();
+            let attempt = attempted.entry(task.task_id).or_insert(Attempt {
+                at,
+                checked_at: None,
+            });
+            attempt.at = at;
             let lookup = decode(
                 self.client.task_detail::<Detail>(task.task_id).await,
                 &self.origin,
@@ -145,7 +166,7 @@ impl Recovery {
                     // The answer was read for this Agent; another Agent connected since must
                     // not receive it. A plain disconnect keeps the verified answer.
                     if self.connected().await.is_some_and(|(now, _)| now != agent) {
-                        stopped = true;
+                        outcome.more = false;
                         break;
                     }
                     if self
@@ -163,16 +184,18 @@ impl Recovery {
                     .await;
                 }
                 Lookup::Open | Lookup::Skip => {}
+                Lookup::Retry => {
+                    outcome.more = matches!(scope, Scope::Round { .. });
+                    break;
+                }
                 Lookup::Stop => {
-                    stopped = true;
+                    outcome.more = false;
                     break;
                 }
             }
+            attempt.checked_at = Some(at);
         }
-        // Tasks past the cap were never asked: the overdue scan waits for their lookup, and
-        // a round continues with them. Tasks a failed central left unasked are decided as
-        // before and wait for the next READY.
-        outcome.more = !stopped && !rest.is_empty();
+        // Only the cap defers an overdue decision. A REST failure leaves the advisory in effect.
         outcome.held = rest
             .into_iter()
             .map(|task| (self.origin.clone(), agent, task.task_id))
@@ -186,7 +209,7 @@ impl Recovery {
 pub(crate) enum Scope {
     /// Those the overdue scan at `now_ms` decides, right before it does.
     Due { minutes: u64, now_ms: u64 },
-    /// Every task not looked up since `since` (the READY that started the round).
+    /// Unfinished tasks still to check since the READY that started the round.
     Round { since: Instant },
 }
 
@@ -197,7 +220,7 @@ pub(crate) struct Pass {
     pub stored: usize,
     /// Tasks in scope left unasked by the per-pass cap, as (origin, agent, taskId): the
     /// overdue scan must not decide them before they are looked up.
-    pub held: std::collections::HashSet<(String, u64, u64)>,
+    pub held: HashSet<(String, u64, u64)>,
     /// A round has tasks left for another pass.
     pub more: bool,
 }
@@ -239,7 +262,9 @@ fn decode(
         }
         // A malformed answer (or one without the fields of `Detail`) is about this reply only.
         Err(error) if error.code == "CENTRAL_PROTOCOL_ERROR" => return Lookup::Skip,
-        // Unavailable, timed out, 401 or 403: the next call would fail the same way.
+        Err(error) if matches!(error.code, "CENTRAL_UNAVAILABLE" | "CENTRAL_TIMEOUT") => {
+            return Lookup::Retry;
+        }
         Err(_) => return Lookup::Stop,
     };
     if detail.task_id != task.task_id
@@ -298,6 +323,7 @@ mod tests {
         Json, Router,
         extract::{Path as UrlPath, State},
         http::StatusCode,
+        response::{IntoResponse, Response},
         routing::get,
     };
     use serde_json::{Value, json};
@@ -316,6 +342,7 @@ mod tests {
     struct Central {
         answers: Arc<std::sync::Mutex<HashMap<u64, (StatusCode, Value)>>>,
         calls: Arc<AtomicUsize>,
+        unavailable_once: Arc<std::sync::Mutex<Option<u64>>>,
     }
     impl Central {
         fn answer(&self, task: u64, code: StatusCode, body: Value) {
@@ -351,17 +378,23 @@ mod tests {
         })
     }
 
-    async fn task_route(
-        State(central): State<Central>,
-        UrlPath(task): UrlPath<u64>,
-    ) -> (StatusCode, Json<Value>) {
+    async fn task_route(State(central): State<Central>, UrlPath(task): UrlPath<u64>) -> Response {
         central.calls.fetch_add(1, Ordering::SeqCst);
+        if central
+            .unavailable_once
+            .lock()
+            .unwrap()
+            .take_if(|id| *id == task)
+            .is_some()
+        {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Service unavailable").into_response();
+        }
         let answer = central.answers.lock().unwrap().get(&task).cloned();
         let (code, body) = answer.unwrap_or((
             StatusCode::NOT_FOUND,
             json!({"success":false,"code":"RESOURCE_NOT_FOUND"}),
         ));
-        (code, Json(body))
+        (code, Json(body)).into_response()
     }
 
     struct Fixture {
@@ -882,6 +915,59 @@ mod tests {
         cancel.cancel();
         worker.await.unwrap();
         assert_eq!(f.central.calls(), total as usize);
+    }
+
+    #[tokio::test]
+    async fn a_ready_round_retries_after_a_503_with_the_overdue_check_off() {
+        assert_ready_round_retries_after_a_503(0).await;
+    }
+
+    #[tokio::test]
+    async fn a_ready_round_retries_after_a_503_for_already_overdue_tasks() {
+        assert_ready_round_retries_after_a_503(1).await;
+    }
+
+    async fn assert_ready_round_retries_after_a_503(minutes: u64) {
+        let f = fixture().await;
+        let ledger = sent_tasks::Ledger::new(&f.config, &f.origin).unwrap();
+        let ledger = if minutes == 0 {
+            ledger.without_overdue()
+        } else {
+            ledger
+        };
+        ledger.record_now(AGENT, TEAM, 1, 0).unwrap();
+        ledger.record_now(AGENT, TEAM, 2, 1).unwrap();
+        if minutes > 0 {
+            assert_eq!(sent_tasks::scan(&f.config, minutes, MINUTE + 1).unwrap(), 2);
+        }
+        // Newer task 2 is asked first. Task 1 hasn't been asked when the pass stops.
+        *f.central.unavailable_once.lock().unwrap() = Some(2);
+        f.central.task(1, "COMPLETED", 3);
+        f.central.task(2, "COMPLETED", 3);
+
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(sent_tasks::run_every(
+            f.config.clone(),
+            minutes,
+            Some(f.recovery.clone()),
+            cancel.clone(),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(100),
+        ));
+        f.recovery.wake().notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while f.events().len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        worker.await.unwrap();
+        assert!(result.is_ok(), "made {} detail calls", f.central.calls());
+        assert_eq!(f.central.calls(), 3);
+        let mut recovered: Vec<_> = f.events().iter().map(TaskNotification::task_id).collect();
+        recovered.sort_unstable();
+        assert_eq!(recovered, [1, 2]);
     }
 
     #[tokio::test]

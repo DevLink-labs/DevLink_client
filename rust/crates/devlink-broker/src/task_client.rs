@@ -322,6 +322,10 @@ impl TaskClient {
             .map_err(transport_error)?;
         let status = response.status().as_u16();
         denial(status)?;
+        // A proxy can return a 5xx with an empty or non-JSON body.
+        if (500..600).contains(&status) {
+            return Err(central_error(status, None));
+        }
         if status != 200 {
             let envelope = limited_envelope(&mut response).await?;
             return Err(central_error(status, envelope.code.as_deref()));
