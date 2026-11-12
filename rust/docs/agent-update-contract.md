@@ -109,11 +109,26 @@ part·roles를 넣었다(중앙이 보낸 경우에만). 세 결과는 MCP에서
 목록 전체가 실패하지 않게 하기 위해서다(이 확인은 작업 생성·탐색 경로도 거친다). 반대로 새
 MCP가 이전 브로커에 part·roles 값을 보내면 브로커가 모르는 필드라 VALIDATION_FAILED로 거부한다.
 null은 MCP가 빼고 보내므로 이전 브로커에서도 나머지 필드 수정은 된다.
-`get_my_context`의 `agent`에는 넣지 않았다. 이 응답은
+`get_my_context`의 `agent`에는 이 스토리에서 넣지 않았다. 이 응답은
 [context schema](../../contracts/local-broker/v1/context.schema.json)가 필드를 고정하고 MCP가
-알 수 없는 필드를 거부한다. 그래서 브로커만 먼저 바뀌면 실행 중인 이전 MCP에서
-`get_my_context`가 BROKER_PROTOCOL_ERROR가 된다. 문맥에 넣으려면 계약 버전과 설치 파일 갱신
-순서를 함께 정해야 하므로 이 스토리에서는 하지 않았다. `contracts/local-broker/v1`은 바뀌지 않았다.
+알 수 없는 필드를 거부하기 때문이다. 이 스토리에서 `contracts/local-broker/v1`은 바뀌지 않았다.
+
+**2026-11-12 갱신: `get_my_context`에 part·roles 추가 (S15P31D108-240).** 3차 API 명세의 MCP Tool 명세
+(`get_my_context`: 내 Agent 문맥에 part·roles 추가)에 따라 `agent.part`·`agent.roles`를 넣었다.
+규칙은 위와 같다. 중앙 `/agents/me`가 문자열 part, 문자열 배열 roles를 보낸 경우에만 넣고,
+없거나 null이거나 형식이 다르면 그 필드만 뺀다. 기본값(OTHER, 빈 목록)으로 채우지 않으며
+`roles: []`는 중앙이 태그 없음을 알린 값이다. 이 값 때문에 문맥 조회가 실패하지 않는다.
+context schema에는 두 필드를 선택 필드로 추가했다.
+
+- 새 MCP와 이전 브로커: 두 필드가 선택이라 그대로 동작한다(필드가 없을 뿐이다).
+- 이전 MCP와 새 브로커: 중앙이 part나 roles를 보내 브로커가 필드를 넣은 경우, 실행 중인 이전
+  MCP 프로세스는 모르는 필드를 거부하므로 `get_my_context`가 BROKER_CONTEXT_INVALID가 된다.
+  중앙이 두 값을 모두 보내지 않으면 필드가 없어 이전 MCP도 동작한다. 이 실패는 MCP 프로세스의
+  차단 상태로 남지 않고 업무 도구는 계속 동작하지만, MCP를 갱신할 때까지 `get_my_context`는
+  호출마다 실패한다. 이전 MCP의 오류 문구와 `inspect_profile_then_rebind` 안내는 인증·프로필
+  확인을 가리키므로 로그인 문제로 오해하기 쉽다. 원인은 버전 차이다.
+- 계약 버전은 올리지 않았다. 대신 브로커를 갱신하면 MCP 런타임도 같은 배포본으로 갱신하고
+  Host(MCP 프로세스)를 다시 열어야 한다.
 
 **검증 (2026-11-10, 로컬 Windows).**
 

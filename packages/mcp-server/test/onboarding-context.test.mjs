@@ -57,6 +57,20 @@ test('unknown metadata is explicit and malformed IDs/identity contradictions fai
   const bad=verified();bad.principal=null;set(bad);
   await assert.rejects(client.getMyContext(),{code:'BROKER_CONTEXT_INVALID'});
 });
+test('part and roles pass through only as the broker reported them',async t=>{
+  const {client,set}=await fixture(t);
+  const reported=verified();reported.agent.part='BACKEND';reported.agent.roles=['로그인','결제 API'];
+  set(reported);assert.deepEqual((await client.getMyContext()).data,reported);
+  // No tags is a reported value; an unknown part string must not fail the read.
+  const cleared=verified();cleared.agent.part='DESIGN';cleared.agent.roles=[];
+  set(cleared);assert.deepEqual((await client.getMyContext()).data,cleared);
+  // Absent stays absent: nothing is defaulted to OTHER or [].
+  set(verified());const absent=(await client.getMyContext()).data.agent;
+  assert.equal('part' in absent,false);assert.equal('roles' in absent,false);
+  for(const patch of [{part:null},{roles:null},{part:7},{roles:'로그인'},{roles:['로그인',3]}]){
+    const v=verified();Object.assign(v.agent,patch);assert.equal(contextSchema.safeParse(v).success,false);
+  }
+});
 for(const field of ['userId','teamId','agentId','project'])test(`changed ${field} cannot replace observed context`,async t=>{
   const {client,set}=await fixture(t);await client.getMyContext();const value=verified();
   if(field==='project')value.project={path:'C:\\other',source:'bound_profile'};else value.principal[field]='99';

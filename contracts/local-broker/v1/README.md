@@ -28,6 +28,8 @@ JSON Schema draft 2020-12는 `packages/mcp-server/src/broker/schemas.ts`의 Zod 
 
 2026-11-02 (-140): GET /v1/context와 get_my_context({})는 세션 생성·bind·lease 갱신 없이 문맥을 조회한다. localToken 인증과 Origin 거부를 적용한다. 출처·미연결 상태·변경 차단·요청 헤더와 예제는 [온보딩 계약](../../../packages/mcp-server/docs/onboarding.md)을 따른다. context schema는 broker/onboarding.ts에서 생성하며 기존 v0.1 principal schema와 구분한다.
 
+2026-11-12 (-240): context schema의 `agent`에 선택 필드 `part`(문자열)·`roles`(문자열 배열)를 추가했다. 중앙 `/agents/me`가 보낸 경우에만 있고, 없으면 기본값으로 읽지 않는다. 브로커만 먼저 갱신하면 중앙이 두 값 중 하나라도 보내는 Agent에서 실행 중인 이전 MCP 프로세스의 `get_my_context`가 BROKER_CONTEXT_INVALID가 되므로 MCP 런타임을 함께 갱신하고 Host를 다시 연다. 근거는 [Agent 수정 계약](../../../rust/docs/agent-update-contract.md#part와-roles-s15p31d108-183)에 있다.
+
 ### MCP 프로세스 차단 진단 확장
 
 MCP `get_connection_status`는 공통 ConnectionSnapshot에 `mcp: running`과 선택
