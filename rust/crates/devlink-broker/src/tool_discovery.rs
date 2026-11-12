@@ -609,6 +609,16 @@ async fn probe(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Codex creates helper launchers and a lock file under CODEX_HOME every time it
+    // starts, `--version` included. With the caller's environment those land in the
+    // user's Codex home, even for someone who only has the Codex desktop app
+    // installed. The probe needs no Codex state, so it gets the scratch directory.
+    // Codex 0.167 refuses to create the helpers under the system temp directory and
+    // only warns on stderr; anything a Codex does write there goes away with the
+    // directory (best effort, like the working directory itself).
+    if tool == ToolType::Codex {
+        command.env("CODEX_HOME", cwd.path());
+    }
     #[cfg(windows)]
     command.creation_flags(0x08000000);
     let mut child = command
