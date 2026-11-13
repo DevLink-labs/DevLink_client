@@ -9,6 +9,8 @@
 | 허용 | 원격 해시(`repoKey`), 브랜치, 파일 상대 경로, 변경 유형, 커밋 SHA와 시각, 작성자(본인 userId 또는 미확인) |
 | 제외 | 절대 경로, diff·파일 내용, 원격 URL 원문, 커밋 작성자 이메일 원문 |
 
+이 범위는 브로커가 중앙에 올리는 값에 대한 것이다. 중앙이 담당 Agent 추천에 결정 모델을 켠 배포에서 그 모델 호출에 담기는 값은 질문 본문과 명시 역할 태그이며, 위 Git 근거(경로, 커밋, 작업 파일)는 담기지 않는다([DevLink_server#98](https://github.com/SSAFY-URAYAHA/DevLink_server/pull/98) 기준, 2026-11-13에 server `develop`에 병합, 그 시점에 운영 미배포. [담당 Agent 추천 중계](agent-recommendation.md), S15P31D108-241).
+
 타입에는 제외 항목을 담을 필드가 없다. 생성자는 아래 검증을 통과한 값만 받는다.
 
 - `RepoKey`: 정규화한 원격 URL의 SHA-256(소문자 16진수 64자리)만 받는다. 값은 `dependency_repo_key`로 계산한다. URL 원문은 거부한다.
