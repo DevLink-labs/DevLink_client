@@ -113,6 +113,39 @@ async fn discovery_reports_missing_available_failure_and_invalid_output_without_
     }
 }
 
+/// A real Codex creates `tmp/arg0-*/…` helper launchers and a lock under CODEX_HOME on
+/// every start, `--version` included, so a probe that inherits the caller's value leaves
+/// files in the user's Codex home (client #156).
+#[tokio::test]
+async fn codex_probe_gets_a_scratch_codex_home_and_claude_keeps_the_callers_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let codex = tool_fixture::host(root.path(), "codex", "codex-cli 0.166.0");
+    let claude = tool_fixture::host(root.path(), "claude", "2.1.317 (Claude Code)");
+    let reports = search(root.path()).detect(None, None).await;
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.status == DetectionStatus::Available)
+    );
+    let callers = std::env::var_os("CODEX_HOME")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let given = fs::read_to_string(codex.with_extension("home")).unwrap();
+    assert!(Path::new(&given).is_absolute(), "{given:?}");
+    assert_ne!(given, callers);
+    // It is the probe's own scratch working folder, which is gone once the probe ends.
+    assert_eq!(
+        fs::read_to_string(codex.with_extension("home-is-cwd")).unwrap(),
+        "yes"
+    );
+    assert!(!Path::new(&given).exists());
+    // Only the Codex probe is redirected.
+    assert_eq!(
+        fs::read_to_string(claude.with_extension("home")).unwrap(),
+        callers
+    );
+}
+
 #[tokio::test]
 async fn probe_deadline_terminates_a_stalled_host() {
     let root = tempfile::tempdir().unwrap();
