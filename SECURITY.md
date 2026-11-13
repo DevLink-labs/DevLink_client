@@ -1,26 +1,24 @@
-# 보안 정책
+# Security Policy
 
-## 취약점 제보
+**English** · [한국어](SECURITY.ko.md)
 
-인증 우회, 토큰 노출, 권한 검사 오류, 의도하지 않은 파일 접근 등 보안 문제는 비공개 경로로 알려주세요.
+## Reporting a Vulnerability
 
-1. 저장소의 [Security Advisories](https://github.com/SSAFY-URAYAHA/DevLink_client/security/advisories)에서 **Report a vulnerability** 버튼이 제공되는지 확인하고, 제공된다면 비공개로 제보합니다.
-2. 비공개 제보 기능을 사용할 수 없다면 [Issues](https://github.com/SSAFY-URAYAHA/DevLink_client/issues)에서 취약점 내용 없이 관리자에게 비공개 연락 경로만 요청합니다.
+Please report security vulnerabilities, such as authentication bypasses, token exposure, and authorization flaws, through GitHub's private vulnerability reporting feature.
 
-공개 Issue나 PR에는 악용 가능한 재현 절차, 공격 코드, 개인정보, 실제 비밀번호와 토큰을 올리지 마세요. 전용 신고 이메일과 응답 기한은 아직 정해져 있지 않습니다.
+Go to **Security → Advisories → Report a vulnerability** in the affected repository. Do not disclose vulnerability details in public issues or pull requests.
 
-## 비공개 제보에 포함할 내용
+For general bugs and feature requests, use the repository's Issues page.
 
-- 영향을 받는 버전 또는 커밋, 운영체제와 관련 도구 버전
-- 문제의 영향과 발생 조건
-- 재현 절차 또는 최소 재현 예제
-- 비밀값과 개인정보를 제거한 로그 또는 화면 자료
-- 가능한 경우 해결 방향
+## What to Include
 
-조사는 본인이 소유하거나 명시적으로 허가받은 환경에서 진행하고, 다른 사용자의 데이터에 접근하거나 서비스를 방해하지 마세요.
+- The affected version or commit, operating system, and relevant tool versions
+- The impact and conditions required to trigger the issue
+- Reproduction steps or a minimal proof of concept
+- Logs or screenshots with secrets and personal information removed
 
-## 지원 버전
+Do not include real passwords, tokens, or personal information. Reproduce the issue only in environments you own or are authorized to test.
 
-현재 버전별 보안 지원 기간은 별도로 정해져 있지 않습니다. 제보할 때 사용한 릴리스 태그 또는 커밋을 명시해 주세요. 보안 수정의 적용 대상과 공개 시점은 문제를 확인한 뒤 결정합니다.
+## Handling and Disclosure
 
-일반 오류와 기능 제안은 [Issues](https://github.com/SSAFY-URAYAHA/DevLink_client/issues), 개발 참여 절차는 [기여 가이드](CONTRIBUTING.md)를 참고하세요.
+Maintainers will verify the issue and assess its impact before preparing and releasing a fix. The timing of public disclosure will be coordinated with the reporter.
