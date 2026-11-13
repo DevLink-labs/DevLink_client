@@ -10,7 +10,8 @@ async function inboxHas(actor: Actor, taskId: string) {
 
 // S15P31D108-188 (FIND-3-01): MCP find_agent -> Rust broker -> central recommendation API.
 // S15P31D108-190 (REQ-3-01): a picked candidate receives the task through create_task.
-// Git collection (IDX-3-01/02) is not implemented yet, so only role evidence can score here.
+// The actor projects have no Git remote, so the collectors (IDX-3-01/02) stay off and only role
+// evidence can score here. S18 covers Git evidence.
 test("S15 find_agent relays the central recommendation @p1", async ({ seedTeam, connectMcp }) => {
   // Two desktop setups, a 60 s OFFLINE wait and a reconnect observation.
   test.setTimeout(300_000);
@@ -34,7 +35,7 @@ test("S15 find_agent relays the central recommendation @p1", async ({ seedTeam, 
     expect(candidate.matchedRoles).toEqual(["로그인"]);
     expect(candidate.score).toBeGreaterThan(0);
     expect(candidate.scores.role).toBeGreaterThan(0);
-    // No Git collection exists yet (IDX-3-01/02): role-only scoring, reported apart from missing evidence.
+    // Nothing was collected for this team (no remote): role-only scoring, reported apart from missing evidence.
     expect(found.gitCoverage).toEqual({ state: "NOT_COLLECTED", reason: "NO_TEAM_REPOSITORIES", workingState: "NOT_COLLECTED" });
     expect(candidate.scores).toEqual({ role: 20, git: 0, working: 0, frequency: 0, recency: 0 });
     expect(candidate.relatedFiles).toEqual([]);

@@ -72,7 +72,7 @@ devlink agent update --clear-roles
 - 응답의 ID·소유자·팀·name·toolType과 요청한 값이 모두 맞아야 성공이다. 어긋나면 결과 불명(unknown)으로 보고하고 로컬 프로필을 바꾸지 않는다.
 - PATCH가 4xx로 거부되면 rejected다. 전송 실패·5xx·응답 불일치는 중앙에 반영됐을 수 있으므로 결과 불명으로 안내한다. PATCH 전 단계(세션·팀·Agent 조회)의 연결 실패도 지금은 unknown으로 보고하는데, 안전한 쪽으로 틀리는 분류라 그대로 두었다.
 - 성공하면 프로필에 캐시한 projectName·roleDescription·part·roles만 갱신한다. part·roles는 중앙 응답에 있을 때만 갱신한다. ID·projectRoot·토큰은 그대로이고, 그 사이 다른 작업이 프로필을 바꿨으면 덮어쓰지 않고 `localProfileSynced:false`로 알린다. 새 Agent 생성·토큰 발급은 하지 않는다.
-- 브로커는 Agent 정보를 중앙 `/agents/me`에서 실시간으로 읽으므로, 수정 후 `get_my_context`에 새 projectName·roleDescription이 바로 보인다. part·roles는 `get_my_context`에 넣지 않았고 `update_agent` 결과와 `register_agent`·`list_agents` 결과에서 본다. 뒤의 두 결과는 중앙이 준 값을 그대로 전달하며, 중앙 응답에 없으면 필드가 없다. 프로필 바인딩(ID·팀·projectRoot·도구)은 바뀌지 않아 실행 중인 브로커를 멈출 필요가 없다.
+- 브로커는 Agent 정보를 중앙 `/agents/me`에서 실시간으로 읽으므로, 수정 후 `get_my_context`에 새 projectName·roleDescription이 바로 보인다. part·roles도 중앙이 보낸 경우 `get_my_context`의 `agent.part`·`agent.roles`에 보이며(보내지 않으면 필드가 없다), `update_agent` 결과와 `register_agent`·`list_agents` 결과에서도 본다. 뒤의 두 결과는 중앙이 준 값을 그대로 전달하며, 중앙 응답에 없으면 필드가 없다. 프로필 바인딩(ID·팀·projectRoot·도구)은 바뀌지 않아 실행 중인 브로커를 멈출 필요가 없다.
 
 **MCP 경로의 권한.** 중앙 PATCH가 사용자 세션만 받으므로, 브로커는 이 PC의 `devlink auth login` 세션 파일을 읽어 호출한다. 이 경로를 쓰는 조건은 다음과 같다.
 

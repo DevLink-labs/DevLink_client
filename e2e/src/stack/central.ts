@@ -4,6 +4,28 @@ import { join } from "node:path";
 import type { Postgres } from "./postgres.ts";
 import { freePort, isRunning, spawnFailure, spawnLogged, stopChild, waitFor } from "./util.ts";
 
+/**
+ * Central's optional role decision model (S15P31D108-241, -244). Its settings reach central only when
+ * the run opts in with E2E_DECISION_MODEL=1, so a key left in the runner's shell never turns a default
+ * run into paid model calls or changes what the role-matching scenarios assert. A key is required
+ * unless the run targets a keyless self-hosted endpoint (DECISION_MODEL_REQUIRE_API_KEY=false), the
+ * same rule central applies.
+ */
+export function decisionModelEnvironment(): { enabled: boolean; env: NodeJS.ProcessEnv; apiKey?: string } {
+  if (process.env.E2E_DECISION_MODEL !== "1") return { enabled: false, env: {} };
+  const apiKey = process.env.DECISION_MODEL_API_KEY?.trim() || undefined;
+  const keyless = process.env.DECISION_MODEL_REQUIRE_API_KEY === "false";
+  // Keyless only makes sense for a self-hosted endpoint: without a URL central would call the
+  // default provider with no key, every answer would fail, and the run would record nothing useful.
+  const selfHosted = keyless && !!process.env.DECISION_MODEL_URL?.trim();
+  if (process.env.DECISION_MODEL_ENABLED !== "true" || (!apiKey && !selfHosted)) {
+    throw new Error("E2E_DECISION_MODEL=1 needs DECISION_MODEL_ENABLED=true and DECISION_MODEL_API_KEY for central "
+      + "(or DECISION_MODEL_URL with DECISION_MODEL_REQUIRE_API_KEY=false for a keyless self-hosted endpoint)");
+  }
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^DECISION_MODEL_/i.test(key)));
+  return { enabled: true, env, apiKey };
+}
+
 export interface Central {
   port: number;
   url: string;
@@ -24,7 +46,7 @@ export async function startCentral(options: { java: string; jar: string; directo
   const env: NodeJS.ProcessEnv = {
     // Drop anything that could switch the profile, port, timezone or JVM flags behind the receipt's back.
     ...Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-      !/^(DEVLINK_|SPRING_|DB_|TASK_MESSAGE_|SERVER_|LOGGING_|MANAGEMENT_|CORS_|WS_)/i.test(key)
+      !/^(DEVLINK_|SPRING_|DB_|TASK_MESSAGE_|SERVER_|LOGGING_|MANAGEMENT_|CORS_|WS_|DECISION_MODEL_)/i.test(key)
       && !/^(JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS)$/i.test(key))),
     DB_URL: `jdbc:postgresql://127.0.0.1:${options.postgres.port}/${options.postgres.database}`,
     DB_USERNAME: options.postgres.username,
@@ -32,6 +54,7 @@ export async function startCentral(options: { java: string; jar: string; directo
     TASK_MESSAGE_CURSOR_SECRET: cursorSecret,
     CORS_ALLOWED_ORIGINS: options.frontendOrigin,
     WS_ALLOWED_ORIGINS: options.frontendOrigin,
+    ...decisionModelEnvironment().env,
   };
   const child: ChildProcess = spawnLogged(options.java, [
     "-Duser.timezone=UTC", "-Djava.net.preferIPv4Stack=true", "-jar", options.jar,

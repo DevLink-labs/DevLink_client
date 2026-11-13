@@ -14,8 +14,8 @@ import type { Secrets } from "../src/client/secrets.ts";
 
 // S15P31D108-191: 3rd MVP integration — part/roles at setup (SET-3-01) → find_agent (FIND-3-01/02)
 // → the user's pick → create_task (REQ-3-01) → accept → complete.
-// SET-3-03 registers the Git identity used for attribution. The Git-only and role+Git cases and
-// the upload-payload check still depend on commit/working-file collection (IDX-3-01..03).
+// SET-3-03 registers the Git identity used for attribution. The Git-only and role+Git cases run
+// in S18 (p1-s18-git-evidence.spec.ts); the upload payload is not inspected by any E2E scenario.
 //
 // E2E_REAL_HOSTS=1 additionally drives the real Codex (requester A) and Claude Code (receiver B) CLIs
 // with the user's own Host login and a DevLink-only MCP config, and verifies their tool events.
@@ -197,9 +197,9 @@ test("S16 3rd MVP: role tags → find_agent → pick → create_task → accept 
 
   await test.step("cases not runnable yet are recorded as unverified", async () => {
     const unverified = {
-      gitOnly: "IDX-3-01..03 collection not implemented (S15P31D108-185..187)",
-      roleAndGit: "IDX-3-01..03 collection not implemented (S15P31D108-185..187)",
-      uploadPayloadHasNoAbsolutePathDiffOrEmail: "no upload exists yet",
+      gitOnly: "not in this scenario; covered by S18 (p1-s18-git-evidence.spec.ts)",
+      roleAndGit: "not in this scenario; covered by S18 (p1-s18-git-evidence.spec.ts)",
+      uploadPayloadHasNoAbsolutePathDiffOrEmail: "no E2E scenario inspects the upload payload",
     };
     test.info().annotations.push({ type: "s16:cases", description: JSON.stringify(records) });
     test.info().annotations.push({ type: "s16:unverified", description: JSON.stringify(unverified) });

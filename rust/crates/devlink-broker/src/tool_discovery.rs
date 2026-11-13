@@ -79,9 +79,70 @@ pub fn parse_tool(value: &str) -> Result<ToolType, &'static str> {
         _ => Err("Choose codex or claude-code"),
     }
 }
+/// The Codex desktop app's MSIX family. The suffix is derived from the publisher's
+/// signing identity, so another publisher cannot register a package under it.
+pub const CODEX_PACKAGE_FAMILY: &str = "OpenAI.Codex_2p2nqsd0c76g0";
+const CODEX_PACKAGE_PREFIX: &str = "OpenAI.Codex_";
+const CODEX_PACKAGE_PUBLISHER: &str = "__2p2nqsd0c76g0";
+
+/// How a desktop app lays out the Host it ships, relative to [`BundledHost::root`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleLayout {
+    /// `<root>\<package>\claude-code\<version>\<build>\claude.exe` (Claude desktop app).
+    ClaudeDesktop,
+    /// `<root>\OpenAI.Codex_<version>_<arch>__2p2nqsd0c76g0\app\resources\codex.exe`
+    /// (Codex desktop app, an MSIX package under WindowsApps).
+    CodexPackage,
+}
+
+/// A Host shipped inside a desktop app instead of being put on PATH. Its directory
+/// carries the app version, so every app update moves the executable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundledHost {
+    pub tool_type: ToolType,
+    /// The directory holding the current copy of the native executable.
+    pub directory: PathBuf,
+    /// Canonical directory shared by every version of this bundle.
+    pub root: PathBuf,
+    pub layout: BundleLayout,
+}
+impl BundledHost {
+    /// Whether `path` is a canonical launcher of this bundle, of any version. Only
+    /// such a saved launcher may be replaced by the current copy.
+    pub fn contains(&self, path: &Path) -> bool {
+        let Ok(rest) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        let parts: Vec<_> = rest.iter().map(|part| part.to_str()).collect();
+        let is = |part: Option<&str>, expected: &str| {
+            part.is_some_and(|part| part.eq_ignore_ascii_case(expected))
+        };
+        match (self.layout, parts.as_slice()) {
+            (BundleLayout::ClaudeDesktop, [Some(_), tool, Some(_), Some(_), exe]) => {
+                is(*tool, "claude-code") && is(*exe, "claude.exe")
+            }
+            (BundleLayout::CodexPackage, [Some(package), app, resources, exe]) => {
+                is_codex_package_folder(package)
+                    && is(*app, "app")
+                    && is(*resources, "resources")
+                    && is(*exe, "codex.exe")
+            }
+            _ => false,
+        }
+    }
+}
+fn is_codex_package_folder(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.len() > CODEX_PACKAGE_PREFIX.len() + CODEX_PACKAGE_PUBLISHER.len()
+        && lower.starts_with(&CODEX_PACKAGE_PREFIX.to_ascii_lowercase())
+        && lower.ends_with(CODEX_PACKAGE_PUBLISHER)
+}
+
 #[derive(Clone)]
 pub struct ToolSearch {
     pub directories: Vec<PathBuf>,
+    /// Desktop-app installs, searched only after every directory.
+    pub bundled: Vec<BundledHost>,
     pub timeout: Duration,
 }
 impl Default for ToolSearch {
@@ -102,9 +163,15 @@ impl Default for ToolSearch {
             directories.push(PathBuf::from(appdata).join("npm"));
         }
         #[cfg(windows)]
-        directories.extend(desktop_bundled_claude_dir());
+        let bundled = desktop_bundled_claude()
+            .into_iter()
+            .chain(codex_app_bundle())
+            .collect();
+        #[cfg(not(windows))]
+        let bundled = Vec::new();
         Self {
             directories,
+            bundled,
             timeout: Duration::from_secs(5),
         }
     }
@@ -123,10 +190,23 @@ impl ToolSearch {
         vec![codex, claude]
     }
 
-    /// Recheck the validated launcher form without discovering a replacement.
+    /// Recheck the validated launcher form without discovering a replacement on
+    /// PATH. A launcher saved from a desktop app's bundle may move to that same
+    /// bundle's current copy, since an app update removes the old version folder.
     pub async fn recheck_saved(&self, saved: &SelectedTool) -> ToolDetection {
+        let bundled = self
+            .bundled
+            .iter()
+            .filter(|bundle| {
+                bundle.tool_type == saved.tool_type
+                    && saved.executable.args.is_empty()
+                    && bundle.contains(&saved.executable.command)
+            })
+            .cloned()
+            .collect();
         Self {
             directories: Vec::new(),
+            bundled,
             timeout: self.timeout,
         }
         .detect_one(saved.tool_type, Some(saved), None)
@@ -173,7 +253,17 @@ impl ToolSearch {
                 ToolType::Codex => "codex",
                 ToolType::ClaudeCode => "claude",
             };
-            for directory in self.directories.iter().filter(|p| p.is_absolute()) {
+            let bundled = self
+                .bundled
+                .iter()
+                .filter(|bundle| bundle.tool_type == tool)
+                .map(|bundle| &bundle.directory);
+            for directory in self
+                .directories
+                .iter()
+                .chain(bundled)
+                .filter(|p| p.is_absolute())
+            {
                 #[cfg(windows)]
                 let names = [format!("{name}.exe"), format!("{name}.cmd")];
                 #[cfg(not(windows))]
@@ -271,10 +361,13 @@ impl ToolSearch {
 /// `%LOCALAPPDATA%\Claude-Data\<package>\claude-code\<version>\<build>\claude.exe`.
 /// Only the newest version is returned, after every PATH and standard install dir.
 #[cfg(windows)]
-fn desktop_bundled_claude_dir() -> Option<PathBuf> {
-    let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Claude-Data");
+fn desktop_bundled_claude() -> Option<BundledHost> {
+    let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join("Claude-Data")
+        .canonicalize()
+        .ok()?;
     let mut newest: Option<(Vec<u64>, PathBuf)> = None;
-    for package in std::fs::read_dir(root).ok()?.flatten() {
+    for package in std::fs::read_dir(&root).ok()?.flatten() {
         let Ok(versions) = std::fs::read_dir(package.path().join("claude-code")) else {
             continue;
         };
@@ -298,7 +391,123 @@ fn desktop_bundled_claude_dir() -> Option<PathBuf> {
             }
         }
     }
-    newest.map(|(_, dir)| dir)
+    newest.map(|(_, directory)| BundledHost {
+        tool_type: ToolType::ClaudeCode,
+        directory,
+        root,
+        layout: BundleLayout::ClaudeDesktop,
+    })
+}
+
+/// The Codex desktop app ships the Codex CLI without a PATH entry or an execution
+/// alias: `<WindowsApps>\OpenAI.Codex_<version>_<arch>__2p2nqsd0c76g0\app\resources\codex.exe`.
+/// The install location is asked from the current user's package registration, so
+/// an app update that renames the folder is followed without scanning WindowsApps
+/// (which ordinary users cannot list).
+#[cfg(windows)]
+fn codex_app_bundle() -> Option<BundledHost> {
+    let (_, package) = appx::family_packages(CODEX_PACKAGE_FAMILY)
+        .into_iter()
+        .filter(|(_, path)| path.join(r"app\resources\codex.exe").is_file())
+        .max_by(|a, b| a.0.cmp(&b.0))?;
+    let package = package.canonicalize().ok()?;
+    let bundle = BundledHost {
+        tool_type: ToolType::Codex,
+        directory: package.join("app").join("resources"),
+        root: package.parent()?.to_path_buf(),
+        layout: BundleLayout::CodexPackage,
+    };
+    // Accept only the documented layout, so the same bundle can be followed later.
+    bundle
+        .contains(&bundle.directory.join("codex.exe"))
+        .then_some(bundle)
+}
+
+#[cfg(windows)]
+mod appx {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf, ptr::null_mut};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
+        Storage::Packaging::Appx::{GetPackagePathByFullName, GetPackagesByPackageFamily},
+    };
+
+    /// Packages of `family` registered for the current user, as (version, install path).
+    pub(super) fn family_packages(family: &str) -> Vec<(Vec<u64>, PathBuf)> {
+        let family: Vec<u16> = family.encode_utf16().chain([0]).collect();
+        let (mut count, mut length) = (0u32, 0u32);
+        // SAFETY: the documented size query passes null output buffers.
+        let status = unsafe {
+            GetPackagesByPackageFamily(
+                family.as_ptr(),
+                &mut count,
+                null_mut(),
+                &mut length,
+                null_mut(),
+            )
+        };
+        if status != ERROR_INSUFFICIENT_BUFFER || count == 0 || length == 0 {
+            return Vec::new();
+        }
+        let mut names = vec![null_mut::<u16>(); count as usize];
+        let mut buffer = vec![0u16; length as usize];
+        // SAFETY: both buffers have the sizes the first call reported.
+        let status = unsafe {
+            GetPackagesByPackageFamily(
+                family.as_ptr(),
+                &mut count,
+                names.as_mut_ptr(),
+                &mut length,
+                buffer.as_mut_ptr(),
+            )
+        };
+        // A package registered between the calls fails this lookup; it is not retried.
+        if status != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        names
+            .iter()
+            .take(count as usize)
+            .filter_map(|&name| {
+                // Each name points into `buffer`; read it by offset, never past its end.
+                let offset = (name as usize).checked_sub(buffer.as_ptr() as usize)? / 2;
+                let rest = buffer.get(offset..)?;
+                let full_name = &rest[..rest.iter().position(|&c| c == 0)? + 1];
+                let version =
+                    package_version(&String::from_utf16(&full_name[..full_name.len() - 1]).ok()?)?;
+                Some((version, package_path(full_name)?))
+            })
+            .collect()
+    }
+
+    /// `full_name` must be NUL-terminated.
+    fn package_path(full_name: &[u16]) -> Option<PathBuf> {
+        let mut length = 0u32;
+        // SAFETY: the documented size query passes a null path buffer.
+        let status =
+            unsafe { GetPackagePathByFullName(full_name.as_ptr(), &mut length, null_mut()) };
+        if status != ERROR_INSUFFICIENT_BUFFER || length == 0 {
+            return None;
+        }
+        let mut path = vec![0u16; length as usize];
+        // SAFETY: `path` has the length the first call reported.
+        let status =
+            unsafe { GetPackagePathByFullName(full_name.as_ptr(), &mut length, path.as_mut_ptr()) };
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+        Some(PathBuf::from(OsString::from_wide(&path[..end]))).filter(|p| p.is_absolute())
+    }
+
+    /// `Name_Version_Architecture_ResourceId_PublisherId` → numeric version parts.
+    fn package_version(full_name: &str) -> Option<Vec<u64>> {
+        full_name
+            .split('_')
+            .nth(1)?
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect()
+    }
 }
 
 fn package_entry(tool: ToolType) -> &'static str {
@@ -400,6 +609,16 @@ async fn probe(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Codex creates helper launchers and a lock file under CODEX_HOME every time it
+    // starts, `--version` included. With the caller's environment those land in the
+    // user's Codex home, even for someone who only has the Codex desktop app
+    // installed. The probe needs no Codex state, so it gets the scratch directory.
+    // Codex 0.167 refuses to create the helpers under the system temp directory and
+    // only warns on stderr; anything a Codex does write there goes away with the
+    // directory (best effort, like the working directory itself).
+    if tool == ToolType::Codex {
+        command.env("CODEX_HOME", cwd.path());
+    }
     #[cfg(windows)]
     command.creation_flags(0x08000000);
     let mut child = command

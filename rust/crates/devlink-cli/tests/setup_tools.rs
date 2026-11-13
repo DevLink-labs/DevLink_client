@@ -31,6 +31,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 fn search(directory: &Path) -> ToolSearch {
     ToolSearch {
         directories: vec![directory.to_path_buf()],
+        bundled: Vec::new(),
         timeout: PROBE_TIMEOUT,
     }
 }
@@ -110,6 +111,39 @@ async fn discovery_reports_missing_available_failure_and_invalid_output_without_
                 .contains("private-version-error-marker")
         );
     }
+}
+
+/// A real Codex creates `tmp/arg0-*/…` helper launchers and a lock under CODEX_HOME on
+/// every start, `--version` included, so a probe that inherits the caller's value leaves
+/// files in the user's Codex home (client #156).
+#[tokio::test]
+async fn codex_probe_gets_a_scratch_codex_home_and_claude_keeps_the_callers_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let codex = tool_fixture::host(root.path(), "codex", "codex-cli 0.166.0");
+    let claude = tool_fixture::host(root.path(), "claude", "2.1.317 (Claude Code)");
+    let reports = search(root.path()).detect(None, None).await;
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.status == DetectionStatus::Available)
+    );
+    let callers = std::env::var_os("CODEX_HOME")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let given = fs::read_to_string(codex.with_extension("home")).unwrap();
+    assert!(Path::new(&given).is_absolute(), "{given:?}");
+    assert_ne!(given, callers);
+    // It is the probe's own scratch working folder, which is gone once the probe ends.
+    assert_eq!(
+        fs::read_to_string(codex.with_extension("home-is-cwd")).unwrap(),
+        "yes"
+    );
+    assert!(!Path::new(&given).exists());
+    // Only the Codex probe is redirected.
+    assert_eq!(
+        fs::read_to_string(claude.with_extension("home")).unwrap(),
+        callers
+    );
 }
 
 #[tokio::test]
@@ -820,5 +854,196 @@ async fn cancellation_io_failure_removed_tool_and_changed_profile_are_not_retrie
                 .unwrap();
             assert_eq!(stored["selected"]["toolType"], "codex");
         }
+    }
+}
+
+#[cfg(windows)]
+mod desktop_app_bundles {
+    use super::*;
+    use devlink_broker::tool_discovery::{BundleLayout, BundledHost};
+    use std::path::PathBuf;
+
+    fn codex_package(root: &Path, folder: &str, output: &str) -> PathBuf {
+        tool_fixture::host(
+            &root.join(folder).join("app").join("resources"),
+            "codex",
+            output,
+        )
+    }
+    fn codex_bundle(root: &Path, folder: &str) -> BundledHost {
+        BundledHost {
+            tool_type: ToolType::Codex,
+            directory: root.join(folder).join("app").join("resources"),
+            root: root.canonicalize().unwrap(),
+            layout: BundleLayout::CodexPackage,
+        }
+    }
+    fn search_with(directories: Vec<PathBuf>, bundled: Vec<BundledHost>) -> ToolSearch {
+        ToolSearch {
+            directories,
+            bundled,
+            timeout: PROBE_TIMEOUT,
+        }
+    }
+
+    #[test]
+    fn only_the_documented_layout_of_the_same_bundle_is_recognised() {
+        let root = tempfile::tempdir().unwrap();
+        let apps = root.path().canonicalize().unwrap();
+        let codex = codex_bundle(root.path(), "OpenAI.Codex_26.1.0.0_x64__2p2nqsd0c76g0");
+        let exe = |folder: &str| apps.join(folder).join(r"app\resources\codex.exe");
+        assert!(codex.contains(&exe("OpenAI.Codex_26.2.0.0_x64__2p2nqsd0c76g0")));
+        assert!(codex.contains(&exe("openai.codex_26.2.0.0_arm64__2P2NQSD0C76G0")));
+        // Another publisher, another package, or another file is never followed.
+        assert!(!codex.contains(&exe("OpenAI.Codex_26.2.0.0_x64__0000000000000")));
+        assert!(!codex.contains(&exe(
+            "OpenAI.CodexPrimaryRuntime_26.2.0.0_x64__2p2nqsd0c76g0"
+        )));
+        assert!(
+            !codex.contains(&apps.join(r"OpenAI.Codex_26.2.0.0_x64__2p2nqsd0c76g0\app\Codex.exe"))
+        );
+        assert!(!codex.contains(&apps.join(r"OpenAI.Codex_2p2nqsd0c76g0\codex.exe")));
+        assert!(!codex.contains(Path::new(r"C:\tools\codex.exe")));
+
+        let claude = BundledHost {
+            tool_type: ToolType::ClaudeCode,
+            directory: apps.join(r"claude_x\claude-code\2.1.321\b2"),
+            root: apps.clone(),
+            layout: BundleLayout::ClaudeDesktop,
+        };
+        assert!(claude.contains(&apps.join(r"claude_x\claude-code\2.1.300\b1\claude.exe")));
+        assert!(!claude.contains(&apps.join(r"claude_x\other\2.1.300\b1\claude.exe")));
+        assert!(!claude.contains(&apps.join(r"claude_x\claude-code\2.1.300\claude.exe")));
+        assert!(!claude.contains(&apps.join(r"claude_x\claude-code\2.1.300\b1\codex.exe")));
+    }
+
+    #[tokio::test]
+    async fn codex_app_is_found_only_after_path_and_saved_copies_follow_an_app_update() {
+        let root = tempfile::tempdir().unwrap();
+        let apps = root.path().join("WindowsApps");
+        let old = "OpenAI.Codex_26.1.0.0_x64__2p2nqsd0c76g0";
+        let new = "OpenAI.Codex_26.2.0.0_x64__2p2nqsd0c76g0";
+        let old_exe = codex_package(&apps, old, "codex-cli 0.167.0-alpha.4.1");
+        let empty = root.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+
+        // Without anything on PATH, the app's bundled CLI is offered.
+        let reports = search_with(vec![empty.clone()], vec![codex_bundle(&apps, old)])
+            .detect(None, None)
+            .await;
+        let saved = reports[0].selected.clone().expect("bundled Codex");
+        assert_eq!(reports[0].status, DetectionStatus::Available);
+        assert_eq!(saved.executable.command, old_exe.canonicalize().unwrap());
+        assert_eq!(saved.version, "0.167.0-alpha.4.1");
+        assert!(saved.executable.args.is_empty());
+        assert_eq!(reports[1].status, DetectionStatus::Missing);
+
+        // A PATH installation keeps precedence over the app.
+        let path_bin = root.path().join("path-bin");
+        let path_exe = tool_fixture::host(&path_bin, "codex", "codex-cli 0.166.0");
+        let first = search_with(vec![path_bin], vec![codex_bundle(&apps, old)])
+            .detect_one(ToolType::Codex, None, None)
+            .await;
+        assert_eq!(
+            first.selected.unwrap().executable.command,
+            path_exe.canonicalize().unwrap()
+        );
+
+        // While the saved copy still works it is reused, even if a newer one exists.
+        codex_package(&apps, new, "codex-cli 0.168.0");
+        let still = search_with(Vec::new(), vec![codex_bundle(&apps, new)])
+            .recheck_saved(&saved)
+            .await;
+        assert_eq!(still.selected.as_ref(), Some(&saved));
+
+        // The app update removed the old version folder: follow the same bundle.
+        fs::remove_dir_all(apps.join(old)).unwrap();
+        let moved = search_with(Vec::new(), vec![codex_bundle(&apps, new)])
+            .recheck_saved(&saved)
+            .await;
+        assert_eq!(moved.status, DetectionStatus::Available);
+        let moved = moved.selected.unwrap();
+        assert_eq!(moved.version, "0.168.0");
+        assert_eq!(
+            moved.executable.command,
+            apps.join(new)
+                .join(r"app\resources\codex.exe")
+                .canonicalize()
+                .unwrap()
+        );
+
+        // Without a current bundle the saved Host is reported unavailable as before.
+        let gone = search_with(Vec::new(), Vec::new())
+            .recheck_saved(&saved)
+            .await;
+        assert!(gone.selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_saved_host_outside_the_bundle_is_never_replaced_by_the_app() {
+        let root = tempfile::tempdir().unwrap();
+        let apps = root.path().join("WindowsApps");
+        let folder = "OpenAI.Codex_26.2.0.0_x64__2p2nqsd0c76g0";
+        let bundled = codex_package(&apps, folder, "codex-cli 0.168.0");
+        let elsewhere = root.path().join("tools");
+        let exe = tool_fixture::host(&elsewhere, "codex", "codex-cli 0.166.0");
+        let saved = search(&elsewhere)
+            .detect_one(ToolType::Codex, None, None)
+            .await
+            .selected
+            .unwrap();
+        fs::remove_dir_all(&elsewhere).unwrap();
+        assert!(!exe.exists());
+        let report = search_with(Vec::new(), vec![codex_bundle(&apps, folder)])
+            .recheck_saved(&saved)
+            .await;
+        assert!(report.selected.is_none());
+        assert!(!bundled.with_extension("calls").exists());
+    }
+
+    #[tokio::test]
+    async fn a_moved_claude_desktop_copy_is_followed_like_the_codex_app() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("Claude-Data");
+        let tools = data.join(r"claude_test\claude-code");
+        tool_fixture::host(
+            &tools.join(r"2.1.317\b1"),
+            "claude",
+            "2.1.317 (Claude Code)",
+        );
+        let bundle = |version: &str| BundledHost {
+            tool_type: ToolType::ClaudeCode,
+            directory: tools.join(version),
+            root: data.canonicalize().unwrap(),
+            layout: BundleLayout::ClaudeDesktop,
+        };
+        let saved = search_with(Vec::new(), vec![bundle(r"2.1.317\b1")])
+            .detect_one(ToolType::ClaudeCode, None, None)
+            .await
+            .selected
+            .unwrap();
+        tool_fixture::host(
+            &tools.join(r"2.1.321\b2"),
+            "claude",
+            "2.1.321 (Claude Code)",
+        );
+        fs::remove_dir_all(tools.join("2.1.317")).unwrap();
+        let moved = search_with(Vec::new(), vec![bundle(r"2.1.321\b2")])
+            .recheck_saved(&saved)
+            .await
+            .selected
+            .unwrap();
+        assert_eq!(moved.version, "2.1.321");
+        // A Codex bundle never stands in for a saved Claude Code launcher.
+        let other = search_with(
+            Vec::new(),
+            vec![BundledHost {
+                tool_type: ToolType::Codex,
+                ..bundle(r"2.1.321\b2")
+            }],
+        )
+        .recheck_saved(&saved)
+        .await;
+        assert!(other.selected.is_none());
     }
 }

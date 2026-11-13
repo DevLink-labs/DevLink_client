@@ -119,6 +119,47 @@ impl TaskNotification {
     }
 }
 
+/// COMPLETED, FAILED and REJECTED end a task; no later status follows.
+pub(crate) fn is_final(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Rejected
+    )
+}
+
+/// eventId of a final status the broker rebuilt from central task details because the
+/// socket event never arrived (sent task recovery). It is derived from the scope, task,
+/// version and type, so a rebuilt event is recognized without changing the stored format.
+pub(crate) fn recovered_event_id(
+    origin: &str,
+    requester_agent_id: u64,
+    task_id: u64,
+    version: u64,
+    completed: bool,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"devlink-recovered-final-status\n");
+    digest.update(format!(
+        "{origin}\n{requester_agent_id}\n{task_id}\n{version}\n{completed}"
+    ));
+    let bytes: [u8; 16] = digest.finalize()[..16].try_into().expect("16 digest bytes");
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+fn is_recovered(origin: &str, requester_agent_id: u64, event: &TaskNotification) -> bool {
+    event.event_id()
+        == recovered_event_id(
+            origin,
+            requester_agent_id,
+            event.task_id(),
+            event.version(),
+            matches!(event, TaskNotification::TaskCompleted { .. }),
+        )
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
@@ -243,6 +284,22 @@ impl Notifications {
             );
             let origin = endpoint_url(&origin)?.to_string();
             let mut snapshot = read(&store.path)?;
+            // A final status rebuilt from central details and the socket event of the same
+            // task are one notification: whichever was stored first stays, the other is a
+            // duplicate. Their eventIds differ, and the rebuilt payload may differ slightly
+            // (for example timestamp precision), so only the task and finality are compared.
+            if is_final(event.status())
+                && snapshot.events.iter().any(|r| {
+                    r.origin == origin
+                        && r.requester_agent_id == requester_agent_id
+                        && r.event.task_id() == event.task_id()
+                        && is_final(r.event.status())
+                        && (is_recovered(&origin, requester_agent_id, &r.event)
+                            || is_recovered(&origin, requester_agent_id, &event))
+                })
+            {
+                return Ok(());
+            }
             if let Some(existing) = snapshot.events.iter().find(|r| {
                 r.origin == origin
                     && r.requester_agent_id == requester_agent_id
