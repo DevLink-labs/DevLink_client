@@ -456,11 +456,17 @@ enum Outcome {
 /// - 명시적 `"/ws/broker"` 경로는 그대로 허용합니다.
 /// - 그 외 임의 경로는 허용하지 않고 오류로 거부하여 다른 경로로 Bearer 토큰이 전송되지 않게 합니다.
 /// - URL 쿼리, 프래그먼트, 사용자 자격 증명은 허용하지 않습니다.
+/// - 평문 `ws://`는 루프백 호스트에서만 허용하고, 외부 서버는 `wss://`만 허용합니다.
 pub fn endpoint_url(server_url: &str) -> Result<String> {
     let mut url = url::Url::parse(server_url).map_err(|_| anyhow::anyhow!("Invalid serverUrl"))?;
     ensure!(
         matches!(url.scheme(), "ws" | "wss") && url.has_host(),
         "serverUrl must use ws:// or wss://"
+    );
+    // Agent 토큰이 실리는 모든 중앙 연결(WebSocket·REST)이 이 함수를 거치므로 여기서 평문 외부 연결을 막습니다.
+    ensure!(
+        url.scheme() == "wss" || crate::config::is_loopback_host(&url),
+        crate::config::REMOTE_REQUIRES_TLS
     );
     ensure!(
         url.username().is_empty() && url.password().is_none(),
@@ -1603,6 +1609,41 @@ mod tests {
         );
 
         assert!(build_upgrade_request("ws://127.0.0.1:8080/other", secret).is_err());
+    }
+
+    #[test]
+    fn agent_token_clients_refuse_cleartext_remote_servers() {
+        let secret = "test-agent-token-do-not-leak";
+        for remote in [
+            "ws://central.example.test",
+            "ws://central.example.test/ws/broker",
+            "ws://192.168.0.10:8080",
+            "ws://127.0.0.1.example.test",
+        ] {
+            let error = endpoint_url(remote).unwrap_err().to_string();
+            assert!(error.contains("wss://"), "{remote}: {error}");
+            assert!(build_upgrade_request(remote, secret).is_err(), "{remote}");
+            assert!(
+                crate::task_client::TaskClient::new(remote, secret).is_err(),
+                "{remote}"
+            );
+            assert!(
+                crate::agent_context::ContextClient::new(remote, secret).is_err(),
+                "{remote}"
+            );
+        }
+        for allowed in [
+            "wss://central.example.test",
+            "ws://localhost:8080",
+            "ws://127.0.0.1:8080",
+            "ws://[::1]:8080",
+        ] {
+            assert!(build_upgrade_request(allowed, secret).is_ok(), "{allowed}");
+            assert!(
+                crate::task_client::TaskClient::new(allowed, secret).is_ok(),
+                "{allowed}"
+            );
+        }
     }
 
     #[tokio::test]
