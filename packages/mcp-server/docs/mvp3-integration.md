@@ -91,5 +91,6 @@ $env:E2E_REAL_HOSTS = '1'; pwsh e2e/scripts/e2e-local.ps1 -SkipBuild -Grep "S16"
   - IDX-3-01~03 수집과 등록한 Git 신원의 작성자 대조
   - Git 근거만 / 역할+Git 두 경우
   - 업로드 페이로드 검사
+- 2026-11-12 갱신(S15P31D108-242): E2E 고정 커밋을 `d945f8b`에서 server develop `65db99a`(작업 파일 revision 계약, DevLink_server#96 포함)로 올리고, Git 근거만·역할+Git 두 경우를 [E2E S18](../../../e2e/specs/p1-s18-git-evidence.spec.ts)로 확인했다. 등록한 Git 이메일로 만든 커밋이 본인 커밋으로 집계되는 것도 S18의 빈도·최근성 점수로 확인했다. 업로드 페이로드 검사는 E2E에 없고 브로커 단위 테스트가 다룬다.
 - 고정 중앙 `d945f8b`의 S15에서 연결된 후보의 `ONLINE`과 브로커 중지 뒤의 `OFFLINE`을 확인했다.
 - 이 기록만으로 -191 수용 기준을 완료로 보지 않는다.

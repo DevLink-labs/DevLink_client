@@ -4,7 +4,7 @@ import { cp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FullConfig } from "@playwright/test";
-import { startCentral, type Central } from "./central.ts";
+import { decisionModelEnvironment, startCentral, type Central } from "./central.ts";
 import { startPostgres, type Postgres } from "./postgres.ts";
 import { startStaticProxy, type StaticProxy } from "./static-proxy.ts";
 import { makePrivateDirectory } from "./util.ts";
@@ -67,6 +67,9 @@ export default async function globalSetup(_config: FullConfig) {
   const serverCommit = headOf(serverDir);
   const frontendCommit = headOf(frontendDir);
   const latest = process.env.E2E_STACK_MODE === "latest";
+  // Throws before anything starts when the opt-in flag is set without the settings central needs
+  // (enabled, plus a key unless it targets a keyless self-hosted endpoint).
+  const decisionModel = decisionModelEnvironment();
   if (!latest && (serverCommit !== lock.server.commit || frontendCommit !== lock.frontend.commit)) {
     throw new Error(`Checkouts differ from e2e/stack.lock.json (server ${serverCommit}, frontend ${frontendCommit}). Set E2E_STACK_MODE=latest to run unpinned.`);
   }
@@ -126,7 +129,7 @@ export default async function globalSetup(_config: FullConfig) {
       runId, startedAt: new Date().toISOString(), mode: latest ? "latest" : "locked",
       serverCommit, frontendCommit, clientCommit: headOf(repoRoot), clientDirty, ...clientArtifacts,
       postgres: { port: postgres.port, version: 16 },
-      central: { url: central.url, pid: central.pid, java, profile: "default", timezone: "UTC" },
+      central: { url: central.url, pid: central.pid, java, profile: "default", timezone: "UTC", decisionModel: decisionModel.enabled },
       frontend: { origin: proxy.origin, dist: basename(dist) },
     };
     await writeFile(join(runRoot, "stack-receipt.json"), JSON.stringify(receipt, null, 2));
@@ -141,6 +144,8 @@ export default async function globalSetup(_config: FullConfig) {
     // Stack secrets stay in this runner process, out of Chromium and CLI environments.
     stackSecrets.add(postgres.password);
     stackSecrets.add(central.cursorSecret);
+    // The model API key goes to central only; the run fails if it shows up in any kept file.
+    if (decisionModel.apiKey) stackSecrets.add(decisionModel.apiKey);
   } catch (error) {
     try {
       await teardown();
