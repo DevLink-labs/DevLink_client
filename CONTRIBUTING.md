@@ -1,37 +1,41 @@
-# 기여 가이드
+# Contributing Guide
 
-DevLink의 버그 수정, 문서·번역, 테스트 개선과 기능 제안을 환영합니다. 이 가이드는 모든 DevLink 저장소에 공통으로 적용됩니다.
+**English** · [한국어](CONTRIBUTING.ko.md)
 
-## 시작하기
+[Project overview](README.md) · [Security policy](SECURITY.md)
 
-- 기여할 저장소의 기존 이슈와 열린 PR에서 중복 작업을 확인해 주세요.
-- 버그 제보에는 사용 버전·운영체제, 재현 순서, 기대한 동작과 실제 동작을 포함합니다.
-- 새 기능이나 큰 변경은 구현 전에 이슈에서 문제와 변경 범위를 논의해 주세요.
-- 외부 기여자는 해당 저장소를 Fork하고, 작업 브랜치에서 수정한 뒤 원본 저장소로 PR을 보냅니다.
+Contributions to DevLink are welcome, including bug fixes, documentation and translations, test improvements, and feature proposals. This guide applies to all DevLink repositories.
 
-## 브랜치 규칙
+## Getting started
 
-`master`는 운영 브랜치, `develop`은 개발 통합 브랜치입니다. 두 브랜치에는 직접 푸시하지 않고 PR로 반영합니다.
+- Check existing Issues and open PRs in the repository you want to contribute to for duplicate work.
+- Include the version and operating system, reproduction steps, expected behavior, and actual behavior in bug reports.
+- For new features or major changes, discuss the problem and scope in an Issue before implementing them.
+- External contributors should fork the repository, make changes on a working branch, and submit a PR to the upstream repository.
 
-| 작업 브랜치 | 분기 기준 | PR 대상 |
+## Branch conventions
+
+`master` is the production branch, and `develop` is the development integration branch. Do not push directly to either branch; submit changes through PRs.
+
+| Working branch | Branch from | PR target |
 | --- | --- | --- |
 | `feature/{scope}/{description}` | `develop` | `develop` |
 | `release/{version}` | `develop` | `master`, `develop` |
 | `hotfix/{scope}/{description}` | `master` | `master`, `develop` |
 
-`scope`는 작업 영역에 맞게 선택합니다.
+Choose a `scope` that matches the work area: `front`, `back`, `ai`, `data`, `bigdata`, `spark`, `kafka`, `infra`, or `common`.
 
-| Scope | 대상 |
+| Scope | Area |
 | --- | --- |
 | `front` | Frontend |
 | `back` | Backend |
 | `ai` | AI / ML |
-| `data` | 데이터 수집 / 전처리 / ETL |
-| `bigdata` | 대용량 데이터 처리 |
-| `spark` | Spark / 분산 처리 |
-| `kafka` | Kafka / 분산 처리 |
-| `infra` | Docker / 서버 / 배포 환경 |
-| `common` | 공통 작업 |
+| `data` | Data collection / preprocessing / ETL |
+| `bigdata` | Large-scale data processing |
+| `spark` | Spark / distributed processing |
+| `kafka` | Kafka / distributed processing |
+| `infra` | Docker / servers / deployment infrastructure |
+| `common` | Shared work |
 
 ```text
 feature/front/login
@@ -40,40 +44,40 @@ release/1.0.0
 hotfix/back/auth-error
 ```
 
-## 커밋과 PR 제목
+## Commit and PR titles
 
-`type(scope): message` 형식을 사용합니다. `scope`는 브랜치의 작업 영역과 동일하게 지정합니다.
+Use the `type(scope): message` format. Use the same work area for `scope` as in the branch name.
 
-`type`은 변경 목적에 따라 선택합니다.
+Choose a `type` that matches the purpose of the change: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `style`, `chore`, or `data`.
 
-| Type | 설명 |
+| Type | Meaning |
 | --- | --- |
-| `feat` | 기능 추가 |
-| `fix` | 버그 수정 |
-| `refactor` | 코드 구조 개선 |
-| `perf` | 성능 개선 |
-| `docs` | 문서 수정 |
-| `test` | 테스트 추가 / 수정 |
-| `style` | 동작에 영향을 주지 않는 코드 수정 |
-| `chore` | 설정 / 패키지 / 빌드 / 기타 작업 |
-| `data` | 데이터셋 / 전처리 변경 |
+| `feat` | Add a feature |
+| `fix` | Fix a bug |
+| `refactor` | Improve code structure |
+| `perf` | Improve performance |
+| `docs` | Update documentation |
+| `test` | Add or update tests |
+| `style` | Change code without affecting behavior |
+| `chore` | Configuration, packages, builds, and other maintenance |
+| `data` | Dataset or preprocessing changes |
 
 ```text
-feat(front): 로그인 화면 추가
-fix(back): 인증 오류 수정
-docs(common): 설치 안내 보완
+feat(front): add login screen
+fix(back): fix authentication error
+docs(common): improve installation instructions
 ```
 
-## PR 제출과 리뷰
+## Submitting PRs and reviews
 
-한 PR에는 하나의 목적을 담고, 다음 내용을 포함해 주세요.
+Keep each PR focused on one purpose and include:
 
-- 해결한 문제와 변경 후 동작, 관련 이슈
-- 실행한 검사·테스트 명령과 결과. 실행하지 못했다면 그 이유
-- API·설정·인터페이스 변경에 따른 관련 예제·문서 수정
+- The problem addressed, the resulting behavior, and related Issues
+- The check and test commands you ran and their results, or why you could not run them
+- Updates to relevant examples and documentation for API, configuration, or interface changes
 
-문서만 수정했다면 내용과 링크를 확인하면 됩니다. 버그 수정에는 가능하면 재현 테스트를 추가하고, 한국어·영어 문서가 함께 있는 경우 관련 내용을 동일하게 반영해 주세요.
+For documentation-only changes, checking the content and links is sufficient. When fixing a bug, add a regression test where possible. If both Korean and English documentation exist, keep the relevant content consistent in both languages.
 
-비밀번호·토큰·개인 설정과 불필요한 산출물은 포함하지 않습니다. 보안 취약점의 상세 재현 정보는 공개 이슈나 PR에 올리지 마세요.
+Do not include passwords, tokens, personal configuration, or unnecessary generated files. Do not post detailed reproduction information for security vulnerabilities in public Issues or PRs.
 
-리뷰에서 수정 요청을 받으면 같은 브랜치에 반영하고 변경 내용을 답변합니다. 관리자가 수정 내용과 검증 결과를 검토한 뒤 병합 여부를 결정합니다.
+When reviewers request changes, address them on the same branch and reply with an explanation of the updates. Maintainers will review the changes and verification results before deciding whether to merge.
