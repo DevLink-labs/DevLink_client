@@ -211,10 +211,7 @@ pub fn origin(config: &Config) -> Result<Url> {
     url.set_scheme(scheme)
         .map_err(|_| config::invalid("serverUrl", "Invalid central origin"))?;
     url.set_path("/");
-    let local = url
-        .host_str()
-        .is_some_and(|h| matches!(h, "localhost" | "127.0.0.1" | "[::1]" | "::1"));
-    if url.scheme() != "https" && !local {
+    if url.scheme() != "https" && !config::is_loopback_host(&url) {
         return Err(config::invalid(
             "serverUrl",
             "User authentication requires HTTPS (HTTP is allowed only on loopback)",
