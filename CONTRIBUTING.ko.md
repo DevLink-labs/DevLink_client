@@ -1,0 +1,83 @@
+# 기여 가이드
+
+[English](CONTRIBUTING.md) · **한국어**
+
+[프로젝트 소개](README.ko.md) · [보안 정책](SECURITY.ko.md)
+
+DevLink의 버그 수정, 문서·번역, 테스트 개선과 기능 제안을 환영합니다. 이 가이드는 모든 DevLink 저장소에 공통으로 적용됩니다.
+
+## 시작하기
+
+- 기여할 저장소의 기존 이슈와 열린 PR에서 중복 작업을 확인해 주세요.
+- 버그 제보에는 사용 버전·운영체제, 재현 순서, 기대한 동작과 실제 동작을 포함합니다.
+- 새 기능이나 큰 변경은 구현 전에 이슈에서 문제와 변경 범위를 논의해 주세요.
+- 외부 기여자는 해당 저장소를 Fork하고, 작업 브랜치에서 수정한 뒤 원본 저장소로 PR을 보냅니다.
+
+## 브랜치 규칙
+
+`master`는 운영 브랜치, `develop`은 개발 통합 브랜치입니다. 두 브랜치에는 직접 푸시하지 않고 PR로 반영합니다.
+
+| 작업 브랜치 | 분기 기준 | PR 대상 |
+| --- | --- | --- |
+| `feature/{scope}/{description}` | `develop` | `develop` |
+| `release/{version}` | `develop` | `master`, `develop` |
+| `hotfix/{scope}/{description}` | `master` | `master`, `develop` |
+
+`scope`는 작업 영역에 맞게 `front`, `back`, `ai`, `data`, `bigdata`, `spark`, `kafka`, `infra`, `common` 중에서 선택합니다.
+
+| Scope | 대상 |
+| --- | --- |
+| `front` | Frontend |
+| `back` | Backend |
+| `ai` | AI / ML |
+| `data` | 데이터 수집 / 전처리 / ETL |
+| `bigdata` | 대용량 데이터 처리 |
+| `spark` | Spark / 분산 처리 |
+| `kafka` | Kafka / 분산 처리 |
+| `infra` | Docker / 서버 / 배포 환경 |
+| `common` | 공통 작업 |
+
+```text
+feature/front/login
+feature/back/auth-api
+release/1.0.0
+hotfix/back/auth-error
+```
+
+## 커밋과 PR 제목
+
+`type(scope): message` 형식을 사용합니다. `scope`는 브랜치의 작업 영역과 동일하게 지정합니다.
+
+`type`은 변경 목적에 따라 `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `style`, `chore`, `data`를 사용합니다.
+
+| Type | 설명 |
+| --- | --- |
+| `feat` | 기능 추가 |
+| `fix` | 버그 수정 |
+| `refactor` | 코드 구조 개선 |
+| `perf` | 성능 개선 |
+| `docs` | 문서 수정 |
+| `test` | 테스트 추가 / 수정 |
+| `style` | 동작에 영향을 주지 않는 코드 수정 |
+| `chore` | 설정 / 패키지 / 빌드 / 기타 작업 |
+| `data` | 데이터셋 / 전처리 변경 |
+
+```text
+feat(front): 로그인 화면 추가
+fix(back): 인증 오류 수정
+docs(common): 설치 안내 보완
+```
+
+## PR 제출과 리뷰
+
+한 PR에는 하나의 목적을 담고, 다음 내용을 포함해 주세요.
+
+- 해결한 문제와 변경 후 동작, 관련 이슈
+- 실행한 검사·테스트 명령과 결과. 실행하지 못했다면 그 이유
+- API·설정·인터페이스 변경에 따른 관련 예제·문서 수정
+
+문서만 수정했다면 내용과 링크를 확인하면 됩니다. 버그 수정에는 가능하면 재현 테스트를 추가하고, 한국어·영어 문서가 함께 있는 경우 관련 내용을 동일하게 반영해 주세요.
+
+비밀번호·토큰·개인 설정과 불필요한 산출물은 포함하지 않습니다. 보안 취약점의 상세 재현 정보는 공개 이슈나 PR에 올리지 마세요.
+
+리뷰에서 수정 요청을 받으면 같은 브랜치에 반영하고 변경 내용을 답변합니다. 관리자가 수정 내용과 검증 결과를 검토한 뒤 병합 여부를 결정합니다.
