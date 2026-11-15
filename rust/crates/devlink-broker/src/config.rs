@@ -16,7 +16,7 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
-    /// 중앙 웹소켓 서버 주소 (ws:// 또는 wss://)
+    /// 중앙 웹소켓 서버 주소 (wss://, ws://는 루프백만)
     pub server_url: String,
     /// 에이전트 식별자 (예: codex, claude 등)
     pub agent: String,
@@ -91,6 +91,20 @@ impl std::fmt::Display for ConfigValidationError {
 }
 impl std::error::Error for ConfigValidationError {}
 
+pub(crate) const REMOTE_REQUIRES_TLS: &str =
+    "serverUrl must use wss:// (HTTPS) for remote servers; ws:// is allowed only on loopback";
+
+/// 평문(ws/http) 연결을 허용해도 되는 이 PC 안(루프백) 호스트인지 확인합니다.
+/// 외부 서버로는 Agent 토큰과 사용자 세션이 평문으로 나가지 않도록 wss/https만 씁니다.
+pub(crate) fn is_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 pub(crate) fn invalid(field: &'static str, message: &'static str) -> anyhow::Error {
     ConfigValidationError { field, message }.into()
 }
@@ -117,7 +131,7 @@ impl Default for Config {
 
 impl Config {
     /// 설정값들의 유효성을 엄격하게 검증합니다.
-    /// - `server_url`: ws/wss 스킴 필수, 경로는 루트(`""` 또는 `"/"`) 또는 `"/ws/broker"`만 허용, 쿼리/프래그먼트/사용자정보 금지
+    /// - `server_url`: wss 스킴 필수(ws는 루프백 호스트만), 경로는 루트(`""` 또는 `"/"`) 또는 `"/ws/broker"`만 허용, 쿼리/프래그먼트/사용자정보 금지
     /// - `agent`: 1~64자의 영숫자 및 `-`, `_` 허용
     /// - `reconnect_*`: 범위 및 max >= initial 조건 확인
     /// - `auth_timeout_ms`: 100ms ~ 60000ms 범위 확인
@@ -147,6 +161,9 @@ impl Config {
                 "serverUrl",
                 "serverUrl requires ws/wss and a host; credentials, query and fragment are forbidden",
             ));
+        }
+        if url.scheme() == "ws" && !is_loopback_host(&url) {
+            return Err(invalid("serverUrl", REMOTE_REQUIRES_TLS));
         }
         if !matches!(url.path(), "" | "/" | "/ws/broker") {
             return Err(invalid(
@@ -471,6 +488,38 @@ mod tests {
                 error.downcast_ref::<ConfigValidationError>().is_some(),
                 "{error}"
             );
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn server_url_allows_cleartext_ws_only_on_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        atomic_json(&path, &Config::default()).unwrap();
+        for allowed in [
+            "wss://api.devlink.ai.kr",
+            "wss://central.example.test/ws/broker",
+            "ws://localhost:8080",
+            "ws://LOCALHOST:8080/",
+            "ws://127.0.0.1:8080/ws/broker",
+            "ws://[::1]:8080",
+        ] {
+            set(&path, "serverUrl", allowed).unwrap();
+            assert_eq!(Config::load(&path).unwrap().server_url, allowed);
+        }
+        let saved = std::fs::read(&path).unwrap();
+        for remote in [
+            "ws://central.example.test",
+            "ws://192.168.0.10:8080",
+            "ws://desktop-ms327cl.mshome.net:8080/",
+            "ws://127.0.0.1.example.test",
+            "ws://localhost.example.test",
+        ] {
+            let error = set(&path, "serverUrl", remote).unwrap_err();
+            let error = error.downcast_ref::<ConfigValidationError>().unwrap();
+            assert_eq!(error.field, "serverUrl", "{remote}");
+            assert!(error.message.contains("wss://"), "{remote}");
             assert_eq!(std::fs::read(&path).unwrap(), saved);
         }
     }
